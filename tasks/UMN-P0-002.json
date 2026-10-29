@@ -1,0 +1,20 @@
+{
+  "id":"UMN-P0-002",
+  "phase":"P0",
+  "risk":"T1",
+  "priority":"P0",
+  "title":"Implement Go health endpoints",
+  "objective":"Buat endpoint liveness/readiness terpisah untuk layanan business-api, dengan tes untuk layanan sehat dan DB tidak tersedia.",
+  "dependencies":["P0-01"],
+  "read_first":["AGENTS.md","docs/01-architecture.md","docs/09-advanced-anti-hallucination.md","docs/13-detailed-phase-execution.md"],
+  "allowed_files":["services/business-api/internal/health/**","services/business-api/cmd/business-api/**"],
+  "forbidden_changes":["SQL migrations","public API contracts other than health","admin identity and tenant RLS"],
+  "implementation_steps":["Inspect current Go module and routing style; do not assume router library","Add tests for GET /health/live and GET /health/ready including unavailable DB","Implement smallest handlers and structured response","Run focused tests and report actual results"],
+  "acceptance":["Liveness answers without database dependency","Readiness returns unhealthy if DB is unavailable","No secret values are returned in health payload","Existing API routes remain unchanged"],
+  "test_commands":["go test ./services/business-api/...","go vet ./services/business-api/..."],
+  "evidence_required":["Diff file paths","Exit codes and command outputs","Statement if Postgres integration was not tested"],
+  "escalate_when":["Go module/router still undecided","Task requires changing cross-service config"],
+  "review_required":true,
+  "status":"PLANNED",
+  "notes":"Illustrative ticket: directory and commands planned, not currently runnable in blueprint-only package."
+}

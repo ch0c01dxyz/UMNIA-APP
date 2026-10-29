@@ -1,0 +1,20 @@
+{
+  "id":"UMN-P7-003",
+  "phase":"P7",
+  "risk":"T1",
+  "priority":"P2",
+  "title":"Spa therapist monitor display controls",
+  "objective":"Tampilkan status terapis pada monitor dan izinkan pengguna berhak memilih kode atau nama lengkap sesuai kebijakan lokasi layar.",
+  "dependencies":["P7-01"],
+  "read_first":["DESIGN.md","docs/06-ux-api.md","docs/12-design-system-ux.md","docs/09-advanced-anti-hallucination.md"],
+  "allowed_files":["apps/web/pages/spa/monitor/**","packages/ui/components/therapist-status/**"],
+  "forbidden_changes":["HR/payroll schema","auth grants","SPA public APIs"],
+  "implementation_steps":["Inspect actual UI components and permission API","Implement public view defaulting to therapist code and internal authorized name option","Handle empty/busy/break/unknown and responsive views","Review with Impeccable or OpenDesign if installed and collect screenshots"],
+  "acceptance":["Public display never shows full name by default","Unauthorized role cannot reveal name by URL or client state","Labels readable without interpreting color","360/768/1440 renders reviewed","Reduced motion and keyboard interactions supported"],
+  "test_commands":["npm run lint","npm run typecheck","npm run test"],
+  "evidence_required":["Mobile/tablet/desktop screenshots","Role privacy test logs","Actual design tool usage status"],
+  "escalate_when":["Permission API missing","Design tokens not frozen","Visual testing tool unavailable"],
+  "review_required":true,
+  "status":"PLANNED",
+  "notes":"Illustrative design task; commands become enforceable after scaffold."
+}

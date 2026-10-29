@@ -1,0 +1,20 @@
+{
+  "id":"UMN-P2-004",
+  "phase":"P2",
+  "risk":"T2",
+  "priority":"P1",
+  "title":"Enforce one edition per family",
+  "objective":"Tolak aktivasi dua edisi Finance secara bersamaan pada workspace yang sama tanpa mengubah atau menghapus data historis.",
+  "dependencies":["P2-01","P2-02"],
+  "read_first":["AGENTS.md","docs/03-module-engine.md","docs/09-advanced-anti-hallucination.md"],
+  "allowed_files":["services/business-api/internal/platform/modules/edition_guard.go","services/business-api/internal/platform/modules/edition_guard_test.go"],
+  "forbidden_changes":["SQL migrations","auth policies","module manifest contract"],
+  "implementation_steps":["Read module registry and current interfaces","Write failing conflict test and idempotent duplicate activation test","Implement edition family exclusivity with typed conflict result","Run targeted tests plus module integration smoke"],
+  "acceptance":["finance.basic and finance.advanced cannot both be active","Conflict includes current and desired edition and suggested migration","Conflict must cause zero mutations of current data","Unrelated module families remain unaffected"],
+  "test_commands":["go test ./services/business-api/internal/platform/modules/...","go vet ./services/business-api/internal/platform/modules/..."],
+  "evidence_required":["Test output","Diff paths","Data-unmodified assertion"],
+  "escalate_when":["API contracts conflict","Schema migration required","Tests unavailable"],
+  "review_required":true,
+  "status":"PLANNED",
+  "notes":"Illustrative ticket only; file paths finalized after P0 structure freeze."
+}

@@ -1,0 +1,55 @@
+{
+  "schema_version": "0.4",
+  "id": "spa.standard",
+  "version": "0.1.0",
+  "family": "spa",
+  "edition": "standard",
+  "exclusive_group": "spa-edition",
+  "display": {
+    "name_id": "Manajemen Spa & Pijat",
+    "description_id": "Reservasi layanan, ruang dan jadwal terapis"
+  },
+  "provides": [
+    "spa.therapist.display_policy",
+    "spa.packages.manage",
+    "spa.packages.versioning",
+    "spa.appointments.manage"
+  ],
+  "requires": [
+    {
+      "capability": "booking.resource.hold"
+    },
+    {
+      "capability": "customer.profile.read"
+    },
+    {
+      "capability": "inventory.stock.read",
+      "optional": true
+    }
+  ],
+  "conflicts": [],
+  "data_ownership": {
+    "schemas": [
+      "spa"
+    ],
+    "downgrade_strategy": "retain_read_only"
+  },
+  "simulation_dataset": {
+    "required": true,
+    "schema_id": "spa-simulation-v1",
+    "validation_profile": "multi-resource-scheduling",
+    "refresh_policy": "on_module_change_and_scheduled"
+  },
+  "security": {
+    "risk_class": "medium",
+    "needs_approval_for_mutations": false
+  },
+  "ui": {
+    "primary_nav": "Spa & Pijat",
+    "display_policy": "therapist: staff_code default on public screens"
+  },
+  "events": [
+    "spa.appointment.created",
+    "spa.package.versioned"
+  ]
+}

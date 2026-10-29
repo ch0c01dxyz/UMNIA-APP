@@ -1,0 +1,20 @@
+{
+  "id":"UMN-P6-003",
+  "phase":"P6",
+  "risk":"T3",
+  "priority":"P1",
+  "title":"Direct BYOK provider adapter",
+  "objective":"Bangun adapter BYOK terisolasi yang memanggil provider pilihan workspace secara langsung, tanpa menggunakan akanesia-router.",
+  "dependencies":["P6-01","P1-06"],
+  "read_first":["AGENTS.md","docs/01-architecture.md","docs/05-ai-simulation.md","docs/09-advanced-anti-hallucination.md"],
+  "allowed_files":["services/business-api/internal/ai/byok/**","services/business-api/internal/ai/providers/**"],
+  "forbidden_changes":["akanesia-router configuration","public DNS/network infrastructure","tenant data policies","secret storage schema"],
+  "implementation_steps":["Verify provider transport and official SDK signatures","Add tests proving direct routing and request-scoped authorization","Add SSRF defenses, secret redaction, rate/cost budget and timeout","Wire adapter output into common response validator; produce audit proof"],
+  "acceptance":["BYOK never contacts akanesia-router","Loopback/private IP or internal DNS rebinding destinations denied","No API keys in logs or model response","Cross-tenant model configuration inaccessible","Network failure cannot cause unauthorized fallback"],
+  "test_commands":["go test ./services/business-api/internal/ai/...","go vet ./services/business-api/internal/ai/..."],
+  "evidence_required":["Mock endpoint network trace","Negative SSRF test results","Redacted log sample","Independent T3 review report"],
+  "escalate_when":["Provider endpoint allowlist is undefined","Secret vault integration unavailable","Any egress isolation test fails"],
+  "review_required":true,
+  "status":"PLANNED",
+  "notes":"High-risk interface first. Do not use real user keys or production data in tests."
+}

@@ -1,0 +1,42 @@
+{
+  "schema_version": "0.4",
+  "id": "finance.basic",
+  "version": "0.1.0",
+  "family": "finance",
+  "edition": "basic",
+  "exclusive_group": "finance-edition",
+  "display": {
+    "name_id": "Keuangan Sederhana",
+    "description_id": "Catat uang masuk/keluar dan ringkasan operasional"
+  },
+  "provides": [
+    "finance.summary.read",
+    "finance.cashflow.read"
+  ],
+  "requires": [],
+  "conflicts": [
+    "finance.advanced"
+  ],
+  "data_ownership": {
+    "schemas": [
+      "finance"
+    ],
+    "downgrade_strategy": "retain_shared"
+  },
+  "simulation_dataset": {
+    "required": true,
+    "schema_id": "finance-basic-simulation-v1",
+    "validation_profile": "cashflow-basic-rules",
+    "refresh_policy": "on_module_change_and_scheduled"
+  },
+  "security": {
+    "risk_class": "high",
+    "needs_approval_for_mutations": true
+  },
+  "ui": {
+    "primary_nav": "Keuangan"
+  },
+  "events": [
+    "finance.summary.generated"
+  ]
+}

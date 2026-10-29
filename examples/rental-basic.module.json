@@ -1,0 +1,51 @@
+{
+  "schema_version": "0.4",
+  "id": "rental.basic",
+  "version": "0.1.0",
+  "family": "rental",
+  "edition": "basic",
+  "exclusive_group": "rental-edition",
+  "display": {
+    "name_id": "Persewaan Sederhana",
+    "description_id": "Kelola barang sewa, status dan pengembalian"
+  },
+  "provides": [
+    "rental.contract.read",
+    "rental.contract.write",
+    "rental.return.manage"
+  ],
+  "requires": [
+    {
+      "capability": "catalog.item.read"
+    },
+    {
+      "capability": "customer.profile.read"
+    }
+  ],
+  "conflicts": [
+    "rental.advanced"
+  ],
+  "data_ownership": {
+    "schemas": [
+      "rental"
+    ],
+    "downgrade_strategy": "retain_read_only"
+  },
+  "simulation_dataset": {
+    "required": true,
+    "schema_id": "rental-simulation-v1",
+    "validation_profile": "rental-core-rules",
+    "refresh_policy": "on_module_change_and_scheduled"
+  },
+  "security": {
+    "risk_class": "medium",
+    "needs_approval_for_mutations": false
+  },
+  "ui": {
+    "primary_nav": "Persewaan"
+  },
+  "events": [
+    "rental.contract.created",
+    "rental.contract.returned"
+  ]
+}

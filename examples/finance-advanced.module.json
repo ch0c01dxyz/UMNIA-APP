@@ -1,0 +1,47 @@
+{
+  "schema_version": "0.4",
+  "id": "finance.advanced",
+  "version": "0.1.0",
+  "family": "finance",
+  "edition": "advanced",
+  "exclusive_group": "finance-edition",
+  "display": {
+    "name_id": "Keuangan Lengkap",
+    "description_id": "Buku besar, neraca, jurnal dan rekonsiliasi"
+  },
+  "provides": [
+    "finance.summary.read",
+    "finance.cashflow.read",
+    "finance.journal.post",
+    "finance.discrepancy.view",
+    "finance.discrepancy.export"
+  ],
+  "requires": [],
+  "conflicts": [
+    "finance.basic"
+  ],
+  "data_ownership": {
+    "schemas": [
+      "finance",
+      "ledger"
+    ],
+    "downgrade_strategy": "retain_read_only"
+  },
+  "simulation_dataset": {
+    "required": true,
+    "schema_id": "finance-advanced-simulation-v1",
+    "validation_profile": "double-entry-balance",
+    "refresh_policy": "on_module_change_and_scheduled"
+  },
+  "security": {
+    "risk_class": "high",
+    "needs_approval_for_mutations": true
+  },
+  "ui": {
+    "primary_nav": "Keuangan Lengkap"
+  },
+  "events": [
+    "finance.journal.posted",
+    "finance.discrepancy.recorded"
+  ]
+}

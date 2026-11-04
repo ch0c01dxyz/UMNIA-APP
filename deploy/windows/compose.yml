@@ -1,0 +1,31 @@
+# Dev Windows (Docker Compose) untuk F1-01 saja.
+# Belum ada PostgreSQL/RustFS — itu F1-02. Port hanya localhost.
+# UNVERIFIED di host Windows: file ini belum pernah dijalankan di Windows,
+# hanya ditulis mengikuti docs/11-deployment-matrix.md.
+services:
+  business-api:
+    build:
+      context: ../../services/business-api
+      dockerfile: Dockerfile
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      APP_ENV: development
+      HTTP_LISTEN_ADDR: ":8080"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  web:
+    build:
+      context: ../../apps/web
+      dockerfile: Dockerfile
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      NUXT_PUBLIC_API_BASE: http://localhost:8080
+    depends_on:
+      business-api:
+        condition: service_healthy

@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  # Push ke branch manapun (bukan hanya main) supaya CI bisa diuji
+  # sebelum merge; PR tetap memicu CI seperti biasa.
+  push:
+  pull_request:
+
+jobs:
+  business-api:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+      # go.mod ada di services/business-api, bukan di root repo, jadi
+      # perintah Go harus jalan dari direktori modul itu (sebelumnya dari
+      # root dan akan gagal "does not contain main module").
+      - name: Lint (gofmt + vet)
+        run: |
+          test -z "$(gofmt -l .)"
+          go vet ./...
+        working-directory: services/business-api
+      - name: Test
+        run: go test ./...
+        working-directory: services/business-api
+
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+      - name: Build
+        run: |
+          npm ci
+          npm run build
+        working-directory: apps/web

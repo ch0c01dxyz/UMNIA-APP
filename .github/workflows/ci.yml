@@ -36,7 +36,12 @@ jobs:
           cache: npm
           cache-dependency-path: apps/web/package-lock.json
       - name: Build
+        # --legacy-peer-deps: @nuxt/cli -> @bomb.sh/tab meminta peer cac
+        # ^6.7.14 dan commander ^13/14/15, sementara tree Nuxt memakai cac
+        # 7 dan commander 11. npm ci ketat gagal karenanya meski lock fresh
+        # (terbukti lokal); flag ini hanya melonggarkan validasi peer,
+        # instalasi tetap bersih dari lock dan build tetap memverifikasi.
         run: |
-          npm ci
+          npm ci --legacy-peer-deps
           npm run build
         working-directory: apps/web

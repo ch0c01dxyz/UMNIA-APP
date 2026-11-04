@@ -1,8 +1,59 @@
-# Dev Windows (Docker Compose) untuk F1-01 saja.
-# Belum ada PostgreSQL/RustFS — itu F1-02. Port hanya localhost.
+# Dev Windows (Docker Compose) untuk F1-01 + F1-02.
+# PostgreSQL bisnis/admin TERPISAH (service, volume, dan kredensial
+# berbeda) dan RustFS ditambahkan di F1-02. Port hanya localhost.
+# Password di bawah HANYA untuk dev lokal; ganti lewat .env di pemakaian
+# nyata dan jangan commit .env.
 # UNVERIFIED di host Windows: file ini belum pernah dijalankan di Windows,
 # hanya ditulis mengikuti docs/11-deployment-matrix.md.
 services:
+  postgres-business:
+    image: postgres:16-bookworm
+    ports:
+      - "127.0.0.1:5432:5432"
+    environment:
+      POSTGRES_DB: umnia_business
+      POSTGRES_USER: umnia_business
+      POSTGRES_PASSWORD: ${UMNIA_BUSINESS_DB_PASSWORD:-umnia-dev-only}
+    volumes:
+      - postgres-business-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U umnia_business -d umnia_business"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  postgres-admin:
+    image: postgres:16-bookworm
+    ports:
+      - "127.0.0.1:5433:5432"
+    environment:
+      POSTGRES_DB: umnia_admin
+      POSTGRES_USER: umnia_admin
+      POSTGRES_PASSWORD: ${UMNIA_ADMIN_DB_PASSWORD:-umnia-dev-only}
+    volumes:
+      - postgres-admin-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U umnia_admin -d umnia_admin"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  rustfs:
+    image: rustfs/rustfs:1.0.4
+    ports:
+      - "127.0.0.1:9000:9000"
+    environment:
+      RUSTFS_ACCESS_KEY: ${RUSTFS_ACCESS_KEY:-umnia-dev-only}
+      RUSTFS_SECRET_KEY: ${RUSTFS_SECRET_KEY:-umnia-dev-only}
+    volumes:
+      - rustfs-data:/data
+    command: ["server", "/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:9000/minio/health/ready || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
   business-api:
     build:
       context: ../../services/business-api
@@ -12,6 +63,11 @@ services:
     environment:
       APP_ENV: development
       HTTP_LISTEN_ADDR: ":8080"
+      BUSINESS_DATABASE_URL: postgres://umnia_business:${UMNIA_BUSINESS_DB_PASSWORD:-umnia-dev-only}@postgres-business:5432/umnia_business?sslmode=disable
+      STORAGE_ENDPOINT: http://rustfs:9000
+    depends_on:
+      postgres-business:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/healthz"]
       interval: 5s
@@ -29,3 +85,8 @@ services:
     depends_on:
       business-api:
         condition: service_healthy
+
+volumes:
+  postgres-business-data:
+  postgres-admin-data:
+  rustfs-data:

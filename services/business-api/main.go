@@ -1,18 +1,21 @@
-// Package main adalah skeleton business API UMNIA (F1-01).
+// Package main adalah business API UMNIA (F1-01 skeleton + F1-02 database).
 //
-// Hanya menyediakan health/readiness HTTP. Belum ada auth, workspace,
-// database, maupun logika bisnis — semua itu masuk di F1-02/F1-03 dan
-// seterusnya. Readiness sengaja melaporkan database sebagai
-// "not_configured" sampai F1-02 memasang PostgreSQL; jangan dibaca
-// sebagai bukti database sudah siap.
+// Belum ada auth, workspace, maupun logika bisnis — semua itu masuk di
+// F1-03 dan seterusnya. Readiness memeriksa PostgreSQL bisnis bila
+// BUSINESS_DATABASE_URL terisi; tanpa URL itu, database dilaporkan
+// "not_configured" (bukan bukti database siap).
 package main
 
 import (
+	"context"
+	"database/sql"
 	"encoding/json"
 	"log"
 	"net/http"
 	"os"
 	"time"
+
+	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
 type healthResponse struct {
@@ -52,17 +55,43 @@ func handleHealthz(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, healthResponse{Status: "ok", Service: "business-api"})
 }
 
+// databaseStatus mem-ping PostgreSQL bisnis bila URL-nya dikonfigurasi.
+// Ping dibatasi 2 detik supaya readiness tidak menggantung pada DB mati.
+func databaseStatus() string {
+	url := os.Getenv("BUSINESS_DATABASE_URL")
+	if url == "" {
+		return "not_configured"
+	}
+	db, err := sql.Open("pgx", url)
+	if err != nil {
+		return "error"
+	}
+	defer db.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := db.PingContext(ctx); err != nil {
+		return "error"
+	}
+	return "ok"
+}
+
 func handleReadyz(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	// shortcut: database belum dipasang (F1-02), jadi readiness hanya
-	// menyatakan lapisan HTTP siap; upgrade saat BUSINESS_DATABASE_URL terisi.
-	writeJSON(w, http.StatusOK, readinessResponse{
-		Status:  "ok",
+	dbStatus := databaseStatus()
+	status := "ok"
+	code := http.StatusOK
+	if dbStatus == "error" {
+		// DB dikonfigurasi tapi tidak terjangkau: belum siap melayani.
+		status = "degraded"
+		code = http.StatusServiceUnavailable
+	}
+	writeJSON(w, code, readinessResponse{
+		Status:  status,
 		Service: "business-api",
-		Checks:  map[string]string{"http": "ok", "database": "not_configured"},
+		Checks:  map[string]string{"http": "ok", "database": dbStatus},
 	})
 }
 

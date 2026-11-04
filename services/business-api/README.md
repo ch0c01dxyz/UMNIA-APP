@@ -35,8 +35,29 @@ go test ./services/business-api/...
 cd apps/web && npm run build
 ```
 
-## Yang sengaja TIDAK ada di F1-01
+## F1-02 — database
 
-Auth, workspace, RBAC/RLS, database, RustFS, modul, finance — masuk F1-02
-dan seterusnya sesuai `FAST_TRACK.md`. Linter khusus web (ESLint) belum
-dipasang; lint F1-01 = gofmt + go vet (API) + build Nuxt (web).
+Linux native (tanpa Docker):
+
+```bash
+sudo apt install -y postgresql postgresql-client
+UMNIA_BUSINESS_DB_PASSWORD='...' UMNIA_ADMIN_DB_PASSWORD='...' \
+  bash deploy/linux/configure-postgres.sh
+# Script membuat role/database umnia_business + umnia_admin yang terpisah,
+# lalu menerapkan services/business-api/migrations/001_init.sql
+# (hanya tabel schema_migrations; skema domain menyusul di tiketnya).
+
+BUSINESS_DATABASE_URL='postgres://umnia_business:PASSWORD@localhost:5432/umnia_business?sslmode=disable' \
+  go run ./services/business-api
+curl http://localhost:8080/readyz   # database: "ok" bila ping berhasil
+```
+
+Windows: `docker compose -f deploy/windows/compose.yml up --build`
+menjalankan postgres-business, postgres-admin, dan RustFS (UNVERIFIED
+di host Windows, seperti F1-01).
+
+## Yang sengaja TIDAK ada di F1-01/F1-02
+
+Auth, workspace, RBAC/RLS, modul, finance — masuk F1-03 dan seterusnya
+sesuai `FAST_TRACK.md`. Linter khusus web (ESLint) belum dipasang;
+lint = gofmt + go vet (API) + build Nuxt (web).

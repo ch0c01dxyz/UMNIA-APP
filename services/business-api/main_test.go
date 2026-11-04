@@ -30,6 +30,7 @@ func TestHealthz(t *testing.T) {
 }
 
 func TestReadyzReportsDatabaseNotConfigured(t *testing.T) {
+	t.Setenv("BUSINESS_DATABASE_URL", "")
 	rec := get(t, "/readyz")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("readyz: got status %d, want 200", rec.Code)
@@ -42,6 +43,23 @@ func TestReadyzReportsDatabaseNotConfigured(t *testing.T) {
 	// sampai F1-02 mengubahnya menjadi pemeriksaan nyata.
 	if body.Checks["database"] != "not_configured" {
 		t.Fatalf("readyz: database check = %q, want not_configured", body.Checks["database"])
+	}
+}
+
+func TestReadyzReportsDatabaseError(t *testing.T) {
+	// Port 1 di localhost menolak koneksi seketika; ping harus gagal
+	// cepat dan readiness menjadi 503, bukan 200 yang menyesatkan.
+	t.Setenv("BUSINESS_DATABASE_URL", "postgres://umnia:umnia@127.0.0.1:1/umnia_business?sslmode=disable")
+	rec := get(t, "/readyz")
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("readyz: got status %d, want 503", rec.Code)
+	}
+	var body readinessResponse
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("readyz: decode: %v", err)
+	}
+	if body.Checks["database"] != "error" {
+		t.Fatalf("readyz: database check = %q, want error", body.Checks["database"])
 	}
 }
 

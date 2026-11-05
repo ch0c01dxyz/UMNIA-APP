@@ -1,0 +1,124 @@
+--- role attributes ---
+     rolname     | rolsuper | rolbypassrls | rolcanlogin 
+-----------------+----------+--------------+-------------
+ postgres        | t        | f            | t
+ review_other    | f        | f            | f
+ umnia_bootstrap | t        | f            | t
+ umnia_business  | t        | t            | t
+(4 rows)
+
+--- schema_migrations ---
+   version    
+--------------
+ 001_init
+ 002_identity
+(2 rows)
+
+--- function owners + search_path (proconfig) ---
+ schema |     proname      |  owner   | search_path_setting  | security_definer 
+--------+------------------+----------+----------------------+------------------
+ app    | accept_invite    | postgres | {search_path=public} | t
+ app    | has_permission   | postgres | {search_path=public} | t
+ app    | is_member        | postgres | {search_path=public} | t
+ app    | register_subject | postgres | {search_path=public} | t
+ app    | session_subject  | postgres | {search_path=public} | t
+ app    | subject_by_email | postgres | {search_path=public} | t
+(6 rows)
+
+--- explicit ACLs (proacl) on the 6 helpers ---
+     proname      |                     proacl                      
+------------------+-------------------------------------------------
+ accept_invite    | {postgres=X/postgres,umnia_business=X/postgres}
+ has_permission   | {postgres=X/postgres,umnia_business=X/postgres}
+ is_member        | {postgres=X/postgres,umnia_business=X/postgres}
+ register_subject | {postgres=X/postgres,umnia_business=X/postgres}
+ session_subject  | {postgres=X/postgres,umnia_business=X/postgres}
+ subject_by_email | {postgres=X/postgres,umnia_business=X/postgres}
+(6 rows)
+
+--- routine_privileges grantees (explicit grants only) ---
+   routine_name   |    grantee     | privilege_type 
+------------------+----------------+----------------
+ accept_invite    | postgres       | EXECUTE
+ accept_invite    | umnia_business | EXECUTE
+ has_permission   | postgres       | EXECUTE
+ has_permission   | umnia_business | EXECUTE
+ is_member        | postgres       | EXECUTE
+ is_member        | umnia_business | EXECUTE
+ register_subject | postgres       | EXECUTE
+ register_subject | umnia_business | EXECUTE
+ session_subject  | postgres       | EXECUTE
+ session_subject  | umnia_business | EXECUTE
+ subject_by_email | postgres       | EXECUTE
+ subject_by_email | umnia_business | EXECUTE
+(12 rows)
+
+--- effective EXECUTE for runtime role / other role / PUBLIC ---
+               chk               | has_exec 
+---------------------------------+----------
+ umnia_business register_subject | t
+(1 row)
+
+              chk              | has_exec 
+-------------------------------+----------
+ review_other register_subject | f
+(1 row)
+
+                chk                | n 
+-----------------------------------+---
+ helpers with any PUBLIC ACL entry | 0
+(1 row)
+
+             chk              | has_exec 
+------------------------------+----------
+ umnia_business accept_invite | t
+(1 row)
+
+--- CREATE privilege on referenced schemas ---
+ schema |       owner       |                              acl                              
+--------+-------------------+---------------------------------------------------------------
+ public | pg_database_owner | {pg_database_owner=UC/pg_database_owner,=U/pg_database_owner}
+ app    | umnia_business    | {umnia_business=UC/umnia_business}
+(2 rows)
+
+               chk               | has_create 
+---------------------------------+------------
+ umnia_business CREATE on public | t
+(1 row)
+
+             chk              | has_create 
+------------------------------+------------
+ umnia_business CREATE on app | t
+(1 row)
+
+                chk                | n 
+-----------------------------------+---
+ public schema ACL mentions PUBLIC | 0
+(1 row)
+
+              chk               | n 
+--------------------------------+---
+ app schema ACL mentions PUBLIC | 0
+(1 row)
+
+            chk            | has_create 
+---------------------------+------------
+ postgres CREATE on public | t
+(1 row)
+
+--- table owners (spot check) ---
+     tablename     |   tableowner   
+-------------------+----------------
+ audit_events      | umnia_business
+ identity_subjects | umnia_business
+ workspaces        | umnia_business
+(3 rows)
+
+--- RLS forced? ---
+        relname        | relrowsecurity | relforcerowsecurity 
+-----------------------+----------------+---------------------
+ identity_subjects     | t              | t
+ workspace_memberships | t              | t
+ workspaces            | t              | t
+(3 rows)
+

@@ -1,0 +1,1 @@
+ERROR:  cannot drop role alice because it is required by the database system

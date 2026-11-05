@@ -4,22 +4,29 @@
 # Password di bawah HANYA untuk dev lokal; ganti lewat .env di pemakaian
 # nyata dan jangan commit .env.
 #
-# Akun database (perbaikan F1-FOUNDATION-REMEDIATION):
+# Akun database (perbaikan F1-FOUNDATION-REMEDIATION + F1-WINDOWS-REVIEW-FIXES):
 # - POSTGRES_USER di tiap service adalah akun BOOTSTRAP superuser
 #   (umnia_bootstrap / umnia_admin_bootstrap), BUKAN akun API. Image
 #   postgres membuat POSTGRES_USER sebagai superuser, dan superuser
 #   melewati RLS — API tidak boleh memakai akun itu.
 # - Akun runtime API adalah umnia_business / umnia_admin (NOSUPERUSER,
 #   NOBYPASSRLS), dibuat skrip initdb di bawah, dan dipakai API.
+# - Segregasi kredensial: tiap container postgres HANYA mendapat secret
+#   runtime-nya sendiri (UMNIA_RUNTIME_ROLE + UMNIA_RUNTIME_DB_PASSWORD).
+#   Container bisnis tidak menerima password admin dan sebaliknya; initdb
+#   membuat hanya role yang dikonfigurasi untuk container itu, dan gagal
+#   (fail closed) bila secret/role itu tidak diset.
 # - Migrasi dijalankan service `migrate` sebagai akun bootstrap, pada
 #   SETIAP `compose up` (bukan hanya initdb), supaya volume lama ikut
 #   ter-upgrade tanpa hapus data. Lihat deploy/windows/README.md untuk
 #   jalur upgrade volume yang dibuat sebelum perbaikan ini.
 #
-# UNVERIFIED di host Windows: file ini belum pernah dijalankan di Windows,
-# hanya ditulis mengikuti docs/11-deployment-matrix.md. Jalur yang sama
-# (initdb + migrasi + role runtime) diverifikasi pada PostgreSQL 16
-# native di Linux dalam tugas perbaikan ini, bukan di Docker Windows.
+# VERIFIKASI (2026-11-05, F1-WINDOWS-REVIEW-FIXES): initdb + migrasi +
+# role runtime diverifikasi terhadap entrypoint dan binary image resmi
+# postgres:16-bookworm (amd64 manifest digest terverifikasi ke
+# hub.docker.com; entrypoint image identik dengan sumber 16/bookworm),
+# dijalankan native di Linux karena `docker run` diblokir VM ini (runc
+# setns tidak diizinkan). `compose up` di host Windows MASIH UNVERIFIED.
 services:
   postgres-business:
     image: postgres:16-bookworm
@@ -29,8 +36,8 @@ services:
       POSTGRES_DB: umnia_business
       POSTGRES_USER: umnia_bootstrap
       POSTGRES_PASSWORD: ${UMNIA_BUSINESS_BOOTSTRAP_PASSWORD:-umnia-dev-only}
-      UMNIA_BUSINESS_DB_PASSWORD: ${UMNIA_BUSINESS_DB_PASSWORD:-umnia-dev-only}
-      UMNIA_ADMIN_DB_PASSWORD: ${UMNIA_ADMIN_DB_PASSWORD:-umnia-dev-only}
+      UMNIA_RUNTIME_ROLE: umnia_business
+      UMNIA_RUNTIME_DB_PASSWORD: ${UMNIA_BUSINESS_DB_PASSWORD:-umnia-dev-only}
     volumes:
       - postgres-business-data:/var/lib/postgresql/data
       - ./initdb:/docker-entrypoint-initdb.d:ro
@@ -48,8 +55,8 @@ services:
       POSTGRES_DB: umnia_admin
       POSTGRES_USER: umnia_admin_bootstrap
       POSTGRES_PASSWORD: ${UMNIA_ADMIN_BOOTSTRAP_PASSWORD:-umnia-dev-only}
-      UMNIA_BUSINESS_DB_PASSWORD: ${UMNIA_BUSINESS_DB_PASSWORD:-umnia-dev-only}
-      UMNIA_ADMIN_DB_PASSWORD: ${UMNIA_ADMIN_DB_PASSWORD:-umnia-dev-only}
+      UMNIA_RUNTIME_ROLE: umnia_admin
+      UMNIA_RUNTIME_DB_PASSWORD: ${UMNIA_ADMIN_DB_PASSWORD:-umnia-dev-only}
     volumes:
       - postgres-admin-data:/var/lib/postgresql/data
       - ./initdb:/docker-entrypoint-initdb.d:ro

@@ -1,0 +1,22 @@
+=== MECH CHECKS — 2026-11-05T19:14:55+07:00 ===
+[19:14:56] mech: initdb -U alice exit=0
+[19:14:56] mech: start exit=0
+[19:14:56] mech: setup exit=0
+[19:14:56] mech T1: bootstrap demotes non-bootstrap exit=0 (want 0)
+[19:14:56] mech T2: non-bootstrap demotes bootstrap exit=1 (want 1)
+ERROR:  permission denied to alter role
+DETAIL:  The bootstrap user must have the SUPERUSER attribute.
+[19:14:56] mech T3a: REASSIGN/DROP OWNED bootstrap exit=1 (want 1)
+[19:14:56] mech T3b: DROP ROLE bootstrap exit=1 (want 1)
+ERROR:  cannot reassign ownership of objects owned by role alice because they are required by the database system
+ERROR:  cannot drop role alice because it is required by the database system
+[19:14:57] mech: scratch DB review_mech exit=0
+[19:14:57] mech M1 setup exit=0
+{umnia_business=X/umnia_business}
+[19:14:57] mech M1: OWNER TO postgres exit=0
+{postgres=X/postgres}
+[19:14:57] mech M2 setup exit=0
+[19:14:57] mech M2: CREATE OR REPLACE by postgres exit=0
+f2|umnia_business|{umnia_business=X/umnia_business}
+[19:14:57] mech: stop exit=0
+[19:14:57] == MECH done ==

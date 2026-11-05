@@ -1,0 +1,1 @@
+ERROR:  cannot reassign ownership of objects owned by role alice because they are required by the database system

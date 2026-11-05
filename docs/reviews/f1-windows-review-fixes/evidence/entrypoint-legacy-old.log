@@ -1,0 +1,67 @@
+The files belonging to this database system will be owned by user "postgres".
+This user must also own the server process.
+
+The database cluster will be initialized with locale "C.UTF-8".
+The default database encoding has accordingly been set to "UTF8".
+The default text search configuration will be set to "english".
+
+Data page checksums are disabled.
+
+fixing permissions on existing directory /var/tmp/umnia-harness/pgdata-legacy-old ... ok
+creating subdirectories ... ok
+selecting dynamic shared memory implementation ... posix
+selecting default max_connections ... 100
+selecting default shared_buffers ... 128MB
+selecting default time zone ... Asia/Jakarta
+creating configuration files ... ok
+running bootstrap script ... ok
+performing post-bootstrap initialization ... ok
+syncing data to disk ... ok
+
+initdb: warning: enabling "trust" authentication for local connections
+initdb: hint: You can change this by editing pg_hba.conf or using the option -A, or --auth-local and --auth-host, the next time you run initdb.
+
+Success. You can now start the database server using:
+
+    pg_ctl -D /var/tmp/umnia-harness/pgdata-legacy-old -l logfile start
+
+waiting for server to start....2026-11-05 23:39:08.329 WIB [11374] LOG:  starting PostgreSQL 16.15 (Debian 16.15-1.pgdg12+2) on x86_64-pc-linux-gnu, compiled by gcc (Debian 12.2.0-14+deb12u1) 12.2.0, 64-bit
+2026-11-05 23:39:08.329 WIB [11374] LOG:  listening on Unix socket "/var/run/postgresql/.s.PGSQL.55436"
+2026-11-05 23:39:08.332 WIB [11377] LOG:  database system was shut down at 2026-11-05 23:39:08 WIB
+2026-11-05 23:39:08.335 WIB [11374] LOG:  database system is ready to accept connections
+ done
+server started
+CREATE DATABASE
+
+
+/var/tmp/umnia-harness/rootfs/usr/local/bin/docker-entrypoint.sh: ignoring /docker-entrypoint-initdb.d/*
+
+waiting for server to shut down....2026-11-05 23:39:08.461 WIB [11374] LOG:  received fast shutdown request
+2026-11-05 23:39:08.461 WIB [11374] LOG:  aborting any active transactions
+2026-11-05 23:39:08.463 WIB [11374] LOG:  background worker "logical replication launcher" (PID 11380) exited with exit code 1
+2026-11-05 23:39:08.464 WIB [11375] LOG:  shutting down
+2026-11-05 23:39:08.464 WIB [11375] LOG:  checkpoint starting: shutdown immediate
+2026-11-05 23:39:08.472 WIB [11375] LOG:  checkpoint complete: wrote 922 buffers (5.6%); 0 WAL file(s) added, 0 removed, 0 recycled; write=0.008 s, sync=0.001 s, total=0.009 s; sync files=301, longest=0.001 s, average=0.000 s; distance=4255 kB, estimate=4255 kB; lsn=0/1911B98, redo lsn=0/1911B98
+2026-11-05 23:39:08.479 WIB [11374] LOG:  database system is shut down
+ done
+server stopped
+
+PostgreSQL init process complete; ready for start up.
+
+2026-11-05 23:39:08.588 WIB [11344] LOG:  starting PostgreSQL 16.15 (Debian 16.15-1.pgdg12+2) on x86_64-pc-linux-gnu, compiled by gcc (Debian 12.2.0-14+deb12u1) 12.2.0, 64-bit
+2026-11-05 23:39:08.588 WIB [11344] LOG:  listening on IPv4 address "127.0.0.1", port 55436
+2026-11-05 23:39:08.588 WIB [11344] LOG:  listening on Unix socket "/var/run/postgresql/.s.PGSQL.55436"
+2026-11-05 23:39:08.590 WIB [11390] LOG:  database system was shut down at 2026-11-05 23:39:08 WIB
+2026-11-05 23:39:08.595 WIB [11344] LOG:  database system is ready to accept connections
+2026-11-05 23:39:08.682 WIB [11395] FATAL:  role "root" does not exist
+2026-11-05 23:39:13.181 WIB [11404] ERROR:  role "postgres" does not exist
+2026-11-05 23:39:13.181 WIB [11404] STATEMENT:  ALTER FUNCTION app.reject_audit_change() OWNER TO postgres;
+2026-11-05 23:39:13.218 WIB [11411] ERROR:  null value in column "status" of relation "workspace_memberships" violates not-null constraint
+2026-11-05 23:39:13.218 WIB [11411] DETAIL:  Failing row contains (22222222-2222-2222-2222-222222222222, 11111111-1111-1111-1111-111111111111, null, 2026-11-05 23:39:13.218638+07).
+2026-11-05 23:39:13.218 WIB [11411] STATEMENT:  INSERT INTO workspace_memberships (workspace_id, subject_id) VALUES ('22222222-2222-2222-2222-222222222222', '11111111-1111-1111-1111-111111111111');
+2026-11-05 23:39:23.871 WIB [11344] LOG:  received smart shutdown request
+2026-11-05 23:39:23.874 WIB [11344] LOG:  background worker "logical replication launcher" (PID 11393) exited with exit code 1
+2026-11-05 23:39:23.875 WIB [11388] LOG:  shutting down
+2026-11-05 23:39:23.875 WIB [11388] LOG:  checkpoint starting: shutdown immediate
+2026-11-05 23:39:23.877 WIB [11388] LOG:  checkpoint complete: wrote 171 buffers (1.0%); 0 WAL file(s) added, 0 removed, 0 recycled; write=0.002 s, sync=0.001 s, total=0.003 s; sync files=109, longest=0.001 s, average=0.001 s; distance=745 kB, estimate=745 kB; lsn=0/19CC318, redo lsn=0/19CC318
+2026-11-05 23:39:23.882 WIB [11344] LOG:  database system is shut down

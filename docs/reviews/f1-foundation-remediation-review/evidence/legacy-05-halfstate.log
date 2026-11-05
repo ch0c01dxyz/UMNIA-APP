@@ -1,0 +1,22 @@
+   version    
+--------------
+ 001_init
+ 002_identity
+(2 rows)
+
+     proname      |     owner      
+------------------+----------------
+ register_subject | umnia_business
+(1 row)
+
+ workspaces_table 
+------------------
+                1
+(1 row)
+
+    grantee     
+----------------
+ PUBLIC
+ umnia_business
+(2 rows)
+

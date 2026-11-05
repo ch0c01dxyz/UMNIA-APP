@@ -1,0 +1,60 @@
+{"Time":"2026-11-05T19:15:18.117957232+07:00","Action":"start","Package":"github.com/ch0c01dxyz/umnia/services/business-api"}
+{"Time":"2026-11-05T19:15:18.123276211+07:00","Action":"run","Package":"github.com/ch0c01dxyz/umnia/services/business-api","Test":"TestHashTokenDeterministic"}
+{"Time":"2026-11-05T19:15:18.123384964+07:00","Action":"output","Package":"github.com/ch0c01dxyz/umnia/services/business-api","Test":"TestHashTokenDeterministic","Output":"=== RUN   TestHashTokenDeterministic\n","OutputType":"frame"}
+{"Time":"2026-11-05T19:15:18.123428449+07:00","Action":"output","Package":"github.com/ch0c01dxyz/umnia/services/business-api","Test":"TestHashTokenDeterministic","Output":"--- PASS: TestHashTokenDeterministic (0.00s)\n","OutputType":"frame"}
+{"Time":"2026-11-05T19:15:18.123439165+07:00","Action":"pass","Package":"github.com/ch0c01dxyz/umnia/services/business-api","Test":"TestHashTokenDeterministic","Elapsed":0}
+{"Time":"2026-11-05T19:15:18.12345591+07:00","Action":"run","Package":"github.com/ch0c01dxyz/umnia/services/business-api","Test":"TestValidateEmail"}
+{"Time":"2026-11-05T19:15:18.123463392+07:00","Action":"output","Package":"github.com/ch0c01dxyz/umnia/services/business-api","Test":"TestValidateEmail","Output":"=== RUN   TestValidateEmail\n","OutputType":"frame"}
+{"Time":"2026-11-05T19:15:18.123474819+07:00","Action":"output","Package":"github.com/ch0c01dxyz/umnia/services/business-api","Test":"TestValidateEmail","Output":"--- PASS: TestValidateEmail (0.00s)\n","OutputType":"frame"}
+{"Time":"2026-11-05T19:15:18.123483191+07:00","Action":"pass","Package":"github.com/ch0c01dxyz/umnia/services/business-api","Test":"TestValidateEmail","Elapsed":0}
+{"Time":"2026-11-05T19:15:18.123490913+07:00","Action":"run","Package":"github.com/ch0c01dxyz/umnia/services/business-api","Test":"TestPasswordHashVerify"}
+{"Time":"2026-11-05T19:15:18.123498064+07:00","Action":"output","Package":"github.com/ch0c01dxyz/umnia/services/business-api","Test":"TestPasswordHashVerify","Output":"=== RUN   TestPasswordHashVerify\n","OutputType":"frame"}
+{"Time":"2026-11-05T19:15:18.448566093+07:00","Action":"output","Package":"github.com/ch0c01dxyz/umnia/services/business-api","Test":"TestPasswordHashVerify","Output":"--- PASS: TestPasswordHashVerify (0.33s)\n","OutputType":"frame"}
+{"Time":"2026-11-05T19:15:18.448686053+07:00","Action":"pass","Package":"github.com/ch0c01dxyz/umnia/services/business-api","Test":"TestPasswordHashVerify","Elapsed":0.33}
+{"Time":"2026-11-05T19:15:18.448719103+07:00","Action":"run","Package":"github.com/ch0c01dxyz/umnia/services/business-api","Test":"TestCrossTenantRejected"}
+{"Time":"2026-11-05T19:15:18.448726964+07:00","Action":"output","Package":"github.com/ch0c01dxyz/umnia/services/business-api","Test":"TestCrossTenantRejected","Output":"=== RUN   TestCrossTenantRejected\n","OutputType":"frame"}
+{"Time":"2026-11-05T19:15:18.906153841+07:00","Action":"output","Package":"github.com/ch0c01dxyz/umnia/services/business-api","Test":"TestCrossTenantRejected","Output":"--- PASS: TestCrossTenantRejected (0.46s)\n","OutputType":"frame"}
+{"Time":"2026-11-05T19:15:18.906258318+07:00","Action":"pass","Package":"github.com/ch0c01dxyz/umnia/services/business-api","Test":"TestCrossTenantRejected","Elapsed":0.46}
+{"Time":"2026-11-05T19:15:18.906275664+07:00","Action":"run","Package":"github.com/ch0c01dxyz/umnia/services/business-api","Test":"TestInviteAcceptAndSingleUse"}
+{"Time":"2026-11-05T19:15:18.906284547+07:00","Action":"output","Package":"github.com/ch0c01dxyz/umnia/services/business-api","Test":"TestInviteAcceptAndSingleUse","Output":"=== RUN   TestInviteAcceptAndSingleUse\n","OutputType":"frame"}
+{"Time":"2026-11-05T19:15:19.369954939+07:00","Action":"output","Package":"github.com/ch0c01dxyz/umnia/services/business-api","Test":"TestInviteAcceptAndSingleUse","Output":"--- PASS: TestInviteAcceptAndSingleUse (0.46s)\n","OutputType":"frame"}
+{"Time":"2026-11-05T19:15:19.370033247+07:00","Action":"pass","Package":"github.com/ch0c01dxyz/umnia/services/business-api","Test":"TestInviteAcceptAndSingleUse","Elapsed":0.46}
+{"Time":"2026-11-05T19:15:19.370050443+07:00","Action":"run","Package":"github.com/ch0c01dxyz/umnia/services/business-api","Test":"TestRuntimeRoleIsNotSuperuser"}
+{"Time":"2026-11-05T19:15:19.37006889+07:00","Action":"output","Package":"github.com/ch0c01dxyz/umnia/services/business-api","Test":"TestRuntimeRoleIsNotSuperuser","Output":"=== RUN   TestRuntimeRoleIsNotSuperuser\n","OutputType":"frame"}
+{"Time":"2026-11-05T19:15:19.378349261+07:00","Action":"output","Package":"github.com/ch0c01dxyz/umnia/services/business-api","Test":"TestRuntimeRoleIsNotSuperuser","Output":"--- PASS: TestRuntimeRoleIsNotSuperuser (0.01s)\n","OutputType":"frame"}
+{"Time":"2026-11-05T19:15:19.378391985+07:00","Action":"pass","Package":"github.com/ch0c01dxyz/umnia/services/business-api","Test":"TestRuntimeRoleIsNotSuperuser","Elapsed":0.01}
+{"Time":"2026-11-05T19:15:19.378403552+07:00","Action":"run","Package":"github.com/ch0c01dxyz/umnia/services/business-api","Test":"TestInviteExpiredRejected"}
+{"Time":"2026-11-05T19:15:19.378410483+07:00","Action":"output","Package":"github.com/ch0c01dxyz/umnia/services/business-api","Test":"TestInviteExpiredRejected","Output":"=== RUN   TestInviteExpiredRejected\n","OutputType":"frame"}
+{"Time":"2026-11-05T19:15:19.84128452+07:00","Action":"output","Package":"github.com/ch0c01dxyz/umnia/services/business-api","Test":"TestInviteExpiredRejected","Output":"--- PASS: TestInviteExpiredRejected (0.46s)\n","OutputType":"frame"}
+{"Time":"2026-11-05T19:15:19.841369538+07:00","Action":"pass","Package":"github.com/ch0c01dxyz/umnia/services/business-api","Test":"TestInviteExpiredRejected","Elapsed":0.46}
+{"Time":"2026-11-05T19:15:19.841382898+07:00","Action":"run","Package":"github.com/ch0c01dxyz/umnia/services/business-api","Test":"TestCashierCannotReadAuditOrMembers"}
+{"Time":"2026-11-05T19:15:19.841389417+07:00","Action":"output","Package":"github.com/ch0c01dxyz/umnia/services/business-api","Test":"TestCashierCannotReadAuditOrMembers","Output":"=== RUN   TestCashierCannotReadAuditOrMembers\n","OutputType":"frame"}
+{"Time":"2026-11-05T19:15:20.299822143+07:00","Action":"output","Package":"github.com/ch0c01dxyz/umnia/services/business-api","Test":"TestCashierCannotReadAuditOrMembers","Output":"--- PASS: TestCashierCannotReadAuditOrMembers (0.46s)\n","OutputType":"frame"}
+{"Time":"2026-11-05T19:15:20.29992042+07:00","Action":"pass","Package":"github.com/ch0c01dxyz/umnia/services/business-api","Test":"TestCashierCannotReadAuditOrMembers","Elapsed":0.46}
+{"Time":"2026-11-05T19:15:20.299939339+07:00","Action":"run","Package":"github.com/ch0c01dxyz/umnia/services/business-api","Test":"TestReadyzRequiresMigratedSchema"}
+{"Time":"2026-11-05T19:15:20.299948292+07:00","Action":"output","Package":"github.com/ch0c01dxyz/umnia/services/business-api","Test":"TestReadyzRequiresMigratedSchema","Output":"=== RUN   TestReadyzRequiresMigratedSchema\n","OutputType":"frame"}
+{"Time":"2026-11-05T19:15:20.320466419+07:00","Action":"output","Package":"github.com/ch0c01dxyz/umnia/services/business-api","Test":"TestReadyzRequiresMigratedSchema","Output":"--- PASS: TestReadyzRequiresMigratedSchema (0.02s)\n","OutputType":"frame"}
+{"Time":"2026-11-05T19:15:20.320533179+07:00","Action":"pass","Package":"github.com/ch0c01dxyz/umnia/services/business-api","Test":"TestReadyzRequiresMigratedSchema","Elapsed":0.02}
+{"Time":"2026-11-05T19:15:20.32054673+07:00","Action":"run","Package":"github.com/ch0c01dxyz/umnia/services/business-api","Test":"TestRLSBlocksDirectCrossTenantRead"}
+{"Time":"2026-11-05T19:15:20.320554041+07:00","Action":"output","Package":"github.com/ch0c01dxyz/umnia/services/business-api","Test":"TestRLSBlocksDirectCrossTenantRead","Output":"=== RUN   TestRLSBlocksDirectCrossTenantRead\n","OutputType":"frame"}
+{"Time":"2026-11-05T19:15:20.77256934+07:00","Action":"output","Package":"github.com/ch0c01dxyz/umnia/services/business-api","Test":"TestRLSBlocksDirectCrossTenantRead","Output":"--- PASS: TestRLSBlocksDirectCrossTenantRead (0.45s)\n","OutputType":"frame"}
+{"Time":"2026-11-05T19:15:20.772651584+07:00","Action":"pass","Package":"github.com/ch0c01dxyz/umnia/services/business-api","Test":"TestRLSBlocksDirectCrossTenantRead","Elapsed":0.45}
+{"Time":"2026-11-05T19:15:20.772677683+07:00","Action":"run","Package":"github.com/ch0c01dxyz/umnia/services/business-api","Test":"TestHealthz"}
+{"Time":"2026-11-05T19:15:20.772699215+07:00","Action":"output","Package":"github.com/ch0c01dxyz/umnia/services/business-api","Test":"TestHealthz","Output":"=== RUN   TestHealthz\n","OutputType":"frame"}
+{"Time":"2026-11-05T19:15:20.772729+07:00","Action":"output","Package":"github.com/ch0c01dxyz/umnia/services/business-api","Test":"TestHealthz","Output":"--- PASS: TestHealthz (0.00s)\n","OutputType":"frame"}
+{"Time":"2026-11-05T19:15:20.77273575+07:00","Action":"pass","Package":"github.com/ch0c01dxyz/umnia/services/business-api","Test":"TestHealthz","Elapsed":0}
+{"Time":"2026-11-05T19:15:20.772744523+07:00","Action":"run","Package":"github.com/ch0c01dxyz/umnia/services/business-api","Test":"TestReadyzReportsDatabaseNotConfigured"}
+{"Time":"2026-11-05T19:15:20.772751173+07:00","Action":"output","Package":"github.com/ch0c01dxyz/umnia/services/business-api","Test":"TestReadyzReportsDatabaseNotConfigured","Output":"=== RUN   TestReadyzReportsDatabaseNotConfigured\n","OutputType":"frame"}
+{"Time":"2026-11-05T19:15:20.772890432+07:00","Action":"output","Package":"github.com/ch0c01dxyz/umnia/services/business-api","Test":"TestReadyzReportsDatabaseNotConfigured","Output":"--- PASS: TestReadyzReportsDatabaseNotConfigured (0.00s)\n","OutputType":"frame"}
+{"Time":"2026-11-05T19:15:20.772897492+07:00","Action":"pass","Package":"github.com/ch0c01dxyz/umnia/services/business-api","Test":"TestReadyzReportsDatabaseNotConfigured","Elapsed":0}
+{"Time":"2026-11-05T19:15:20.772903261+07:00","Action":"run","Package":"github.com/ch0c01dxyz/umnia/services/business-api","Test":"TestReadyzReportsDatabaseError"}
+{"Time":"2026-11-05T19:15:20.772908549+07:00","Action":"output","Package":"github.com/ch0c01dxyz/umnia/services/business-api","Test":"TestReadyzReportsDatabaseError","Output":"=== RUN   TestReadyzReportsDatabaseError\n","OutputType":"frame"}
+{"Time":"2026-11-05T19:15:20.77333599+07:00","Action":"output","Package":"github.com/ch0c01dxyz/umnia/services/business-api","Test":"TestReadyzReportsDatabaseError","Output":"--- PASS: TestReadyzReportsDatabaseError (0.00s)\n","OutputType":"frame"}
+{"Time":"2026-11-05T19:15:20.773346276+07:00","Action":"pass","Package":"github.com/ch0c01dxyz/umnia/services/business-api","Test":"TestReadyzReportsDatabaseError","Elapsed":0}
+{"Time":"2026-11-05T19:15:20.773359265+07:00","Action":"run","Package":"github.com/ch0c01dxyz/umnia/services/business-api","Test":"TestRootAndUnknownPaths"}
+{"Time":"2026-11-05T19:15:20.773365895+07:00","Action":"output","Package":"github.com/ch0c01dxyz/umnia/services/business-api","Test":"TestRootAndUnknownPaths","Output":"=== RUN   TestRootAndUnknownPaths\n","OutputType":"frame"}
+{"Time":"2026-11-05T19:15:20.773587017+07:00","Action":"output","Package":"github.com/ch0c01dxyz/umnia/services/business-api","Test":"TestRootAndUnknownPaths","Output":"--- PASS: TestRootAndUnknownPaths (0.00s)\n","OutputType":"frame"}
+{"Time":"2026-11-05T19:15:20.773594077+07:00","Action":"pass","Package":"github.com/ch0c01dxyz/umnia/services/business-api","Test":"TestRootAndUnknownPaths","Elapsed":0}
+{"Time":"2026-11-05T19:15:20.773601769+07:00","Action":"output","Package":"github.com/ch0c01dxyz/umnia/services/business-api","Output":"PASS\n","OutputType":"frame"}
+{"Time":"2026-11-05T19:15:20.776587307+07:00","Action":"output","Package":"github.com/ch0c01dxyz/umnia/services/business-api","Output":"ok  \tgithub.com/ch0c01dxyz/umnia/services/business-api\t2.658s\n"}
+{"Time":"2026-11-05T19:15:20.776661018+07:00","Action":"pass","Package":"github.com/ch0c01dxyz/umnia/services/business-api","Elapsed":2.659}

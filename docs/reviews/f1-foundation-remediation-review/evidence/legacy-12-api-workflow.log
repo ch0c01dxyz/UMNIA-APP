@@ -1,0 +1,8 @@
+STEP readyz want=200 got=200
+STEP register-owner want=201 got=201
+STEP login-owner want=200 got=200
+STEP register-staff want=201 got=201
+STEP login-staff want=200 got=200
+STEP create-workspace want=201 got=201
+STEP cross-tenant-before-invite want=403 got=200
+FAIL: cross-tenant-before-invite

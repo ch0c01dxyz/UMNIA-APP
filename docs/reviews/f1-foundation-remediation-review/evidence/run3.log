@@ -1,0 +1,21 @@
+=== REVIEW RUN 2 part 3 — 2026-11-05T19:15:25+07:00 ===
+[19:15:25] go: go version go1.27.3 linux/amd64
+[19:15:25] psql: psql (PostgreSQL) 16.15 (Ubuntu 16.15-0ubuntu0.24.04.1)
+[19:15:25] == RESTORE-UPGRADE: start legacy cluster, dump review_legacy ==
+[19:15:25] restore: start legacy cluster exit=0 (output: /home/hatch/workspace/review/F1-FOUNDATION-REMEDIATION-REVIEW/evidence/restore-00-start.log)
+[19:15:25] restore: pg_dump --no-owner review_legacy exit=0 (output: /home/hatch/workspace/review/F1-FOUNDATION-REMEDIATION-REVIEW/evidence/restore-01-dump.log)
+[19:15:25] restore: 'Toko Lama' occurrences in dump: 1 (want >=1)
+[19:15:25] == RESTORE-UPGRADE: fresh DB on main cluster, restore, re-migrate ==
+[19:15:25] restore: recreate review_restored exit=0 (output: /home/hatch/workspace/review/F1-FOUNDATION-REMEDIATION-REVIEW/evidence/restore-02-createdb.log)
+[19:15:25] restore: restore dump exit=0 (output: /home/hatch/workspace/review/F1-FOUNDATION-REMEDIATION-REVIEW/evidence/restore-03-restore.log)
+[19:15:26] restore: re-run migrations exit=0 (output: /home/hatch/workspace/review/F1-FOUNDATION-REMEDIATION-REVIEW/evidence/restore-04-migrate.log)
+[19:15:26] restore: inspect restored DB exit=0 (output: /home/hatch/workspace/review/F1-FOUNDATION-REMEDIATION-REVIEW/evidence/restore-05-inspect.log)
+[19:15:26] restore: helpers granting EXECUTE to umnia_business: 6 (want 6)
+[19:15:26] restore: umnia_business super/bypass = false/false (want false/false)
+[19:15:26] restore: fixture preserved? exit=0 (output: /home/hatch/workspace/review/F1-FOUNDATION-REMEDIATION-REVIEW/evidence/restore-06-fixture-check.log)
+[19:15:26] == RESTORE-UPGRADE: live API on restored DB (runtime role) ==
+[19:15:29] restore: api workflow exit=0 (log: /home/hatch/workspace/review/F1-FOUNDATION-REMEDIATION-REVIEW/evidence/restore-08-api-workflow.log)
+[19:15:29] restore: new user GET old workspace Toko Lama -> HTTP 403 (want 403)
+[19:15:29] restore: readyz on restored DB -> HTTP 200 (want 200)
+[19:15:29] restore: stop legacy cluster exit=0 (output: /home/hatch/workspace/review/F1-FOUNDATION-REMEDIATION-REVIEW/evidence/restore-09-stop.log)
+[19:15:29] == PART 3 done (0 regression failures) ==

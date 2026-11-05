@@ -1,0 +1,15 @@
+ schema_migrations_table 
+-------------------------
+                       0
+(1 row)
+
+ workspaces_table 
+------------------
+                0
+(1 row)
+
+ app_functions 
+---------------
+             0
+(1 row)
+

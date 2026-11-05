@@ -1,0 +1,5 @@
+     proname      |  owner   |                     proacl                      
+------------------+----------+-------------------------------------------------
+ register_subject | postgres | {postgres=X/postgres,umnia_business=X/postgres}
+(1 row)
+

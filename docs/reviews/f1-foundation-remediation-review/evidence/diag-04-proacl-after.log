@@ -1,0 +1,5 @@
+     proname      |  owner   | proacl 
+------------------+----------+--------
+ register_subject | postgres | 
+(1 row)
+

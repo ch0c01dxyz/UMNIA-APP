@@ -1,0 +1,101 @@
+CREATE TABLE
+INSERT 0 1
+ALTER TABLE
+CREATE EXTENSION
+CREATE SCHEMA
+GRANT
+CREATE TABLE
+CREATE INDEX
+CREATE TABLE
+CREATE TABLE
+CREATE TABLE
+CREATE TABLE
+CREATE TABLE
+CREATE TABLE
+CREATE TABLE
+CREATE TABLE
+INSERT 0 3
+INSERT 0 9
+CREATE FUNCTION
+psql:/home/hatch/workspace/UMNIA-APP/services/business-api/migrations/002_identity.sql:114: NOTICE:  trigger "audit_events_append_only" for relation "audit_events" does not exist, skipping
+DROP TRIGGER
+CREATE TRIGGER
+CREATE FUNCTION
+CREATE FUNCTION
+CREATE FUNCTION
+CREATE FUNCTION
+CREATE FUNCTION
+CREATE FUNCTION
+ALTER TABLE
+ALTER TABLE
+ALTER TABLE
+ALTER TABLE
+ALTER TABLE
+ALTER TABLE
+ALTER TABLE
+ALTER TABLE
+ALTER TABLE
+ALTER TABLE
+ALTER TABLE
+ALTER TABLE
+ALTER TABLE
+ALTER TABLE
+psql:/home/hatch/workspace/UMNIA-APP/services/business-api/migrations/002_identity.sql:232: NOTICE:  policy "self_only" for relation "identity_subjects" does not exist, skipping
+DROP POLICY
+CREATE POLICY
+psql:/home/hatch/workspace/UMNIA-APP/services/business-api/migrations/002_identity.sql:238: NOTICE:  policy "member_subject" for relation "identity_subjects" does not exist, skipping
+DROP POLICY
+CREATE POLICY
+psql:/home/hatch/workspace/UMNIA-APP/services/business-api/migrations/002_identity.sql:249: NOTICE:  policy "member_workspace" for relation "workspaces" does not exist, skipping
+DROP POLICY
+CREATE POLICY
+psql:/home/hatch/workspace/UMNIA-APP/services/business-api/migrations/002_identity.sql:263: NOTICE:  policy "member_membership" for relation "workspace_memberships" does not exist, skipping
+DROP POLICY
+CREATE POLICY
+psql:/home/hatch/workspace/UMNIA-APP/services/business-api/migrations/002_identity.sql:281: NOTICE:  policy "member_roles" for relation "membership_roles" does not exist, skipping
+DROP POLICY
+CREATE POLICY
+psql:/home/hatch/workspace/UMNIA-APP/services/business-api/migrations/002_identity.sql:299: NOTICE:  policy "self_session" for relation "sessions" does not exist, skipping
+DROP POLICY
+CREATE POLICY
+psql:/home/hatch/workspace/UMNIA-APP/services/business-api/migrations/002_identity.sql:304: NOTICE:  policy "member_invite" for relation "staff_invites" does not exist, skipping
+DROP POLICY
+CREATE POLICY
+psql:/home/hatch/workspace/UMNIA-APP/services/business-api/migrations/002_identity.sql:315: NOTICE:  policy "member_audit" for relation "audit_events" does not exist, skipping
+DROP POLICY
+CREATE POLICY
+INSERT 0 1
+ALTER TABLE
+ALTER TABLE
+ALTER TABLE
+ALTER TABLE
+ALTER TABLE
+ALTER TABLE
+ALTER TABLE
+ALTER TABLE
+ALTER TABLE
+ALTER FUNCTION
+ALTER FUNCTION
+ALTER FUNCTION
+ALTER FUNCTION
+ALTER FUNCTION
+ALTER FUNCTION
+ALTER FUNCTION
+ALTER FUNCTION
+ALTER FUNCTION
+ALTER FUNCTION
+ALTER FUNCTION
+ALTER FUNCTION
+ALTER FUNCTION
+REVOKE
+REVOKE
+REVOKE
+REVOKE
+REVOKE
+REVOKE
+GRANT
+GRANT
+GRANT
+GRANT
+GRANT
+GRANT

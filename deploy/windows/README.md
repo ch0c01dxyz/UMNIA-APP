@@ -36,27 +36,53 @@ mencabut SUPERUSER-nya — `ALTER ROLE ... NOSUPERUSER` gagal dengan
 `permission denied to alter role` (bahkan dari superuser lain), dan
 `REASSIGN OWNED` / `DROP ROLE` gagal dengan `required by the database
 system` (terbukti pada PostgreSQL 16). Satu-satunya jalur upgrade yang
-didukung adalah **dump/restore ke volume baru**:
+didukung adalah **dump/restore ke volume baru**. Jalankan skripnya dari
+root repository (jalur ini memakai project Compose yang berbeda untuk
+lama vs baru, sehingga volume lama tidak pernah tersentuh):
 
 ```powershell
-# 1. Dump database lama (dari dalam container postgres-business lama,
-#    atau psql ke localhost:5432). Jangan sertakan owner (--no-owner):
-docker compose -f deploy/windows/compose.yml exec -T postgres-business `
-  pg_dump -U umnia_business -d umnia_business --no-owner > umnia-backup.sql
+.\deploy\windows\Upgrade-UmniaVolume.ps1 -OldProject umnia-legacy -NewProject umnia
+```
 
-# 2. Hentikan stack lama dan pindahkan volumenya agar tidak tertukar
-#    (cek nama volume sebenarnya dengan `docker volume ls`):
-docker compose -f deploy/windows/compose.yml down
-docker volume ls | findstr postgres-business-data
-docker volume rename <nama-volume-lama> <nama-volume-lama>-old
+Yang dilakukan skrip (berhenti bila ada langkah gagal; jalur pemulihan
+dicetak bila gagal): pastikan stack lama jalan + password `.env` cocok,
+dump dengan `pg_dump -Fc --no-owner` di dalam container lama, salin
+keluar dengan `docker cp` (binary-safe — PowerShell tidak punya operator
+`<`, dan `>` di Windows PowerShell 5.1 menulis UTF-16), validasi backup
+dengan `pg_restore -l` **sebelum** stack lama dihentikan, `down` **tanpa
+`-v`**, jalankan postgres project baru (volume kosong -> initdb membuat
+role runtime `umnia_business` NOSUPERUSER/NOBYPASSRLS dan role
+`postgres`), restore sebagai bootstrap, `up --build` penuh (service
+`migrate` menjalankan ulang 001+002), lalu verifikasi role/migrasi/hak
+EXECUTE/`/readyz`/isolasi API. Volume lama
+(`umnia-legacy_postgres-business-data`) tetap ada sampai upgrade
+terverifikasi; hapus hanya sesudah itu dengan
+`docker volume rm umnia-legacy_postgres-business-data`.
 
-# 3. Jalankan stack baru (volume kosong -> initdb membuat role runtime
-#    umnia_business NOSUPERUSER/NOBYPASSRLS dan role postgres), lalu
-#    restore dump sebagai bootstrap dan jalankan ulang migrasi:
-docker compose -f deploy/windows/compose.yml up -d postgres-business
-docker compose -f deploy/windows/compose.yml exec -T postgres-business `
-  psql -U umnia_bootstrap -d umnia_business -v ON_ERROR_STOP=1 < umnia-backup.sql
-docker compose -f deploy/windows/compose.yml up --build
+Kedua project memakai port host yang sama (5432/5433/8080/9000/3000),
+jadi stack lama harus berhenti dulu sebelum stack baru jalan — skrip
+menegakkan urutan itu. Skrip tidak pernah menulis/menimpa `.env` dan
+tidak pernah menimpa file backup yang sudah ada (nama backup memakai
+timestamp). Perintah `docker volume rename` **tidak ada** (Docker hanya
+punya create/inspect/ls/prune/rm) — jangan pakai.
+
+Jalur manual yang setara (bila tidak memakai skrip; ganti
+`<cid-lama>`/`<cid-baru>` dengan ID container dari `docker compose ps -q`):
+
+```powershell
+# 1. Dump di dalam container lama, lalu salin keluar (binary-safe):
+docker compose -f deploy/windows/compose.yml -p umnia-legacy exec -T postgres-business pg_dump -U umnia_bootstrap -d umnia_business --no-owner -Fc -f /tmp/umnia-backup.dump
+docker cp <cid-lama>:/tmp/umnia-backup.dump .\backups\umnia-backup.dump
+# 2. Validasi SEBELUM menghentikan stack lama:
+docker compose -f deploy/windows/compose.yml -p umnia-legacy exec -T postgres-business pg_restore -l /tmp/umnia-backup.dump
+#    (daftar isi harus memuat tabel workspaces; bila gagal, JANGAN lanjut)
+# 3. Hentikan stack lama (tanpa -v) dan jalankan postgres baru:
+docker compose -f deploy/windows/compose.yml -p umnia-legacy down
+docker compose -f deploy/windows/compose.yml -p umnia up -d postgres-business
+# 4. Restore sebagai bootstrap, lalu jalankan stack baru penuh:
+docker cp .\backups\umnia-backup.dump <cid-baru>:/tmp/umnia-backup.dump
+docker compose -f deploy/windows/compose.yml -p umnia exec -T postgres-business pg_restore -U umnia_bootstrap -d umnia_business --no-owner --exit-on-error /tmp/umnia-backup.dump
+docker compose -f deploy/windows/compose.yml -p umnia up --build
 # (service migrate menjalankan ulang 001+002 sebagai bootstrap, yang
 #  menormalkan kepemilikan tabel/fungsi dan hak EXECUTE.)
 ```
@@ -86,12 +112,19 @@ WHERE routine_schema = 'app' AND routine_name = 'register_subject';
 Jalur dump/restore ini diuji pada database uji (fixture workspace
 dipertahankan, role runtime NOSUPERUSER/NOBYPASSRLS, hak EXECUTE 6/6,
 API lolos), bukan pada data pengguna. Lihat laporan
-F1-FOUNDATION-REMEDIATION-REVIEW.
+`docs/reviews/f1-foundation-remediation-review/REVIEW.md` dan
+`docs/reviews/f1-windows-review-fixes.md` (jalur `-Fc` + skrip
+PowerShell diuji pada tugas kedua).
 
 ## Yang belum terbukti
 
-Compose ini belum pernah dijalankan di host Windows (UNVERIFIED).
-Jalur initdb + migrasi + role runtime yang sama diverifikasi pada
-PostgreSQL 16 native di Linux dalam tugas perbaikan; jalankan
-`compose config` dan `compose up` di Windows sebelum mengklaim lulus
-di sana.
+`compose up` di host Windows MASIH UNVERIFIED (belum pernah dijalankan
+di Windows). Yang sudah terverifikasi (F1-WINDOWS-REVIEW-FIXES,
+2026-11-05): skrip initdb + migrasi + role runtime terhadap entrypoint
+dan binary image resmi `postgres:16-bookworm` (entrypoint image identik
+dengan sumber 16/bookworm; digest manifest amd64 terverifikasi ke
+hub.docker.com), dijalankan native di Linux karena `docker run` diblokir
+VM ini — dan jalur dump/restore `-Fc` + skrip PowerShell (parser +
+logika dengan mock docker + mekanika dump/restore/migrasi/API nyata).
+Jalankan `compose config` dan `compose up` di Windows sebelum mengklaim
+lulus di sana.

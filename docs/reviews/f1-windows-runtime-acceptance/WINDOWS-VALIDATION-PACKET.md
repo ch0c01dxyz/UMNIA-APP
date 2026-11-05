@@ -1,9 +1,10 @@
 # Windows Validation Packet — F1-WINDOWS-RUNTIME-ACCEPTANCE (CORRECTED 2026-11-06)
 
 **Status: CORRECTED procedure — static checks done (see §14); execution NOT RUN anywhere.**
-**This packet is NOT "ready-to-run": its revision, command syntax, lifecycle and prerequisites have been checked statically (§13), but actual execution must occur on a Windows host with Docker Desktop running.**
+**This packet is NOT "ready-to-run": its revision, command syntax, lifecycle and prerequisites have been checked statically (§14), but actual execution must occur on a Windows host with Docker Desktop running.**
 **Tested revision (code under test): `934ad4b8b79ae3cd5dca01121a270fd6f8f955f1` (detached pin, §1).**
-**Packet delivered at: commit `10bc3de` on `f1-03-identity`. The packet file is read from that delivery commit; the code under test is the detached `934ad4b` checkout. Never run tests from the delivery checkout.**
+**Packet version: `2026-11-06` (bootstrap helper order, restore-check roles, delivery metadata).**
+**Packet delivery revision: the commit that delivers THIS version is recorded in the delivery report (`docs/reviews/f1-windows-runtime-acceptance.md`). To verify you hold the corrected packet (not the `10bc3de` version), confirm this file contains the line `Packet version: 2026-11-06` and run `git log --oneline -3 -- docs/reviews/f1-windows-runtime-acceptance/WINDOWS-VALIDATION-PACKET.md` — the top entry must NOT be `2db7d6d` or `10bc3de`. If it is, STOP: you have an older packet. Never write a future commit hash into this file; record the actual delivery commit in the report, not here.**
 **Scope: scenarios 1–8 from the acceptance task. No merge/deploy/user-data migration is authorized by running this packet.**
 
 Run everything in **Windows PowerShell 5.1** at the explicit executable `C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`. Never infer PS 5.1 from a tool label: the generic context-mode `powershell` runtime in the preparer's environment is 7.6.9. Always record the executable path and `$PSVersionTable.PSVersion` (reviewer-observed on their host: 5.1.26100.9818; the operator records their own).
@@ -28,41 +29,22 @@ If any prerequisite fails, STOP. The run is BLOCKED; do not substitute another h
 The operator sets one variable, `$run`, and every later path uses it. The run directory name contains the start timestamp; if it already exists the setup fails instead of overwriting artifacts.
 
 ```powershell
-$run = "C:\umnia-validation\run-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
-if (Test-Path $run) { throw "Run directory already exists: $run" }
-New-Item -ItemType Directory -Force -Path "$run\logs" | Out-Null; Check 'create run directory'
-New-Item -ItemType Directory -Force -Path "$run\backups" | Out-Null; Check 'create backups directory'
-git clone https://github.com/ch0c01dxyz/UMNIA-APP.git "$run\UMNIA-APP"; Check 'clone repo'
-cd "$run\UMNIA-APP"; Check 'cd into run checkout'
-git checkout --detach 934ad4b8b79ae3cd5dca01121a270fd6f8f955f1; Check 'detach at reviewed revision'
-if ((git rev-parse HEAD) -ne '934ad4b8b79ae3cd5dca01121a270fd6f8f955f1') { throw 'HEAD is not the reviewed revision 934ad4b' }
-git rev-parse HEAD
-```
-
-Rules: the branch `f1-03-identity` is a moving target (it now points past `934ad4b`), so the packet NEVER checks it out. The code under test is the detached `934ad4b` commit only. The packet file itself is read from the delivery commit `10bc3de` (a separate checkout, or a printed copy); it is not part of the run checkout. Never run `git checkout`, `git reset`, or any git mutation in the user's own working checkout. Verify the pinned files stay unmodified before each upgrade run (see §6b/§6c/§10): `git -C "$run\UMNIA-APP" diff --quiet -- deploy/windows/compose.yml deploy/windows/Upgrade-UmniaVolume.ps1; Check 'pinned files unmodified'`.
-
-Create `$run\UMNIA-APP\.env` with **synthetic test-only credentials** (never the user's real `.env`):
-
-```env
-UMNIA_BUSINESS_BOOTSTRAP_PASSWORD=ValBootstrap123!
-UMNIA_BUSINESS_DB_PASSWORD=ValRuntime123!
-UMNIA_ADMIN_BOOTSTRAP_PASSWORD=ValAdminBoot123!
-UMNIA_ADMIN_DB_PASSWORD=ValAdminRun123!
-RUSTFS_ACCESS_KEY=val-access
-RUSTFS_SECRET_KEY=val-secret-123
-UMNIA_LEGACY_BOOTSTRAP_PASSWORD=ValLegacy123!
-```
-
-## 2. Stop-on-error semantics, stack identity, and results recording (read before any scenario)
-
-**Stop-on-error (mandatory).** A native command's non-zero exit stops the current scenario immediately, except for steps that explicitly assert a failure (negatives, §9). A failed startup must never lead to tests against a different leftover stack. Use the helpers below in every scenario; do not rely on "expect:" comments.
-
-```powershell
+# --- ENTRY SEQUENCE. Define the helpers FIRST, then the run directory. ---
+# Every later block in this packet calls Check/Expect-Fail/Get-Status/
+# Confirm-Stack. In a fresh PowerShell session an undefined function is an
+# unknown command, and parser success cannot catch it. Paste this whole
+# block first, in the SAME session used for all scenarios (see §2).
+$ErrorActionPreference = 'Stop'
 function Check($Name) {
-  if ($LASTEXITCODE -ne 0) { throw "FAILED: $Name (exit $LASTEXITCODE). Stop this scenario; do not run later steps against a leftover stack." }
+  # $LASTEXITCODE is set only by native commands. It is $null before any
+  # native command has run and is NOT reset by cmdlets (a cmdlet after a
+  # failing native command leaves the old code in place). Guard the $null
+  # case so Check never throws on a stale or absent code, and call Check
+  # immediately after the native command it guards.
+  if ($LASTEXITCODE -and ($LASTEXITCODE -ne 0)) { throw "FAILED: $Name (exit $LASTEXITCODE). Stop this scenario; do not run later steps against a leftover stack." }
 }
 function Expect-Fail($Name) {
-  if ($LASTEXITCODE -eq 0) { throw "FAILED: $Name was expected to fail but exited 0." }
+  if (-not $LASTEXITCODE -or ($LASTEXITCODE -eq 0)) { throw "FAILED: $Name was expected to fail but exited 0." }
   Write-Host "NEGATIVE OK: $Name failed as expected (exit $LASTEXITCODE)"
 }
 function Get-Status($Uri) {
@@ -78,7 +60,43 @@ function Confirm-Stack($File, $Project) {
   docker compose -f $File -p $Project ps; Check "ps $Project"
   docker compose -f $File -p $Project ps --format '{{.Name}} {{.State}}' | Out-File -Encoding ascii "$run\logs\ps-$Project.txt"; Check "ps-format $Project"
 }
+
+$run = "C:\umnia-validation\run-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
+if (Test-Path $run) { throw "Run directory already exists: $run" }
+# New-Item and cd are cmdlets: under $ErrorActionPreference = 'Stop' (set
+# above) a failure throws a terminating error on its own. Do NOT put Check
+# after a cmdlet — Check reads $LASTEXITCODE, which cmdlets do not set, so
+# it would report a stale code from an earlier native command (see §2).
+New-Item -ItemType Directory -Force -Path "$run\logs" | Out-Null
+New-Item -ItemType Directory -Force -Path "$run\backups" | Out-Null
+git clone https://github.com/ch0c01dxyz/UMNIA-APP.git "$run\UMNIA-APP"; Check 'clone repo'
+cd "$run\UMNIA-APP"
+git checkout --detach 934ad4b8b79ae3cd5dca01121a270fd6f8f955f1; Check 'detach at reviewed revision'
+if ((git rev-parse HEAD) -ne '934ad4b8b79ae3cd5dca01121a270fd6f8f955f1') { throw 'HEAD is not the reviewed revision 934ad4b' }
+git rev-parse HEAD
 ```
+
+Rules: the branch `f1-03-identity` is a moving target (it now points past `934ad4b`), so the packet NEVER checks it out. The code under test is the detached `934ad4b` commit only. The packet file itself is read from the delivery commit recorded in the delivery report (see the header of this file for how to verify you hold the corrected version); it is not part of the run checkout. Never run `git checkout`, `git reset`, or any git mutation in the user's own working checkout. Verify the pinned files stay unmodified before each upgrade run (see §6b/§6c/§10): `git -C "$run\UMNIA-APP" diff --quiet -- deploy/windows/compose.yml deploy/windows/Upgrade-UmniaVolume.ps1; Check 'pinned files unmodified'`.
+
+Create `$run\UMNIA-APP\.env` with **synthetic test-only credentials** (never the user's real `.env`):
+
+```env
+UMNIA_BUSINESS_BOOTSTRAP_PASSWORD=ValBootstrap123!
+UMNIA_BUSINESS_DB_PASSWORD=ValRuntime123!
+UMNIA_ADMIN_BOOTSTRAP_PASSWORD=ValAdminBoot123!
+UMNIA_ADMIN_DB_PASSWORD=ValAdminRun123!
+RUSTFS_ACCESS_KEY=val-access
+RUSTFS_SECRET_KEY=val-secret-123
+UMNIA_LEGACY_BOOTSTRAP_PASSWORD=ValLegacy123!
+```
+
+## 2. Stop-on-error semantics, stack identity, and results recording (read before any scenario)
+
+**One session.** The helpers defined in §1 (`Check`, `Expect-Fail`, `Get-Status`, `Confirm-Stack`) are session state. Run every scenario in the SAME PowerShell 5.1 session started in §1. If a scenario ever needs a new session, re-paste the §1 helper block (from `$ErrorActionPreference = 'Stop'` through the `Confirm-Stack` definition) before any other command; never depend on functions from a previous operator session. The §6b Window B watcher uses only built-in cmdlets, never the packet helpers, so it needs no definition. The writer (§4a) is a separate script file and is self-contained. The API helpers (`Call-Api`, `Expect-Step`, `Get-Json`) are defined in §4b, before their first use in §8.
+
+**Stop-on-error (mandatory).** A native command's non-zero exit stops the current scenario immediately, except for steps that explicitly assert a failure (negatives, §9). A failed startup must never lead to tests against a different leftover stack. Use the helpers in every scenario; do not rely on "expect:" comments.
+
+**Native commands vs cmdlets.** Native commands (`docker`, `git`, `psql`, `pg_restore`, `powershell`) report through `$LASTEXITCODE`; call `Check` immediately after the native command it guards. Cmdlets (`New-Item`, `cd`, `Copy-Item`, `Get-Content`, `Start-Process`, ...) do NOT set `$LASTEXITCODE` and do NOT reset it — a `Check` after a cmdlet would report a stale code from an earlier native command, so the packet never does that. Instead, cmdlet failures are terminating errors under `$ErrorActionPreference = 'Stop'` (set in §1); where the packet must handle a cmdlet failure it says so explicitly (`try`/`catch` in `Get-Status` and in the writer; `-ErrorAction SilentlyContinue` only for the P5 port probe in §0, where "no output" is the expected result). In a pipeline whose first element is a native command (`docker exec ... | Select-String ... | Out-File`), `$LASTEXITCODE` is that native command's code — the trailing cmdlets do not reset it — so `Check` after such a pipeline guards the native command (verified on pwsh 7.5.4; see §14).
 
 **Stack identity.** Before any scenario that uses `localhost:8080`, confirm the responding API is the intended stack: run `Confirm-Stack` for that project AND query one known marker (stated per scenario, e.g. the fixture workspace "Toko Lama" for the legacy stack, zero workspaces for a fresh stack). If the marker does not match, STOP — a leftover stack owns the port.
 
@@ -227,7 +245,7 @@ Host ports 5432/5433/8080/9000/3000 are owned by exactly one stack at a time. A 
 
 ```powershell
 Start-Transcript -Path "$run\logs\scenario-3a-fixture.log"
-cd "$run\UMNIA-APP"; Check 'cd run checkout'
+cd "$run\UMNIA-APP"
 docker compose -f deploy/windows/compose.legacy.yml -p umnia-val-legacy up -d --build; Check 'legacy up'
 Start-Sleep -Seconds 60
 Confirm-Stack 'deploy/windows/compose.legacy.yml' 'umnia-val-legacy'
@@ -267,7 +285,7 @@ Window A:
 
 ```powershell
 Start-Transcript -Path "$run\logs\scenario-3b-running.log"
-cd "$run\UMNIA-APP"; Check 'cd run checkout'
+cd "$run\UMNIA-APP"
 git -C "$run\UMNIA-APP" diff --quiet -- deploy/windows/compose.yml deploy/windows/Upgrade-UmniaVolume.ps1; Check 'pinned files unmodified'
 Confirm-Stack 'deploy/windows/compose.legacy.yml' 'umnia-val-legacy'
 $writer = Start-Process powershell -WindowStyle Hidden -ArgumentList '-ExecutionPolicy','Bypass','-File',"$run\writer-val.ps1",'-ApiBase','http://localhost:8080','-LogFile',"$run\logs\writer.log" -PassThru
@@ -311,7 +329,7 @@ docker compose -f deploy/windows/compose.yml -p umnia-val-new stop; Check 'stop 
 
 ```powershell
 Start-Transcript -Path "$run\logs\scenario-3c-stopped.log"
-cd "$run\UMNIA-APP"; Check 'cd run checkout'
+cd "$run\UMNIA-APP"
 git -C "$run\UMNIA-APP" diff --quiet -- deploy/windows/compose.yml deploy/windows/Upgrade-UmniaVolume.ps1; Check 'pinned files unmodified'
 docker compose -f deploy/windows/compose.legacy.yml -p umnia-val-legacy ps --format '{{.Name}} {{.State}}'; Check 'legacy ps (must show stopped)'
 # Expect: no running legacy containers; the volume still exists. RECORD ACTUAL.
@@ -337,7 +355,7 @@ docker compose -f deploy/windows/compose.yml -p umnia-val-new2 stop; Check 'stop
 
 ```powershell
 Start-Transcript -Path "$run\logs\scenario-4.log"
-cd "$run\UMNIA-APP"; Check 'cd run checkout'
+cd "$run\UMNIA-APP"
 Confirm-Stack 'deploy/windows/compose.yml' 'umnia-val-new'
 # (a) No 201 after the recorded writer-stop time:
 $stopTime = [DateTime]::Parse((Get-Content "$run\logs\writer-stop.txt"))
@@ -362,7 +380,7 @@ Stop-Transcript
 
 ```powershell
 Start-Transcript -Path "$run\logs\scenario-5.log"
-cd "$run\UMNIA-APP"; Check 'cd run checkout'
+cd "$run\UMNIA-APP"
 Confirm-Stack 'deploy/windows/compose.yml' 'umnia-val-new'
 docker compose -f deploy/windows/compose.yml -p umnia-val-new exec -T postgres-business psql -U umnia_bootstrap -d umnia_business -tAc "SELECT rolsuper::text || '/' || rolbypassrls::text FROM pg_roles WHERE rolname = 'umnia_business';"; Check 'target role f/f query'
 # Expect output: false/false. RECORD ACTUAL; a different value is a FAIL (throw below):
@@ -416,7 +434,7 @@ Preconditions: no stack running (see §5); the `umnia-val-new` volume exists (st
 
 ```powershell
 Start-Transcript -Path "$run\logs\scenario-6-negatives.log"
-cd "$run\UMNIA-APP"; Check 'cd run checkout'
+cd "$run\UMNIA-APP"
 docker ps --format '{{.Names}}'; Check 'ps before negatives'
 docker volume ls | Select-String -Pattern 'umnia-val-'
 # (a) Equal projects:
@@ -465,11 +483,15 @@ Stop-Transcript
 
 ```powershell
 Start-Transcript -Path "$run\logs\scenario-7.log"
-cd "$run\UMNIA-APP"; Check 'cd run checkout'
+cd "$run\UMNIA-APP"
 # Fixture umnia-val-legacy7 was built per §6a (same steps, -p umnia-val-legacy7).
 # The fixture workspace "Toko Lama" exists there; record its id from $run\logs\fixture-workspace-7.txt.
 # Create the bad-tag copy (same directory as the original, so relative build paths resolve):
-Copy-Item "$run\UMNIA-APP\deploy\windows\compose.yml" "$run\UMNIA-APP\deploy\windows\compose-badtag.yml"; Check 'copy compose for bad-tag'
+Copy-Item "$run\UMNIA-APP\deploy\windows\compose.yml" "$run\UMNIA-APP\deploy\windows\compose-badtag.yml"
+# Copy-Item is a cmdlet: under $ErrorActionPreference = 'Stop' (set in §1) a
+# failure throws on its own. Assert the copy exists instead of Check (which
+# would read a stale $LASTEXITCODE — see §2).
+if (-not (Test-Path "$run\UMNIA-APP\deploy\windows\compose-badtag.yml")) { throw 'FAILED: bad-tag compose copy missing' }
 (Get-Content "$run\UMNIA-APP\deploy\windows\compose.yml") -replace 'image: postgres:16-bookworm', 'image: postgres:16-bookworm-VALIDATION-BAD-TAG-0000' | Set-Content "$run\UMNIA-APP\deploy\windows\compose-badtag.yml"
 if ((Select-String -Path "$run\UMNIA-APP\deploy\windows\compose-badtag.yml" -Pattern 'VALIDATION-BAD-TAG-0000').Count -ne 3) { throw 'FAILED: bad-tag edit did not apply to all 3 postgres image lines' }
 git -C "$run\UMNIA-APP" diff --quiet -- deploy/windows/compose.yml; Check 'original compose unmodified'
@@ -509,13 +531,17 @@ docker compose -f deploy/windows/compose.legacy.yml -p umnia-val-legacy7 stop; C
 
 ## 11. Scenario 8 — Backup hash + restore evidence (self-contained)
 
-**Why the previous recipe was incomplete.** It restored the custom dump into a bare postgres container with `--no-owner` and expected success. Installed `pg_restore --help` (PostgreSQL 16.15, from the `postgres:16-bookworm` image) and the official docs state: `-O, --no-owner` skips restoration of object OWNERSHIP only; access privileges (GRANT/REVOKE) are restored unless `-x, --no-privileges` (`--no-acl`) is also given. The synthetic dump's GRANTs reference roles that do not exist in a bare container (notably `umnia_business`), so the restore would fail under `--exit-on-error`. Sources: `pg_restore --help` from the image binaries (OBSERVED on the preparer's VM); PostgreSQL docs, `https://www.postgresql.org/docs/devel/app-pgrestore.html` (OFFICIAL, retrieved 2026-11-06).
+**Why the previous recipe was incomplete.** It restored the custom dump into a bare postgres container with `--no-owner` and expected success, and it claimed `postgres` "already exists in every postgres container" while only pre-creating `umnia_business`. That claim is false for a cluster initialized with a custom bootstrap user: the official entrypoint creates exactly the configured `POSTGRES_USER` as superuser and nothing else. Evidence in this repo: the project initdb explicitly creates the role (`deploy/windows/initdb/01-runtime-roles.sh:72-78`, `CREATE ROLE postgres SUPERUSER LOGIN`) precisely because the entrypoint does not, and the old initdb failure `FATAL: role "postgres" does not exist` was observed. Installed `pg_restore --help` (PostgreSQL 16.15, from the `postgres:16-bookworm` image) and the official docs state: `-O, --no-owner` skips restoration of object OWNERSHIP only; access privileges (GRANT/REVOKE) are restored unless `-x, --no-privileges` (`--no-acl`) is also given. Sources: `pg_restore --help` from the image binaries (OBSERVED on the preparer's VM); PostgreSQL docs, `https://www.postgresql.org/docs/devel/app-pgrestore.html` (OFFICIAL, retrieved 2026-11-06).
 
-**Recipe (self-contained).** The disposable container mirrors what the real target's initdb does at upgrade step 5: it pre-creates the roles the dump's ACLs reference. The restore uses `--no-owner --exit-on-error` WITHOUT `--no-privileges`, so the production ACL semantics are validated (the GRANTs must succeed), not skipped. Any `pg_restore` error fails the scenario; errors are never ignored. The backup used is the §6b backup recorded in `$run\logs\backup-6b.txt`; if that file is unavailable, this scenario is BLOCKED (do not silently substitute another backup).
+**Source-based role inventory (the runtime inventory below is the authority).** The §6b backup is a `pg_dump --no-owner -Fc` of the LEGACY database. In that database, migration 002 ran without `-1` and stopped at its first `ALTER FUNCTION ... OWNER TO postgres` (`services/business-api/migrations/002_identity.sql:350`; harness-observed exit at 002:350, `role "postgres" does not exist`). Everything from line 350 on never applied: the `OWNER TO postgres` statements (350-356), the `REVOKE EXECUTE ... FROM PUBLIC` (371-376), and the `GRANT EXECUTE ... TO umnia_business` (377-382). What did apply: all of 001 (including `OWNER TO umnia_business` on `schema_migrations`, line 16) and 002 lines 1-349, including `GRANT USAGE ON SCHEMA app TO umnia_business` (line 11) and `OWNER TO umnia_business` on the 9 tables (333-341). Consequence for the dump: its ACLs are all at PostgreSQL defaults — the schema USAGE grant to the owner does not change `proacl`, and the functions keep the default `EXECUTE TO PUBLIC` (the 002 comment at lines 359-362 states the default explicitly). So the runtime inventory is EXPECTED to show `OWNER TO umnia_business` lines (ownership, skipped at restore by `--no-owner`) and NO `GRANT`/`REVOKE` lines. `postgres` is NOT expected as a grantee: no `GRANT ... TO postgres` exists in either migration file. If the runtime inventory differs, follow the inventory, not this expectation.
+
+**Fixture roles vs the deployment contract.** Roles created in this disposable container are scaffolding only: `NOLOGIN`, no `SUPERUSER`, no `LOGIN`. In the real deployment, `postgres` is the SUPERUSER owner of the SECURITY DEFINER helper functions (created by initdb) and `umnia_business` is the NOSUPERUSER/NOBYPASSRLS runtime role (created by initdb). This scenario validates dump restorability and faithful ACL reproduction, NOT the deployment ownership contract — that is scenario 5 / upgrade step 8a.
+
+**Recipe (self-contained).** The restore uses `--no-owner --exit-on-error` WITHOUT `--no-privileges`, so the production ACL semantics are validated (the GRANTs must succeed), not skipped. Any `pg_restore` error fails the scenario; errors are never ignored. The backup used is the §6b backup recorded in `$run\logs\backup-6b.txt`; if that file is unavailable, this scenario is BLOCKED (do not silently substitute another backup).
 
 ```powershell
 Start-Transcript -Path "$run\logs\scenario-8.log"
-cd "$run\UMNIA-APP"; Check 'cd run checkout'
+cd "$run\UMNIA-APP"
 $backup = Get-Content "$run\logs\backup-6b.txt"
 if (-not (Test-Path $backup)) { throw "FAILED: recorded §6b backup not found: $backup" }
 Get-FileHash -Algorithm SHA256 $backup
@@ -523,19 +549,40 @@ Get-FileHash -Algorithm SHA256 $backup
 docker run -d --name umnia-val-restore-check -e POSTGRES_PASSWORD=ValRestore123! -e POSTGRES_USER=umnia_bootstrap -e POSTGRES_DB=umnia_business postgres:16-bookworm; Check 'start restore-check container'
 Start-Sleep -Seconds 15
 docker cp $backup umnia-val-restore-check:/tmp/check.dump; Check 'cp backup into restore-check'
-# (a) Inventory the roles/ACLs the dump references:
+# (a) Inventory the roles/ACLs the dump references. The listing WITHOUT
+# --no-owner shows OWNER TO lines too; the restore in (c) skips those via
+# --no-owner, so only GRANT/REVOKE grantees need roles to exist.
 docker exec umnia-val-restore-check pg_restore -f - /tmp/check.dump | Select-String -Pattern 'GRANT|REVOKE|OWNER TO' | Out-File -Encoding ascii "$run\logs\restore-acl-inventory.txt"; Check 'ACL inventory'
 Get-Content "$run\logs\restore-acl-inventory.txt"
-# Expect GRANTs to umnia_business (and postgres, which already exists in every
-# postgres container). RECORD ACTUAL. Any other role in the inventory must be
-# pre-created below (NOLOGIN) and recorded; do not proceed with an unlisted role.
-# (b) Pre-create the required fixture roles (mirrors the real target's initdb):
-docker exec umnia-val-restore-check psql -U umnia_bootstrap -d umnia_business -tAc "CREATE ROLE umnia_business NOLOGIN;"; Check 'pre-create umnia_business role'
+# OWNER TO postgres in the inventory means this is NOT the §6b legacy
+# backup (the legacy 002 never applied OWNER TO postgres): STOP. Do not
+# create the role to paper over a wrong backup.
+if (Select-String -Path "$run\logs\restore-acl-inventory.txt" -Pattern 'OWNER TO postgres' -Quiet) { throw 'FAILED: inventory shows OWNER TO postgres — wrong backup (not the §6b legacy dump). Do not proceed.' }
+# (b) Create every role a GRANT/REVOKE line names (except umnia_bootstrap,
+# which exists, and PUBLIC, which needs no creation) as NOLOGIN. The
+# inventory decides — do NOT pre-create roles unconditionally. Source-derived
+# expectation: NO GRANT/REVOKE lines at all (legacy ACLs are all at
+# PostgreSQL defaults), so in the expected case this loop creates nothing.
+# Any role created here is recorded in restore-roles.txt.
+$needed = @()
+foreach ($m in (Select-String -Path "$run\logs\restore-acl-inventory.txt" -Pattern 'GRANT .* TO ([A-Za-z_][A-Za-z0-9_]*)')) { $needed += $m.Matches.Groups[1].Value }
+foreach ($m in (Select-String -Path "$run\logs\restore-acl-inventory.txt" -Pattern 'REVOKE .* FROM ([A-Za-z_][A-Za-z0-9_]*)')) { $needed += $m.Matches.Groups[1].Value }
+$needed = $needed | Where-Object { $_ -and ($_ -ne 'umnia_bootstrap') -and ($_ -ne 'PUBLIC') } | Sort-Object -Unique
+foreach ($r in $needed) {
+  docker exec umnia-val-restore-check psql -U umnia_bootstrap -d umnia_business -tAc "CREATE ROLE $r NOLOGIN;"; Check "pre-create role $r"
+  Add-Content "$run\logs\restore-roles.txt" $r
+}
 # (c) Restore with production ACL semantics (no --no-privileges), failing loudly:
 docker exec umnia-val-restore-check pg_restore -U umnia_bootstrap -d umnia_business --no-owner --exit-on-error /tmp/check.dump; Check 'pg_restore with ACLs'
-# (d) Validate counts and ACL semantics separately. The umnia-val-new target is
-# stopped at this point (see §5), so start only its postgres for the read,
-# then stop it again (same pattern as §9b):
+# (d) Validate counts and grants against the LEGACY state — NOT the
+# post-migrate state. The §6b backup is the legacy dump: 002 stopped at its
+# first OWNER TO postgres (line 350), so the REVOKE FROM PUBLIC and GRANT
+# EXECUTE TO umnia_business (lines 371-382) never applied. The functions
+# therefore keep PostgreSQL's default EXECUTE TO PUBLIC, and there are NO
+# post-migrate grants in this dump. The 12-grant check belongs to scenario 5
+# / upgrade step 8a (after migrate re-runs 002), not here. The umnia-val-new
+# target is stopped at this point (see §5), so start only its postgres for
+# the read, then stop it again (same pattern as §9b):
 docker compose -f deploy/windows/compose.yml -p umnia-val-new up -d postgres-business; Check 'start target postgres for read'
 Start-Sleep -Seconds 15
 $wsCount = docker exec umnia-val-restore-check psql -U umnia_bootstrap -d umnia_business -tAc "SELECT count(*) FROM workspaces;"; Check 'restored workspaces count'
@@ -544,9 +591,13 @@ if ($wsCount -ne $wsTarget) { throw "FAILED: restored workspaces ($wsCount) != t
 docker compose -f deploy/windows/compose.yml -p umnia-val-new stop; Check 'stop target after read'
 $fixtureRestored = docker exec umnia-val-restore-check psql -U umnia_bootstrap -d umnia_business -tAc "SELECT count(*) FROM workspaces WHERE name = 'Toko Lama';"; Check 'restored fixture'
 if ($fixtureRestored -ne '1') { throw "FAILED: restored fixture count is $fixtureRestored, expected 1" }
-$grantsRestored = docker exec umnia-val-restore-check psql -U umnia_bootstrap -d umnia_business -tAc "SELECT count(*) FROM information_schema.routine_privileges WHERE routine_schema = 'app' AND routine_name IN ('accept_invite', 'has_permission', 'is_member', 'register_subject', 'session_subject', 'subject_by_email') AND grantee IN ('postgres', 'umnia_business');"; Check 'restored EXECUTE grants'
-if ($grantsRestored -ne '12') { throw "FAILED: restored EXECUTE grants count is $grantsRestored, expected 12" }
-Write-Host "RESTORE OK workspaces=$wsCount grants=$grantsRestored"
+$publicGrants = docker exec umnia-val-restore-check psql -U umnia_bootstrap -d umnia_business -tAc "SELECT count(*) FROM information_schema.routine_privileges WHERE routine_schema = 'app' AND routine_name IN ('accept_invite', 'has_permission', 'is_member', 'register_subject', 'session_subject', 'subject_by_email') AND grantee = 'PUBLIC' AND privilege_type = 'EXECUTE';"; Check 'restored PUBLIC EXECUTE grants'
+if ($publicGrants -ne '6') { throw "FAILED: restored PUBLIC EXECUTE grants count is $publicGrants, expected 6 (legacy default)" }
+$migratedGrants = docker exec umnia-val-restore-check psql -U umnia_bootstrap -d umnia_business -tAc "SELECT count(*) FROM information_schema.routine_privileges WHERE routine_schema = 'app' AND routine_name IN ('accept_invite', 'has_permission', 'is_member', 'register_subject', 'session_subject', 'subject_by_email') AND grantee IN ('postgres', 'umnia_business');"; Check 'no post-migrate grants in dump'
+if ($migratedGrants -ne '0') { throw "FAILED: post-migrate grants found in the legacy dump: $migratedGrants (expected 0)" }
+# Capture the effective grants for the record (all routines, all grantees):
+docker exec umnia-val-restore-check psql -U umnia_bootstrap -d umnia_business -c "SELECT routine_name, grantee, privilege_type FROM information_schema.routine_privileges WHERE routine_schema = 'app' ORDER BY routine_name, grantee;" | Out-File -Encoding ascii "$run\logs\restore-effective-grants.txt"; Check 'capture effective grants'
+Write-Host "RESTORE OK workspaces=$wsCount public_grants=$publicGrants migrated_grants=$migratedGrants"
 # Do NOT remove the container here. Stop it and leave it for the cleanup approval (§13):
 docker stop umnia-val-restore-check; Check 'stop restore-check container'
 Stop-Transcript
@@ -587,13 +638,17 @@ Remove-Item -Recurse -Force "$run\UMNIA-APP"
 
 ## 14. Static checks performed on this packet (preparer, 2026-11-06)
 
-- **Revision pin:** the `$run` checkout detaches the full reviewed commit `934ad4b8b79ae3cd5dca01121a270fd6f8f955f1` and asserts `git rev-parse HEAD` equals it; the delivery commit is `10bc3de`. The packet never checks out the moving branch.
-- **PowerShell syntax:** every ```powershell block in this file (16 blocks) was extracted and parsed with `[System.Management.Automation.Language.Parser]::ParseFile` under PowerShell 7.5.4 on the preparer's Linux VM — syntax only. Result: **16/16 PARSE OK, 0 failures**. A scan for PowerShell 7-only syntax (`??`, `?.`, `&&`, `||`, ternary) found no PowerShell operators: the only `||` occurrences are PostgreSQL `||` string concatenation inside SQL string literals. This is NOT a PowerShell 5.1 parse: 5.1 parsing of these blocks remains for the operator/reviewer on Windows. (For reference, the reviewer already parsed the 934ad4b upgrade script with explicit `C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`, version 5.1.26100.9818, zero errors — parser evidence only.)
+- **Revision pin:** the `$run` checkout detaches the full reviewed commit `934ad4b8b79ae3cd5dca01121a270fd6f8f955f1` and asserts `git rev-parse HEAD` equals it. The packet never checks out the moving branch. The delivery revision is recorded in the delivery report, not guessed in this file (see the header).
+- **PowerShell syntax:** every ```powershell block in this file (15 blocks) was extracted and parsed with `[System.Management.Automation.Language.Parser]::ParseFile` under PowerShell 7.5.4 on the preparer's Linux VM — syntax only. Result: **15/15 PARSE OK, 0 failures**. A scan for PowerShell 7-only syntax (`??`, `?.`, `&&`, `||`, ternary) found no PowerShell operators: the only `||` occurrences are PostgreSQL `||` string concatenation inside SQL string literals. This is NOT a PowerShell 5.1 parse: 5.1 parsing of these blocks remains for the operator/reviewer on Windows. (For reference, the reviewer already parsed the 934ad4b upgrade script with explicit `C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`, version 5.1.26100.9818, zero errors — parser evidence only. The reviewer also parsed all 16 blocks of the previous packet version with the same executable, 16 parsed, 0 errors — independent syntax evidence only.)
+- **Helper order (definition before use):** a static order check over the blocks in document order verified that every call to `Check`, `Expect-Fail`, `Get-Status`, `Confirm-Stack`, `Call-Api`, `Expect-Step`, `Get-Json` is preceded by its definition (helpers defined in §1, API helpers in §4b). The previous order bug (§1 calling `Check` before §2 defined it) is gone: §1 now defines the helpers before its first use, and §2 contains only policy. Parser success cannot catch a missing function; this order check is separate from the parse.
+- **Helper semantics (fresh session):** the §1 helpers were loaded in a FRESH pwsh 7.5.4 process (no prior session state) and tested: `Check` throws after a failing native command and passes after a succeeding one; `Expect-Fail` throws on exit 0 and passes on non-zero; a failing cmdlet throws under `$ErrorActionPreference = 'Stop'`; calling `Check` BEFORE its definition fails as an unknown command (demonstrating the original bug class). This is pwsh 7.5.4, NOT PowerShell 5.1 — a fresh 5.1 session run of §1 remains for the operator/reviewer on Windows.
+- **`$LASTEXITCODE` semantics:** verified in a fresh pwsh 7.5.4 process: cmdlets neither set nor reset `$LASTEXITCODE` (a `Check` after a cmdlet would read a stale code — the packet never does that); a pipeline whose first element is a native command keeps that command's code through trailing cmdlets (`/bin/false | Out-Null` leaves `$LASTEXITCODE` = 1). Hence `Check` after the `docker exec ... | Select-String ... | Out-File` inventory pipeline guards the `docker` call.
+- **Restore-check role inventory (source-based):** from `services/business-api/migrations/001_init.sql` and `002_identity.sql` at the reviewed revision: 002 stopped at its first `ALTER FUNCTION ... OWNER TO postgres` (line 350), so the `REVOKE`/`GRANT` block (371-382) never applied in the legacy database; the dump's ACLs are therefore all at PostgreSQL defaults. `postgres` is not referenced as a grantee in either migration file. The entrypoint does not create a `postgres` role for a custom `POSTGRES_USER` — the project initdb creates it explicitly (`deploy/windows/initdb/01-runtime-roles.sh:72-78`). The runtime inventory (`pg_restore -f -`) in §11 is the authority at execution time; the packet creates only the roles it names, as `NOLOGIN`.
 - **Cited script strings:** all 11 literal strings cited from the upgrade script (`penulis berhenti: tidak ada sesi aktif`, `UPGRADE SELESAI`, `UPGRADE GAGAL`, step markers, etc.) were verified to exist verbatim in `deploy/windows/Upgrade-UmniaVolume.ps1` at `934ad4b` (11/11). All 5 referenced repo paths exist. `deploy/windows/compose.yml` contains exactly 3 `image: postgres:16-bookworm` lines, matching the bad-tag check in §10.
 - **Destructive commands:** `down -v` and `docker rm -f` occur ONLY in §13 (approval-required cleanup) plus one prose prohibition in §10; no test step deletes anything.
 - **Command review:** every `docker`/`docker compose`/`psql`/`pg_dump`/`pg_restore` command was checked against the submitted script's actual commands (`deploy/windows/Upgrade-UmniaVolume.ps1` at `934ad4b`, OBSERVED) and the Compose contract (`deploy/windows/compose.yml`, OBSERVED). Step markers cited (`== 0c.`, `== 1.`, `== 4.`, `== 5.`, `UPGRADE SELESAI.`/`UPGRADE GAGAL:`) are the script's literal `Write-Step`/`Write-Host` strings.
 - **pg_restore semantics:** `--no-owner` skips ownership only; `--no-privileges`/`--no-acl` skips GRANT/REVOKE — verified from installed `pg_restore --help` (PostgreSQL 16.15, from the `postgres:16-bookworm` image) and the official docs, `https://www.postgresql.org/docs/devel/app-pgrestore.html`.
-- **Not checked:** actual execution on Windows (NOT RUN); PowerShell 5.1 parsing of these blocks (NOT RUN here); Docker Desktop behavior on Windows (NOT RUN).
+- **Not checked:** actual execution on Windows (NOT RUN); PowerShell 5.1 parsing of these blocks (NOT RUN here — the reviewer's 5.1 parse of the PREVIOUS version is not a parse of this version); PowerShell 5.1 fresh-session execution of §1 (NOT RUN here); Docker Desktop behavior on Windows (NOT RUN).
 
 ## 15. What this packet does NOT claim
 

@@ -1,37 +1,47 @@
-# Windows Validation Packet — F1-WINDOWS-RUNTIME-ACCEPTANCE
+# Windows Validation Packet — F1-WINDOWS-RUNTIME-ACCEPTANCE (CORRECTED 2026-11-06)
 
-**Status: NOT RUN anywhere. Prepared commands only (PROPOSED).**
-**Tested revision: `934ad4b8b79ae3cd5dca01121a270fd6f8f955f1` (`f1-03-identity`).**
+**Status: CORRECTED procedure — static checks done (see §14); execution NOT RUN anywhere.**
+**This packet is NOT "ready-to-run": its revision, command syntax, lifecycle and prerequisites have been checked statically (§13), but actual execution must occur on a Windows host with Docker Desktop running.**
+**Tested revision (code under test): `934ad4b8b79ae3cd5dca01121a270fd6f8f955f1` (detached pin, §1).**
+**Packet delivered at: commit `10bc3de` on `f1-03-identity`. The packet file is read from that delivery commit; the code under test is the detached `934ad4b` checkout. Never run tests from the delivery checkout.**
 **Scope: scenarios 1–8 from the acceptance task. No merge/deploy/user-data migration is authorized by running this packet.**
 
-Run everything in **Windows PowerShell 5.1** (built-in `powershell`, NOT `pwsh` 7.x). Start each scenario with `Start-Transcript` and record the exit code of every command. If any step's actual result differs from the expected result, STOP, record the difference as a finding, and do not force it green.
+Run everything in **Windows PowerShell 5.1** at the explicit executable `C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`. Never infer PS 5.1 from a tool label: the generic context-mode `powershell` runtime in the preparer's environment is 7.6.9. Always record the executable path and `$PSVersionTable.PSVersion` (reviewer-observed on their host: 5.1.26100.9818; the operator records their own).
 
-## 0. Prerequisites (verify first — all must pass)
+## 0. Environment and prerequisites (one table — all must pass before §1)
+
+| # | Prerequisite | Check (record actual output) |
+|---|---|---|
+| P1 | Windows 10/11 64-bit, virtualization enabled | `Get-ComputerInfo \| Select-Object WindowsProductName, WindowsVersion, OsHardwareAbstractionLayer` — record actual |
+| P2 | Windows PowerShell 5.1 at the explicit path | `C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -NoProfile -Command '$PSVersionTable.PSVersion.ToString()'` — record actual (reviewer: 5.1.26100.9818) |
+| P3 | Docker Desktop 4.x+ in Linux-containers mode, WSL 2 backend, daemon running | `docker info` — must show a Server section; exit 0. Record `docker --version` and `docker compose version` (actual versions; no specific patch version is required) |
+| P4 | Git for Windows | `git --version` — record actual |
+| P5 | Ports free on 127.0.0.1: 5432, 5433, 8080, 9000, 3000 | `Get-NetTCPConnection -LocalPort 5432,5433,8080,9000,3000 -State Listen -ErrorAction SilentlyContinue` — expect no output |
+| P6 | Internet access to pull `postgres:16-bookworm` and `rustfs/rustfs:1.0.4` (or both images already cached) | `docker image inspect postgres:16-bookworm --format '{{.Id}}'` and the same for `rustfs/rustfs:1.0.4` — record digests, or record the pull output |
+| P7 | ~10 GB free disk | `Get-PSDrive C \| Select-Object Free` — record actual |
+| P8 | Unique run directory (see §1) | `Test-Path $run` must be `$false` before creation; creation fails if it already exists |
+
+If any prerequisite fails, STOP. The run is BLOCKED; do not substitute another host, another PowerShell version, or a mock.
+
+## 1. Run directory and revision pin (do this first; never touch the user's checkout)
+
+The operator sets one variable, `$run`, and every later path uses it. The run directory name contains the start timestamp; if it already exists the setup fails instead of overwriting artifacts.
 
 ```powershell
-$PSVersionTable.PSVersion            # expect 5.1.x
-docker --version                     # expect Docker version 29.x (or current Desktop version)
-docker compose version               # expect v2.x
-docker info                          # expect a Server section (daemon running); exit 0
-git --version
-Get-NetTCPConnection -LocalPort 5432,5433,8080,9000,3000 -State Listen -ErrorAction SilentlyContinue
-# expect: no output (ports free on 127.0.0.1)
-```
-
-Also required: Windows 10/11 64-bit with virtualization enabled, Docker Desktop 4.x+ in Linux-containers mode with the WSL 2 backend, internet access to pull `postgres:16-bookworm` and `rustfs/rustfs:1.0.4` (or both images already cached), ~10 GB free disk.
-
-## 1. Isolated checkout (do NOT use the user's working repo or `.env`)
-
-```powershell
-New-Item -ItemType Directory -Force -Path C:\umnia-validation\logs | Out-Null
-git clone https://github.com/ch0c01dxyz/UMNIA-APP.git C:\umnia-validation\UMNIA-APP
-cd C:\umnia-validation\UMNIA-APP
-git checkout f1-03-identity
+$run = "C:\umnia-validation\run-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
+if (Test-Path $run) { throw "Run directory already exists: $run" }
+New-Item -ItemType Directory -Force -Path "$run\logs" | Out-Null; Check 'create run directory'
+New-Item -ItemType Directory -Force -Path "$run\backups" | Out-Null; Check 'create backups directory'
+git clone https://github.com/ch0c01dxyz/UMNIA-APP.git "$run\UMNIA-APP"; Check 'clone repo'
+cd "$run\UMNIA-APP"; Check 'cd into run checkout'
+git checkout --detach 934ad4b8b79ae3cd5dca01121a270fd6f8f955f1; Check 'detach at reviewed revision'
+if ((git rev-parse HEAD) -ne '934ad4b8b79ae3cd5dca01121a270fd6f8f955f1') { throw 'HEAD is not the reviewed revision 934ad4b' }
 git rev-parse HEAD
-# expect: 934ad4b8b79ae3cd5dca01121a270fd6f8f955f1
 ```
 
-Create `C:\umnia-validation\UMNIA-APP\.env` with **synthetic test-only credentials** (never the user's real `.env`):
+Rules: the branch `f1-03-identity` is a moving target (it now points past `934ad4b`), so the packet NEVER checks it out. The code under test is the detached `934ad4b` commit only. The packet file itself is read from the delivery commit `10bc3de` (a separate checkout, or a printed copy); it is not part of the run checkout. Never run `git checkout`, `git reset`, or any git mutation in the user's own working checkout. Verify the pinned files stay unmodified before each upgrade run (see §6b/§6c/§10): `git -C "$run\UMNIA-APP" diff --quiet -- deploy/windows/compose.yml deploy/windows/Upgrade-UmniaVolume.ps1; Check 'pinned files unmodified'`.
+
+Create `$run\UMNIA-APP\.env` with **synthetic test-only credentials** (never the user's real `.env`):
 
 ```env
 UMNIA_BUSINESS_BOOTSTRAP_PASSWORD=ValBootstrap123!
@@ -43,9 +53,42 @@ RUSTFS_SECRET_KEY=val-secret-123
 UMNIA_LEGACY_BOOTSTRAP_PASSWORD=ValLegacy123!
 ```
 
-## 2. Legacy Compose file (created by the operator, in the isolated checkout only — DO NOT commit)
+## 2. Stop-on-error semantics, stack identity, and results recording (read before any scenario)
 
-Save as `deploy\windows\compose.legacy.yml`. It reproduces a pre-remediation volume: `POSTGRES_USER=umnia_business` (superuser), **no** `migrate` service, **no** initdb mount. It must define `postgres-business`, `business-api`, and `web` so the upgrade script can start/stop the writers and the recovery path can restart the full old stack. Relative build paths are preserved (`../../services/business-api`, `../../apps/web`).
+**Stop-on-error (mandatory).** A native command's non-zero exit stops the current scenario immediately, except for steps that explicitly assert a failure (negatives, §9). A failed startup must never lead to tests against a different leftover stack. Use the helpers below in every scenario; do not rely on "expect:" comments.
+
+```powershell
+function Check($Name) {
+  if ($LASTEXITCODE -ne 0) { throw "FAILED: $Name (exit $LASTEXITCODE). Stop this scenario; do not run later steps against a leftover stack." }
+}
+function Expect-Fail($Name) {
+  if ($LASTEXITCODE -eq 0) { throw "FAILED: $Name was expected to fail but exited 0." }
+  Write-Host "NEGATIVE OK: $Name failed as expected (exit $LASTEXITCODE)"
+}
+function Get-Status($Uri) {
+  try {
+    $r = Invoke-WebRequest -Uri $Uri -UseBasicParsing
+    return [int]$r.StatusCode
+  } catch {
+    if ($_.Exception.Response) { return [int]$_.Exception.Response.StatusCode }
+    return 0
+  }
+}
+function Confirm-Stack($File, $Project) {
+  docker compose -f $File -p $Project ps; Check "ps $Project"
+  docker compose -f $File -p $Project ps --format '{{.Name}} {{.State}}' | Out-File -Encoding ascii "$run\logs\ps-$Project.txt"; Check "ps-format $Project"
+}
+```
+
+**Stack identity.** Before any scenario that uses `localhost:8080`, confirm the responding API is the intended stack: run `Confirm-Stack` for that project AND query one known marker (stated per scenario, e.g. the fixture workspace "Toko Lama" for the legacy stack, zero workspaces for a fresh stack). If the marker does not match, STOP — a leftover stack owns the port.
+
+**Results recording.** Every scenario gets its own transcript in `$run\logs\` (never overwrite another scenario's transcript). The operator maintains `$run\results.md` with one line per scenario: `scenario N: PASS|FAIL|NOT RUN — <transcript file> — <one-line evidence>`. A FAIL line records the failing command and the transcript line number. A scenario that was not attempted is NOT RUN, never PASS.
+
+**Transcripts.** Start each scenario with `Start-Transcript -Path "$run\logs\scenario-N.log"` and end it with `Stop-Transcript`. The transcript is the evidence; the operator does not edit it.
+
+## 3. Legacy Compose file (created by the operator, in the run checkout only — DO NOT commit)
+
+Save as `$run\UMNIA-APP\deploy\windows\compose.legacy.yml`. It reproduces a pre-remediation volume: `POSTGRES_USER=umnia_business` (superuser), **no** `migrate` service, **no** initdb mount. It must define `postgres-business`, `business-api`, and `web` so the upgrade script can start/stop the writers and the recovery path can restart the full old stack. Relative build paths are preserved (`../../services/business-api`, `../../apps/web`).
 
 ```yaml
 services:
@@ -98,13 +141,18 @@ volumes:
   postgres-business-data:
 ```
 
-## 3. Helper scripts (save in `C:\umnia-validation\`, NOT in the repo)
+## 4. Helpers (save in `$run\`, NOT in the repo)
 
-### 3a. Controlled writer — `writer-val.ps1` (PowerShell 5.1 compatible)
+### 4a. Controlled writer — `$run\writer-val.ps1` (PowerShell 5.1 compatible)
+
+The writer logs ISO-8601 local timestamps (comparable with the operator's recorded observation times). It writes its own PID to `writer.pid` next to its log file. It is started hidden (see §6b) and stopped only by the exact PID the run created (see §7).
 
 ```powershell
-param([string]$ApiBase = 'http://localhost:8080', [string]$LogFile = 'C:\umnia-validation\logs\writer.log', [string]$Prefix = 'writer-val', [string]$Interval = '0.5')
+param([string]$ApiBase = 'http://localhost:8080', [string]$LogFile = '', [string]$Prefix = 'writer-val', [string]$Interval = '0.5')
 $ErrorActionPreference = 'Stop'
+if ([string]::IsNullOrWhiteSpace($LogFile)) { throw 'LogFile is required' }
+$pidFile = Join-Path (Split-Path $LogFile -Parent) 'writer.pid'
+$PID | Out-File -Encoding ascii $pidFile
 $body = @{ email = "$Prefix@contoh.id"; password = 'WriterPass123' } | ConvertTo-Json
 try { $r = Invoke-RestMethod -Uri "$ApiBase/auth/register" -Method Post -Body $body -ContentType 'application/json' } catch { $r = $null }
 if (-not $r.token) {
@@ -112,7 +160,7 @@ if (-not $r.token) {
 }
 $token = $r.token
 if (-not $token) { Add-Content $LogFile 'writer: no token'; exit 1 }
-Add-Content $LogFile 'writer: token acquired'
+Add-Content $LogFile "$([DateTime]::Now.ToString('o')) START token acquired"
 $n = 0
 while ($true) {
   $n++
@@ -123,14 +171,12 @@ while ($true) {
     $null = Invoke-RestMethod -Uri "$ApiBase/workspaces" -Method Post -Body $wb -ContentType 'application/json' -Headers @{ Authorization = "Bearer $token" }
     $code = '201'
   } catch { $code = '000' }
-  Add-Content $LogFile "$([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()) $code $name"
+  Add-Content $LogFile "$([DateTime]::Now.ToString('o')) $code $name"
   Start-Sleep -Seconds $Interval
 }
 ```
 
-Start it with `Start-Process powershell -ArgumentList '-ExecutionPolicy','Bypass','-File','C:\umnia-validation\writer-val.ps1','-ApiBase','http://localhost:8080','-LogFile','C:\umnia-validation\logs\writer.log' -PassThru` and keep the returned process object to stop it later (`Stop-Process -Id <pid>`).
-
-### 3b. API call helper for the tenant-isolation workflow (paste into the PS 5.1 session)
+### 4b. API call helpers (paste into the PowerShell 5.1 session before the tenant-isolation workflow, §8)
 
 ```powershell
 function Call-Api($Method, $Path, $Token, $Body) {
@@ -155,179 +201,192 @@ function Get-Json($Text, $Field) {
 }
 ```
 
-## 4. Scenario 1 — Fresh startup on Windows Docker Compose
+## 5. Scenario lifecycle and port ownership (the whole run, in order)
 
-```powershell
-Start-Transcript -Path C:\umnia-validation\logs\scenario-1.log
-cd C:\umnia-validation\UMNIA-APP
-docker compose -f deploy/windows/compose.yml -p umnia-val-fresh config -q; $LASTEXITCODE
-# expect: 0
-docker compose -f deploy/windows/compose.yml -p umnia-val-fresh up -d --build; $LASTEXITCODE
-# expect: 0; record wall-clock time (build takes minutes on first run)
-Start-Sleep -Seconds 60
-docker compose -f deploy/windows/compose.yml -p umnia-val-fresh ps
-# expect: postgres-business, postgres-admin, migrate (exited 0), rustfs,
-#   business-api, web — all healthy/running. RECORD every service state;
-#   a failing unrelated service is a finding, not something to hide.
-docker compose -f deploy/windows/compose.yml -p umnia-val-fresh exec -T postgres-business psql -U umnia_bootstrap -d umnia_business -tAc "SELECT rolname, rolsuper::text || '/' || rolbypassrls::text FROM pg_roles WHERE rolname IN ('umnia_business','postgres');"
-# expect: umnia_business| false/false ; postgres| true/true (or true/false — record actual)
-docker compose -f deploy/windows/compose.yml -p umnia-val-fresh exec -T postgres-business psql -U umnia_bootstrap -d umnia_business -tAc "SELECT count(*) FROM pg_roles WHERE rolname LIKE 'umnia_admin%';"
-# expect: 0 (no admin roles in the business cluster)
-docker compose -f deploy/windows/compose.yml -p umnia-val-fresh exec -T postgres-business psql -U umnia_admin -d umnia_business -tAc "SELECT 1;"
-# expect: FATAL role "umnia_admin" does not exist (cross-cluster login fails)
-docker compose -f deploy/windows/compose.yml -p umnia-val-fresh exec -T postgres-business psql -U umnia_bootstrap -d umnia_business -tAc "SELECT version FROM schema_migrations ORDER BY version;"
-# expect: 001_init, 002_identity
-Invoke-WebRequest -Uri http://localhost:8080/healthz -UseBasicParsing
-# expect: 200
-Invoke-WebRequest -Uri http://localhost:8080/readyz -UseBasicParsing
-# expect: 200
-Invoke-WebRequest -Uri http://localhost:3000 -UseBasicParsing
-# expect: 200 (record actual status/body if different)
-Stop-Transcript
-```
+Host ports 5432/5433/8080/9000/3000 are owned by exactly one stack at a time. A scenario starts only when the table's "before" state holds (verified with `Confirm-Stack`); a scenario ends in its "after" state. `stop` stops containers without deleting volumes; no scenario deletes any volume (cleanup is §13, approval-required).
 
-Then stop (do NOT delete yet — scenario 5's isolation workflow can reuse this stack, or use a fresh one; record which): `docker compose -f deploy/windows/compose.yml -p umnia-val-fresh down` (no `-v`; volumes preserved until cleanup).
-
-## 5. Scenario 2 — Readiness negative (no migration → not ready)
-
-```powershell
-Start-Transcript -Path C:\umnia-validation\logs\scenario-2.log
-cd C:\umnia-validation\UMNIA-APP
-docker compose -f deploy/windows/compose.yml -p umnia-val-neg up -d postgres-business; $LASTEXITCODE
-# expect: 0; wait until postgres-business is healthy:
-#   docker compose -f deploy/windows/compose.yml -p umnia-val-neg ps
-docker compose -f deploy/windows/compose.yml -p umnia-val-neg up -d --no-deps business-api; $LASTEXITCODE
-# expect: 0 (starts the API WITHOUT the migrate service)
-Start-Sleep -Seconds 15
-Invoke-WebRequest -Uri http://localhost:8080/healthz -UseBasicParsing
-# expect: 200 (process alive)
-try { Invoke-WebRequest -Uri http://localhost:8080/readyz -UseBasicParsing; Write-Host "readyz: 200 (UNEXPECTED)" } catch { Write-Host "readyz: $([int]$_.Exception.Response.StatusCode) (expected non-200)" }
-# expect: non-200 (record the actual code). NEVER drop tables to create this case.
-docker compose -f deploy/windows/compose.yml -p umnia-val-neg up -d; $LASTEXITCODE
-# expect: 0 (now migrate runs)
-Start-Sleep -Seconds 20
-Invoke-WebRequest -Uri http://localhost:8080/readyz -UseBasicParsing
-# expect: 200
-docker compose -f deploy/windows/compose.yml -p umnia-val-neg down
-Stop-Transcript
-```
+| Scenario | Before (must hold) | After | Ports owned after |
+|---|---|---|---|
+| 1 Fresh startup | No stack running; ports free | `umnia-val-fresh` stopped (volumes preserved) | None |
+| 2 Readiness negative | No stack running; ports free | `umnia-val-neg` stopped (volumes preserved) | None |
+| 3a Legacy fixture | No stack running; ports free | `umnia-val-legacy` UP (legacy API on 8080) | legacy: 5432, 8080, 3000 |
+| 3b Running-source upgrade | `umnia-val-legacy` UP | `umnia-val-legacy` down (volume preserved); `umnia-val-new` UP (target API on 8080) | new: 5432, 5433, 8080, 9000, 3000 |
+| 4 Writer accounting | `umnia-val-new` UP (from 3b) | `umnia-val-new` UP (unchanged) | new (unchanged) |
+| 5 Target identity + workflow | `umnia-val-new` UP (from 3b) | `umnia-val-new` UP (unchanged) | new (unchanged) |
+| — transition — | Stop `umnia-val-new` (`stop`, volumes preserved) so the ports are free for 3c. The target's volume and data are PRESERVED for the occupied-target check (§9b). | — | None |
+| 3c Stopped-source upgrade | No stack running; `umnia-val-legacy` volume exists (stopped); ports free | `umnia-val-legacy` down (volume preserved); `umnia-val-new2` UP | new2: 5432, 5433, 8080, 9000, 3000 |
+| — transition — | Stop `umnia-val-new2` (`stop`, volumes preserved). | — | None |
+| 6 Negatives | No stack running; `umnia-val-new` volume exists (stopped) | No stack running (negatives start nothing) | None |
+| 7 Controlled failure | No stack running; ports free | `umnia-val-legacy7` UP (recovered); `umnia-val-new7` down | legacy7: 5432, 8080, 3000 |
+| — transition — | Stop `umnia-val-legacy7` (`stop`, volumes preserved). | — | None |
+| 8 Restore verification | No stack running | `umnia-val-restore-check` container STOPPED (left for cleanup, §13) | None (container publishes no host port) |
 
 ## 6. Scenario 3 — Legacy upgrade through Windows PowerShell 5.1
 
-### 6a. Build the legacy fixture (once)
+### 6a. Build the legacy fixture (project `umnia-val-legacy`)
 
 ```powershell
-Start-Transcript -Path C:\umnia-validation\logs\scenario-3-fixture.log
-cd C:\umnia-validation\UMNIA-APP
-docker compose -f deploy/windows/compose.legacy.yml -p umnia-val-legacy up -d --build; $LASTEXITCODE
-# expect: 0; wait until postgres-business is healthy
-$cid = docker compose -f deploy/windows/compose.legacy.yml -p umnia-val-legacy ps -q postgres-business
-docker cp services/business-api/migrations/001_init.sql ${cid}:/migrations-001_init.sql
-docker cp services/business-api/migrations/002_identity.sql ${cid}:/migrations-002_identity.sql
-docker compose -f deploy/windows/compose.legacy.yml -p umnia-val-legacy exec -T postgres-business psql -U umnia_business -d umnia_business -v ON_ERROR_STOP=1 -f /migrations-001_init.sql -f /migrations-002_identity.sql; $LASTEXITCODE
-# EXPECT: non-zero, with: role "postgres" does not exist (002 fails mid-file).
+Start-Transcript -Path "$run\logs\scenario-3a-fixture.log"
+cd "$run\UMNIA-APP"; Check 'cd run checkout'
+docker compose -f deploy/windows/compose.legacy.yml -p umnia-val-legacy up -d --build; Check 'legacy up'
+Start-Sleep -Seconds 60
+Confirm-Stack 'deploy/windows/compose.legacy.yml' 'umnia-val-legacy'
+docker compose -f deploy/windows/compose.legacy.yml -p umnia-val-legacy ps --format '{{.Name}} {{.State}}'; Check 'legacy ps-format'
+$cid = docker compose -f deploy/windows/compose.legacy.yml -p umnia-val-legacy ps -q postgres-business; Check 'legacy cid'
+if ([string]::IsNullOrWhiteSpace($cid)) { throw 'FAILED: legacy postgres container id is empty' }
+docker cp services/business-api/migrations/001_init.sql ${cid}:/migrations-001_init.sql; Check 'cp 001'
+docker cp services/business-api/migrations/002_identity.sql ${cid}:/migrations-002_identity.sql; Check 'cp 002'
+docker compose -f deploy/windows/compose.legacy.yml -p umnia-val-legacy exec -T postgres-business psql -U umnia_business -d umnia_business -v ON_ERROR_STOP=1 -f /migrations-001_init.sql -f /migrations-002_identity.sql; Expect-Fail 'migrations without -1 (002 must fail)'
+# The output above must contain: role "postgres" does not exist (002 fails mid-file).
 # This is the pre-remediation half-applied state. Record the full output.
-docker compose -f deploy/windows/compose.legacy.yml -p umnia-val-legacy exec -T postgres-business psql -U umnia_business -d umnia_business -tAc "SELECT version FROM schema_migrations ORDER BY version;"
+docker compose -f deploy/windows/compose.legacy.yml -p umnia-val-legacy exec -T postgres-business psql -U umnia_business -d umnia_business -tAc "SELECT version FROM schema_migrations ORDER BY version;"; Check 'schema_migrations'
 # Prior Linux evidence: 001_init + 002_identity recorded (half-applied). RECORD ACTUAL.
-docker compose -f deploy/windows/compose.legacy.yml -p umnia-val-legacy exec -T postgres-business psql -U umnia_business -d umnia_business -tAc "SELECT rolname, rolsuper FROM pg_roles WHERE rolname = 'umnia_business';"
-# expect: umnia_business|t (bootstrap superuser — the legacy defect)
+docker compose -f deploy/windows/compose.legacy.yml -p umnia-val-legacy exec -T postgres-business psql -U umnia_business -d umnia_business -tAc "SELECT rolname, rolsuper FROM pg_roles WHERE rolname = 'umnia_business';"; Check 'legacy role'
+# Expect: umnia_business|t (bootstrap superuser — the legacy defect). RECORD ACTUAL.
+if ((Get-Status 'http://localhost:8080/healthz') -ne 200) { throw 'FAILED: legacy /healthz is not 200' }
+if ((Get-Status 'http://localhost:8080/readyz') -ne 200) { throw 'FAILED: legacy /readyz is not 200' }
 # Fixture through the API (no invented SQL): register owner, create "Toko Lama".
 $ownerBody = @{ email = 'owner-val@contoh.id'; password = 'ValOwner123!' } | ConvertTo-Json
 $owner = Invoke-RestMethod -Uri http://localhost:8080/auth/register -Method Post -Body $ownerBody -ContentType 'application/json'
+if (-not $owner.id) { throw 'FAILED: fixture register returned no id' }
 $ownerLogin = Invoke-RestMethod -Uri http://localhost:8080/auth/login -Method Post -Body $ownerBody -ContentType 'application/json'
+if (-not $ownerLogin.token) { throw 'FAILED: fixture login returned no token' }
 $wsBody = @{ name = 'Toko Lama' } | ConvertTo-Json
 $ws = Invoke-RestMethod -Uri http://localhost:8080/workspaces -Method Post -Body $wsBody -ContentType 'application/json' -Headers @{ Authorization = "Bearer $($ownerLogin.token)" }
+if (-not $ws.id) { throw 'FAILED: fixture workspace returned no id' }
 Write-Host "fixture workspace id: $($ws.id)"
-# expect: register 201, login 200, workspace 201. Record the workspace id.
+"fixture workspace id: $($ws.id)" | Out-File -Encoding ascii "$run\logs\fixture-workspace.txt"
 Stop-Transcript
 ```
 
-### 6b. Running-source upgrade
+### 6b. Running-source upgrade (project `umnia-val-new`)
+
+Two PowerShell windows are required. Window A runs the upgrade. Window B watches the transcript for the quiesce-success line and stops the writer (see §7 for why, and for the accounting rules).
+
+Window A:
 
 ```powershell
-Start-Transcript -Path C:\umnia-validation\logs\scenario-3-running.log
-cd C:\umnia-validation\UMNIA-APP
-# Start the controlled writer against the legacy API (scenario 4 runs together with this).
-$writer = Start-Process powershell -ArgumentList '-ExecutionPolicy','Bypass','-File','C:\umnia-validation\writer-val.ps1','-ApiBase','http://localhost:8080','-LogFile','C:\umnia-validation\logs\writer.log' -PassThru
+Start-Transcript -Path "$run\logs\scenario-3b-running.log"
+cd "$run\UMNIA-APP"; Check 'cd run checkout'
+git -C "$run\UMNIA-APP" diff --quiet -- deploy/windows/compose.yml deploy/windows/Upgrade-UmniaVolume.ps1; Check 'pinned files unmodified'
+Confirm-Stack 'deploy/windows/compose.legacy.yml' 'umnia-val-legacy'
+$writer = Start-Process powershell -WindowStyle Hidden -ArgumentList '-ExecutionPolicy','Bypass','-File',"$run\writer-val.ps1",'-ApiBase','http://localhost:8080','-LogFile',"$run\logs\writer.log" -PassThru
+$writer.Id | Out-File -Encoding ascii "$run\logs\writer.pid"
 Start-Sleep -Seconds 10
-powershell -ExecutionPolicy Bypass -File .\deploy\windows\Upgrade-UmniaVolume.ps1 -ComposeFile deploy/windows/compose.yml -OldProject umnia-val-legacy -NewProject umnia-val-new -BackupDir C:\umnia-validation\backups -ApiBase http://localhost:8080 -LegacyComposeFile deploy/windows/compose.legacy.yml -ConfirmMaintenance; $LASTEXITCODE
-# expect: 0 and "UPGRADE SELESAI."
+if (-not (Select-String -Path "$run\logs\writer.log" -Pattern 'START token acquired' -Quiet)) { throw 'FAILED: writer did not acquire a token' }
+powershell -ExecutionPolicy Bypass -File .\deploy\windows\Upgrade-UmniaVolume.ps1 -ComposeFile deploy/windows/compose.yml -OldProject umnia-val-legacy -NewProject umnia-val-new -BackupDir "$run\backups" -ApiBase http://localhost:8080 -LegacyComposeFile deploy/windows/compose.legacy.yml -ConfirmMaintenance; Check 'upgrade running-source'
+# The transcript must contain "UPGRADE SELESAI." — verify after the run:
+if (-not (Select-String -Path "$run\logs\scenario-3b-running.log" -Pattern 'UPGRADE SELESAI' -Quiet)) { throw 'FAILED: transcript does not contain UPGRADE SELESAI' }
 # ROUTING ASSERTION (from the transcript): every source line reads
 #   "> docker compose -f deploy/windows/compose.legacy.yml -p umnia-val-legacy ..."
 # and every target line reads
 #   "> docker compose -f deploy/windows/compose.yml -p umnia-val-new ..."
 # MOUNT/VOLUME ASSERTION:
-docker inspect (docker compose -f deploy/windows/compose.yml -p umnia-val-new ps -q postgres-business) | Select-String -Pattern 'postgres-business-data'
 docker volume ls | Select-String -Pattern 'umnia-val-'
-# expect: umnia-val-legacy_postgres-business-data (old, preserved) AND
-#   umnia-val-new_postgres-business-data (new) both exist.
-Stop-Transcript
-# Leave the writer running until scenario 4's checks are done, then:
-# Stop-Process -Id $writer.Id
-```
-
-### 6c. Stopped-source upgrade (reuses the preserved legacy volume from 6b)
-
-After 6b the legacy stack is down (step 4) with its volume preserved — that IS the stopped-source state. Run the upgrade again with a fresh target project:
-
-```powershell
-Start-Transcript -Path C:\umnia-validation\logs\scenario-3-stopped.log
-cd C:\umnia-validation\UMNIA-APP
-docker compose -f deploy/windows/compose.legacy.yml -p umnia-val-legacy ps
-# expect: all legacy containers stopped (no running containers), volume still exists
-powershell -ExecutionPolicy Bypass -File .\deploy\windows\Upgrade-UmniaVolume.ps1 -ComposeFile deploy/windows/compose.yml -OldProject umnia-val-legacy -NewProject umnia-val-new2 -BackupDir C:\umnia-validation\backups -ApiBase http://localhost:8080 -LegacyComposeFile deploy/windows/compose.legacy.yml -ConfirmMaintenance; $LASTEXITCODE
-# expect: 0. The transcript must show the source postgres being started
-#   via the LEGACY file ("postgres lama berhenti — start non-destruktif").
+# Expect: umnia-val-legacy_postgres-business-data (old, preserved) AND
+#   umnia-val-new_postgres-business-data (new) both exist. RECORD ACTUAL.
+$backup6b = Get-ChildItem "$run\backups\*.dump" | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+if (-not $backup6b) { throw 'FAILED: no backup file in run backups directory' }
+$backup6b.FullName | Out-File -Encoding ascii "$run\logs\backup-6b.txt"
+Get-FileHash -Algorithm SHA256 $backup6b.FullName
 Stop-Transcript
 ```
 
-## 7. Scenario 4 — Source maintenance before snapshot (with 6b)
-
-After the 6b upgrade finishes, stop the writer and check its log:
+Window B (started before Window A runs the upgrade; closed after it exits):
 
 ```powershell
-Stop-Process -Id $writer.Id
-Get-Content C:\umnia-validation\logs\writer.log | Select-String -Pattern ' 201 ' | Measure-Object
-# Count the 201 lines. Then compare with the target:
-docker compose -f deploy/windows/compose.yml -p umnia-val-new exec -T postgres-business psql -U umnia_bootstrap -d umnia_business -tAc "SELECT count(*) FROM workspaces WHERE name LIKE 'Writer-%';"
-# expect: equal to the number of 201 lines in the writer log (all
-#   acknowledged pre-snapshot writes survived). No 201 may appear in the
-#   log after the transcript timestamp of "== 1. Dump" — check by time.
-docker compose -f deploy/windows/compose.yml -p umnia-val-new exec -T postgres-business psql -U umnia_bootstrap -d umnia_business -tAc "SELECT count(*) FROM workspaces WHERE name = 'Toko Lama';"
-# expect: 1 (fixture workspace survived)
+while (-not (Select-String -Path "$run\logs\scenario-3b-running.log" -Pattern 'penulis berhenti: tidak ada sesi aktif' -Quiet)) { Start-Sleep -Seconds 2 }
+Get-Date -Format 'o' | Out-File -Encoding ascii "$run\logs\writer-stop.txt"
+$writerPid = Get-Content "$run\logs\writer.pid"
+Stop-Process -Id $writerPid
+```
+
+### 6c. Stopped-source upgrade (project `umnia-val-new2`)
+
+After §6b the legacy stack is down (upgrade step 4) with its volume preserved — that IS the stopped-source state. Before this step, stop the §6b target so the ports are free (see §5 transition). The target's volume and data are preserved for the occupied-target check (§9b).
+
+```powershell
+docker compose -f deploy/windows/compose.yml -p umnia-val-new stop; Check 'stop new target before 6c'
+```
+
+```powershell
+Start-Transcript -Path "$run\logs\scenario-3c-stopped.log"
+cd "$run\UMNIA-APP"; Check 'cd run checkout'
+git -C "$run\UMNIA-APP" diff --quiet -- deploy/windows/compose.yml deploy/windows/Upgrade-UmniaVolume.ps1; Check 'pinned files unmodified'
+docker compose -f deploy/windows/compose.legacy.yml -p umnia-val-legacy ps --format '{{.Name}} {{.State}}'; Check 'legacy ps (must show stopped)'
+# Expect: no running legacy containers; the volume still exists. RECORD ACTUAL.
+docker volume inspect umnia-val-legacy_postgres-business-data; Check 'legacy volume exists'
+powershell -ExecutionPolicy Bypass -File .\deploy\windows\Upgrade-UmniaVolume.ps1 -ComposeFile deploy/windows/compose.yml -OldProject umnia-val-legacy -NewProject umnia-val-new2 -BackupDir "$run\backups" -ApiBase http://localhost:8080 -LegacyComposeFile deploy/windows/compose.legacy.yml -ConfirmMaintenance; Check 'upgrade stopped-source'
+# The transcript must show the source postgres being started via the LEGACY file:
+#   "postgres lama berhenti — start non-destruktif untuk verifikasi identitas"
+if (-not (Select-String -Path "$run\logs\scenario-3c-stopped.log" -Pattern 'UPGRADE SELESAI' -Quiet)) { throw 'FAILED: transcript does not contain UPGRADE SELESAI' }
+docker volume ls | Select-String -Pattern 'umnia-val-'
+# Expect: umnia-val-new2_postgres-business-data exists alongside the preserved legacy volume. RECORD ACTUAL.
+Stop-Transcript
+# Transition (see §5): stop umnia-val-new2 before the negatives:
+docker compose -f deploy/windows/compose.yml -p umnia-val-new2 stop; Check 'stop new2 target'
+```
+
+## 7. Scenario 4 — Source maintenance before snapshot (writer accounting, with §6b)
+
+**Accounting rules (read first).** The writer is an EXTERNAL writer: it talks to `localhost:8080`, which points to the source API before cutover and to the target API after cutover. Its session token was issued by the source API and restored to the target, so a writer left running could create workspaces in the TARGET after the dump. Therefore:
+
+1. The writer is stopped by the operator (Window B, §6b) as soon as the upgrade transcript shows the quiesce-success line `penulis berhenti: tidak ada sesi aktif umnia_business`. The writer's log is then bounded to the pre-dump window BY CONSTRUCTION: no successful write can occur after that line, because the script's step 0c already stopped the API containers. Any `201` in the log with a timestamp after the time recorded in `writer-stop.txt` is a FAIL (it would mean the writer wrote to a different stack).
+2. A stopped writer does NOT prove server-side quiescence. The quiescence evidence is the SCRIPT's own step-0c output, which the operator records from the transcript: `penulis dihentikan: business-api`, `penulis dihentikan: web` (or `penulis tidak berjalan (dilewati): <svc>` where a writer was not running), and `penulis berhenti: tidak ada sesi aktif umnia_business`. That line is printed only after the script's loop verified zero running writer containers AND zero active sessions for the source user (5 attempts, 2 s apart). Record those three lines verbatim in `results.md`.
+3. Only acknowledged pre-snapshot writes count. Count the `201` lines in the writer log; compare with the target's `Writer-*` workspaces (below). Post-cutover traffic is a SEPARATE run with a SEPARATE log file (see §10 recovery proof), never mixed into this count.
+
+```powershell
+Start-Transcript -Path "$run\logs\scenario-4.log"
+cd "$run\UMNIA-APP"; Check 'cd run checkout'
+Confirm-Stack 'deploy/windows/compose.yml' 'umnia-val-new'
+# (a) No 201 after the recorded writer-stop time:
+$stopTime = [DateTime]::Parse((Get-Content "$run\logs\writer-stop.txt"))
+$late = Get-Content "$run\logs\writer.log" | Where-Object { $_ -match ' 201 ' -and ([DateTime]::Parse(($_ -split ' ')[0])) -gt $stopTime }
+if ($late) { throw "FAILED: writer 201 after stop time: $($late -join '; ')" }
+Write-Host 'writer accounting: no 201 after stop time'
+# (b) Acknowledged pre-snapshot writes survived:
+$writer201 = (Select-String -Path "$run\logs\writer.log" -Pattern ' 201 ' | Measure-Object).Count
+$targetWriter = docker compose -f deploy/windows/compose.yml -p umnia-val-new exec -T postgres-business psql -U umnia_bootstrap -d umnia_business -tAc "SELECT count(*) FROM workspaces WHERE name LIKE 'Writer-%';"; Check 'count Writer workspaces in target'
+if ($writer201 -ne [int]$targetWriter) { throw "FAILED: writer 201 count ($writer201) != target Writer workspaces ($targetWriter)" }
+Write-Host "writer accounting: $writer201 acknowledged writes survived"
+# (c) Fixture workspace survived:
+$fixture = docker compose -f deploy/windows/compose.yml -p umnia-val-new exec -T postgres-business psql -U umnia_bootstrap -d umnia_business -tAc "SELECT count(*) FROM workspaces WHERE name = 'Toko Lama';"; Check 'fixture workspace in target'
+if ($fixture -ne '1') { throw "FAILED: fixture workspace count is $fixture, expected 1" }
 # External writers: no other API client may write during the maintenance
 # window (from -ConfirmMaintenance until cutover/recovery). Record that
 # no other writer ran.
+Stop-Transcript
 ```
 
-## 8. Scenario 5 — Target identity + tenant isolation (on the 6b target)
+## 8. Scenario 5 — Target identity + tenant isolation (on the §6b target)
 
 ```powershell
-Start-Transcript -Path C:\umnia-validation\logs\scenario-5.log
-cd C:\umnia-validation\UMNIA-APP
-docker compose -f deploy/windows/compose.yml -p umnia-val-new exec -T postgres-business psql -U umnia_bootstrap -d umnia_business -tAc "SELECT rolsuper::text || '/' || rolbypassrls::text FROM pg_roles WHERE rolname = 'umnia_business';"
-# expect: false/false
-docker compose -f deploy/windows/compose.yml -p umnia-val-new exec -T postgres-business psql -U umnia_bootstrap -d umnia_business -tAc "SELECT count(*) FROM schema_migrations WHERE version = '002_identity';"
-# expect: 1
-docker compose -f deploy/windows/compose.yml -p umnia-val-new exec -T postgres-business psql -U umnia_bootstrap -d umnia_business -tAc "SELECT count(*) FROM information_schema.routine_privileges WHERE routine_schema = 'app' AND routine_name IN ('accept_invite', 'has_permission', 'is_member', 'register_subject', 'session_subject', 'subject_by_email') AND grantee IN ('postgres', 'umnia_business');"
-# expect: 12
-Invoke-WebRequest -Uri http://localhost:8080/readyz -UseBasicParsing
-# expect: 200
-docker compose -f deploy/windows/compose.yml -p umnia-val-new exec -T postgres-business psql -U umnia_bootstrap -d umnia_business -tAc "SELECT count(*) FROM identity_subjects;"
-# expect: fixture subjects + 1 writer account ONLY (no synthetic accounts
-#   created by the upgrade script). Record the actual count and emails:
-docker compose -f deploy/windows/compose.yml -p umnia-val-new exec -T postgres-business psql -U umnia_bootstrap -d umnia_business -tAc "SELECT email FROM identity_subjects ORDER BY email;"
-docker volume inspect umnia-val-legacy_postgres-business-data
-# expect: volume exists (old volume preserved)
+Start-Transcript -Path "$run\logs\scenario-5.log"
+cd "$run\UMNIA-APP"; Check 'cd run checkout'
+Confirm-Stack 'deploy/windows/compose.yml' 'umnia-val-new'
+docker compose -f deploy/windows/compose.yml -p umnia-val-new exec -T postgres-business psql -U umnia_bootstrap -d umnia_business -tAc "SELECT rolsuper::text || '/' || rolbypassrls::text FROM pg_roles WHERE rolname = 'umnia_business';"; Check 'target role f/f query'
+# Expect output: false/false. RECORD ACTUAL; a different value is a FAIL (throw below):
+$role = docker compose -f deploy/windows/compose.yml -p umnia-val-new exec -T postgres-business psql -U umnia_bootstrap -d umnia_business -tAc "SELECT rolsuper::text || '/' || rolbypassrls::text FROM pg_roles WHERE rolname = 'umnia_business';"; Check 'target role f/f value'
+if ($role -ne 'false/false') { throw "FAILED: target role is $role, expected false/false" }
+$mig = docker compose -f deploy/windows/compose.yml -p umnia-val-new exec -T postgres-business psql -U umnia_bootstrap -d umnia_business -tAc "SELECT count(*) FROM schema_migrations WHERE version = '002_identity';"; Check '002 count'
+if ($mig -ne '1') { throw "FAILED: 002_identity count is $mig, expected 1" }
+$grants = docker compose -f deploy/windows/compose.yml -p umnia-val-new exec -T postgres-business psql -U umnia_bootstrap -d umnia_business -tAc "SELECT count(*) FROM information_schema.routine_privileges WHERE routine_schema = 'app' AND routine_name IN ('accept_invite', 'has_permission', 'is_member', 'register_subject', 'session_subject', 'subject_by_email') AND grantee IN ('postgres', 'umnia_business');"; Check 'EXECUTE grants count'
+if ($grants -ne '12') { throw "FAILED: EXECUTE grants count is $grants, expected 12" }
+if ((Get-Status 'http://localhost:8080/readyz') -ne 200) { throw 'FAILED: target /readyz is not 200' }
+docker compose -f deploy/windows/compose.yml -p umnia-val-new exec -T postgres-business psql -U umnia_bootstrap -d umnia_business -tAc "SELECT email FROM identity_subjects ORDER BY email;"; Check 'target subjects'
+# Expect exactly 2 subjects: owner-val@contoh.id (fixture) and writer-val@contoh.id
+# (the writer account). No synthetic accounts may be created by the upgrade
+# script. RECORD ACTUAL; any other subject is a FAIL.
+docker volume inspect umnia-val-legacy_postgres-business-data; Check 'old volume preserved'
 Stop-Transcript
 ```
 
 ### Tenant-isolation workflow (PowerShell 5.1 equivalent of `api-workflow.sh`, 14 steps)
 
-Run against the upgraded API (`http://localhost:8080`). Paste the §3b helpers first. `$sfx` must be unique per run.
+Run against the upgraded target API (`http://localhost:8080`) — the designated synthetic test database. Paste the §4b helpers first. `$sfx` must be unique per run. The workflow's accounts are test-only.
 
 ```powershell
-Start-Transcript -Path C:\umnia-validation\logs\scenario-5-workflow.log
+Start-Transcript -Path "$run\logs\scenario-5-workflow.log"
 $sfx = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
 $r = Call-Api 'GET' '/readyz' '' ''; Expect-Step 'readyz' 200 $r.Code
 $r = Call-Api 'POST' '/auth/register' '' (@{ email = "owner-$sfx@contoh.id"; password = 'ReviewPass123' } | ConvertTo-Json); Expect-Step 'register-owner' 201 $r.Code
@@ -351,110 +410,192 @@ Write-Host "WORKFLOW OK workspace=$ws"
 Stop-Transcript
 ```
 
-## 9. Scenario 6 — Negative cases (fresh fixtures; record exit code = 1 and no subsequent mutations each time)
+## 9. Scenario 6 — Negative cases (no stack running; record exit code and no subsequent mutations each time)
+
+Preconditions: no stack running (see §5); the `umnia-val-new` volume exists (stopped) for the occupied-target check. Before each negative, record the state; after each, verify nothing changed (same `docker ps`, same `docker volume ls` output).
 
 ```powershell
-cd C:\umnia-validation\UMNIA-APP
+Start-Transcript -Path "$run\logs\scenario-6-negatives.log"
+cd "$run\UMNIA-APP"; Check 'cd run checkout'
+docker ps --format '{{.Names}}'; Check 'ps before negatives'
+docker volume ls | Select-String -Pattern 'umnia-val-'
 # (a) Equal projects:
-powershell -ExecutionPolicy Bypass -File .\deploy\windows\Upgrade-UmniaVolume.ps1 -OldProject umnia-val-same -NewProject umnia-val-same -LegacyComposeFile deploy/windows/compose.legacy.yml -ConfirmMaintenance; $LASTEXITCODE
-# expect: non-zero; ZERO docker calls (transcript shows the equality error only).
-# (b) Occupied target (use the already-upgraded umnia-val-new from 6b):
-powershell -ExecutionPolicy Bypass -File .\deploy\windows\Upgrade-UmniaVolume.ps1 -OldProject umnia-val-legacy -NewProject umnia-val-new -LegacyComposeFile deploy/windows/compose.legacy.yml -ConfirmMaintenance; $LASTEXITCODE
-# expect: non-zero ("Target tidak fresh"); target marker/data untouched — verify:
-docker compose -f deploy/windows/compose.yml -p umnia-val-new exec -T postgres-business psql -U umnia_bootstrap -d umnia_business -tAc "SELECT count(*) FROM workspaces WHERE name = 'Toko Lama';"
-# expect: 1
+powershell -ExecutionPolicy Bypass -File .\deploy\windows\Upgrade-UmniaVolume.ps1 -OldProject umnia-val-same -NewProject umnia-val-same -LegacyComposeFile deploy/windows/compose.legacy.yml -ConfirmMaintenance; Expect-Fail 'equal projects'
+# Expect: rejection with ZERO docker calls (transcript shows the equality error only).
+# (b) Occupied target (the already-upgraded umnia-val-new from §6b):
+powershell -ExecutionPolicy Bypass -File .\deploy\windows\Upgrade-UmniaVolume.ps1 -OldProject umnia-val-legacy -NewProject umnia-val-new -LegacyComposeFile deploy/windows/compose.legacy.yml -ConfirmMaintenance; Expect-Fail 'occupied target'
+# Expect: "Target tidak fresh"; target data untouched — verify (target is stopped; start only its postgres for this read, then stop it again):
+docker compose -f deploy/windows/compose.yml -p umnia-val-new up -d postgres-business; Check 'start target postgres for read'
+Start-Sleep -Seconds 15
+$marker = docker compose -f deploy/windows/compose.yml -p umnia-val-new exec -T postgres-business psql -U umnia_bootstrap -d umnia_business -tAc "SELECT count(*) FROM workspaces WHERE name = 'Toko Lama';"; Check 'occupied-target marker read'
+if ($marker -ne '1') { throw "FAILED: occupied-target marker is $marker, expected 1" }
+docker compose -f deploy/windows/compose.yml -p umnia-val-new stop; Check 'stop target after read'
 # (c) Missing original Compose file:
-powershell -ExecutionPolicy Bypass -File .\deploy\windows\Upgrade-UmniaVolume.ps1 -OldProject umnia-val-legacy -NewProject umnia-val-new9 -LegacyComposeFile C:\does\not\exist.yml -ConfirmMaintenance; $LASTEXITCODE
-# expect: non-zero; fails before ANY docker call.
+powershell -ExecutionPolicy Bypass -File .\deploy\windows\Upgrade-UmniaVolume.ps1 -OldProject umnia-val-legacy -NewProject umnia-val-new9 -LegacyComposeFile C:\does\not\exist.yml -ConfirmMaintenance; Expect-Fail 'missing legacy file'
+# Expect: abort before ANY docker call.
 # (d) Invalid original Compose file (garbage YAML):
-'this is: [not valid yaml' | Out-File -Encoding ascii C:\umnia-validation\bad-compose.yml
-powershell -ExecutionPolicy Bypass -File .\deploy\windows\Upgrade-UmniaVolume.ps1 -OldProject umnia-val-legacy -NewProject umnia-val-new9 -LegacyComposeFile C:\umnia-validation\bad-compose.yml -ConfirmMaintenance; $LASTEXITCODE
-# expect: non-zero (config -q fails); no mutating docker calls.
+'this is: [not valid yaml' | Out-File -Encoding ascii "$run\bad-compose.yml"
+powershell -ExecutionPolicy Bypass -File .\deploy\windows\Upgrade-UmniaVolume.ps1 -OldProject umnia-val-legacy -NewProject umnia-val-new9 -LegacyComposeFile "$run\bad-compose.yml" -ConfirmMaintenance; Expect-Fail 'invalid legacy file'
+# Expect: config -q failure; no mutating docker calls.
 # (e) Inspection failure: legacy file WITHOUT the postgres-business service.
-# Copy compose.legacy.yml to C:\umnia-validation\compose-no-pg.yml and delete
-# the postgres-business service block from the copy, then:
-powershell -ExecutionPolicy Bypass -File .\deploy\windows\Upgrade-UmniaVolume.ps1 -OldProject umnia-val-legacy -NewProject umnia-val-new9 -LegacyComposeFile C:\umnia-validation\compose-no-pg.yml -ConfirmMaintenance; $LASTEXITCODE
-# expect: non-zero; abort before dump/restore/source shutdown. No security
-# controls were disabled to inject this failure.
+Copy-Item "$run\UMNIA-APP\deploy\windows\compose.legacy.yml" "$run\compose-no-pg.yml"
+# Delete the postgres-business service block from the copy: remove lines from
+# "  postgres-business:" up to (but not including) "  business-api:".
+$lines = Get-Content "$run\compose-no-pg.yml"
+$start = ($lines | Select-String -Pattern '^  postgres-business:' | Select-Object -First 1).LineNumber - 1
+$end = ($lines | Select-String -Pattern '^  business-api:' | Select-Object -First 1).LineNumber - 1
+$lines[0..($start - 1)] + $lines[$end..($lines.Count - 1)] | Set-Content "$run\compose-no-pg.yml"
+if (Select-String -Path "$run\compose-no-pg.yml" -Pattern 'postgres-business:' -Quiet) { throw 'FAILED: postgres-business still present in no-pg copy' }
+powershell -ExecutionPolicy Bypass -File .\deploy\windows\Upgrade-UmniaVolume.ps1 -OldProject umnia-val-legacy -NewProject umnia-val-new9 -LegacyComposeFile "$run\compose-no-pg.yml" -ConfirmMaintenance; Expect-Fail 'inspection failure (no postgres-business service)'
+# Expect: abort before dump/restore/source shutdown. No security controls
+# were disabled to inject this failure.
+docker ps --format '{{.Names}}'; Check 'ps after negatives'
+docker volume ls | Select-String -Pattern 'umnia-val-'
+# Expect: identical to the "before" output above. Any difference is a FAIL.
+Stop-Transcript
 ```
 
 ## 10. Scenario 7 — Controlled failure after source shutdown + printed recovery
 
+**Why the port-listener injection is REJECTED (do not use it).** The previous version of this packet told the operator to bind port 5432 before the upgrade. That cannot work: the source PostgreSQL already owns 5432 until the script's step 4 (`== 4. Hentikan stack lama`) stops it, and the script proceeds to step 5 (`== 5. Jalankan postgres project baru`) in milliseconds — no external agent can reliably interpose a listener in that window. Any "success" of that approach would be a race, not a controlled failure.
+
+**Deterministic mechanism (used here).** The failure is injected by running the upgrade with a COPY of the new Compose file whose `postgres:16-bookworm` image tag is replaced with a tag that does not exist (`postgres:16-bookworm-VALIDATION-BAD-TAG-0000`). Docker fails to pull the image at step 5 — after the source was shut down at step 4 — deterministically, with no timing window. The pinned checkout is never modified (the copy lives in the same `deploy\windows\` directory so relative build paths still resolve; the original file is untouched and verified with `git diff --quiet`). The "injector" is that copy: it is stopped by not using it for any later run, and it is removed only under the cleanup approval (§13). The failure mode this simulates is a real one (target image unavailable after source shutdown); the recovery path exercised is identical.
+
+**Fixture.** Build a FRESH legacy fixture under NEW project names (`umnia-val-legacy7` / `umnia-val-new7`) by repeating the §6a steps with `-p umnia-val-legacy7`. Do NOT delete the §6b/§6c fixtures to make room (no `down -v`; new isolated projects instead).
+
 ```powershell
-Start-Transcript -Path C:\umnia-validation\logs\scenario-7.log
-cd C:\umnia-validation\UMNIA-APP
-# Fresh legacy fixture + fresh target are required: rebuild the fixture per §6a
-# (down -v the legacy project first, then rebuild), target umnia-val-new7.
-# Hold the target postgres host port (5432) with a real listener in a
-# SEPARATE PowerShell window (keep it running during the upgrade):
-#   $listener = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::Loopback, 5432)
-#   $listener.Start()
-powershell -ExecutionPolicy Bypass -File .\deploy\windows\Upgrade-UmniaVolume.ps1 -ComposeFile deploy/windows/compose.yml -OldProject umnia-val-legacy -NewProject umnia-val-new7 -BackupDir C:\umnia-validation\backups -ApiBase http://localhost:8080 -LegacyComposeFile deploy/windows/compose.legacy.yml -ConfirmMaintenance; $LASTEXITCODE
-# expect: non-zero; the failure happens at step 5 (new postgres cannot bind
-# 5432) AFTER the source was shut down at step 4. Copy the printed
-# JALUR PEMULIHAN text verbatim into the evidence log.
-# In the listener window: $listener.Stop()
-# Then follow the PRINTED recovery commands exactly (example shape):
-docker compose -f deploy/windows/compose.yml -p umnia-val-new7 down
-docker compose -f deploy/windows/compose.legacy.yml -p umnia-val-legacy up -d
-# Prove recovery:
-Invoke-WebRequest -Uri http://localhost:8080/readyz -UseBasicParsing
-# expect: 200 (legacy API back)
-docker compose -f deploy/windows/compose.legacy.yml -p umnia-val-legacy exec -T postgres-business psql -U umnia_business -d umnia_business -tAc "SELECT count(*) FROM workspaces WHERE name = 'Toko Lama';"
-# expect: 1 (fixture preserved)
-# Resume a writer (fresh writer-val.ps1 run) and confirm a 201 is logged.
-# NEVER delete the original volume as a shortcut.
+Start-Transcript -Path "$run\logs\scenario-7.log"
+cd "$run\UMNIA-APP"; Check 'cd run checkout'
+# Fixture umnia-val-legacy7 was built per §6a (same steps, -p umnia-val-legacy7).
+# The fixture workspace "Toko Lama" exists there; record its id from $run\logs\fixture-workspace-7.txt.
+# Create the bad-tag copy (same directory as the original, so relative build paths resolve):
+Copy-Item "$run\UMNIA-APP\deploy\windows\compose.yml" "$run\UMNIA-APP\deploy\windows\compose-badtag.yml"; Check 'copy compose for bad-tag'
+(Get-Content "$run\UMNIA-APP\deploy\windows\compose.yml") -replace 'image: postgres:16-bookworm', 'image: postgres:16-bookworm-VALIDATION-BAD-TAG-0000' | Set-Content "$run\UMNIA-APP\deploy\windows\compose-badtag.yml"
+if ((Select-String -Path "$run\UMNIA-APP\deploy\windows\compose-badtag.yml" -Pattern 'VALIDATION-BAD-TAG-0000').Count -ne 3) { throw 'FAILED: bad-tag edit did not apply to all 3 postgres image lines' }
+git -C "$run\UMNIA-APP" diff --quiet -- deploy/windows/compose.yml; Check 'original compose unmodified'
+# Start a FRESH writer run against the legacy7 API (new log file; the §6b writer is long stopped):
+$writer7 = Start-Process powershell -WindowStyle Hidden -ArgumentList '-ExecutionPolicy','Bypass','-File',"$run\writer-val.ps1",'-ApiBase','http://localhost:8080','-LogFile',"$run\logs\writer-7.log" -PassThru
+$writer7.Id | Out-File -Encoding ascii "$run\logs\writer-7.pid"
+Start-Sleep -Seconds 10
+if (-not (Select-String -Path "$run\logs\writer-7.log" -Pattern 'START token acquired' -Quiet)) { throw 'FAILED: writer-7 did not acquire a token' }
+powershell -ExecutionPolicy Bypass -File .\deploy\windows\Upgrade-UmniaVolume.ps1 -ComposeFile deploy/windows/compose-badtag.yml -OldProject umnia-val-legacy7 -NewProject umnia-val-new7 -BackupDir "$run\backups" -ApiBase http://localhost:8080 -LegacyComposeFile deploy/windows/compose.legacy.yml -ConfirmMaintenance; Expect-Fail 'upgrade with bad image tag (must fail at step 5)'
+# Observe the failure stage in the transcript: the "== 5. Jalankan postgres project baru"
+# marker followed by a Docker pull error (manifest unknown / not found), then
+# "UPGRADE GAGAL:" and the printed JALUR PEMULIHAN text. Copy that recovery
+# text verbatim into results.md. The source was already shut down at step 4.
+if (-not (Select-String -Path "$run\logs\scenario-7.log" -Pattern 'UPGRADE GAGAL' -Quiet)) { throw 'FAILED: transcript does not contain UPGRADE GAGAL' }
+# Stop the writer-7 process (only the PID this run created):
+Stop-Process -Id (Get-Content "$run\logs\writer-7.pid")
+# Follow the PRINTED recovery commands exactly (shape; use the paths as printed):
+docker compose -f deploy/windows/compose-badtag.yml -p umnia-val-new7 down; Check 'recovery: down new7'
+docker compose -f deploy/windows/compose.legacy.yml -p umnia-val-legacy7 up -d; Check 'recovery: up legacy7'
+Start-Sleep -Seconds 30
+Confirm-Stack 'deploy/windows/compose.legacy.yml' 'umnia-val-legacy7'
+if ((Get-Status 'http://localhost:8080/readyz') -ne 200) { throw 'FAILED: recovered legacy /readyz is not 200' }
+$recFixture = docker compose -f deploy/windows/compose.legacy.yml -p umnia-val-legacy7 exec -T postgres-business psql -U umnia_business -d umnia_business -tAc "SELECT count(*) FROM workspaces WHERE name = 'Toko Lama';"; Check 'recovered fixture'
+if ($recFixture -ne '1') { throw "FAILED: recovered fixture count is $recFixture, expected 1" }
+# Prove resumed writer operation with a FRESH writer run (new log file, post-recovery traffic only):
+$writer7b = Start-Process powershell -WindowStyle Hidden -ArgumentList '-ExecutionPolicy','Bypass','-File',"$run\writer-val.ps1",'-ApiBase','http://localhost:8080','-LogFile',"$run\logs\writer-7-after.log" -PassThru
+$writer7b.Id | Out-File -Encoding ascii "$run\logs\writer-7-after.pid"
+Start-Sleep -Seconds 10
+if (-not (Select-String -Path "$run\logs\writer-7-after.log" -Pattern ' 201 ' -Quiet)) { throw 'FAILED: resumed writer produced no 201' }
+Stop-Process -Id (Get-Content "$run\logs\writer-7-after.pid")
+# NEVER delete the original volume as a shortcut. The bad-tag copy stays in
+# place until the cleanup approval (§13).
 Stop-Transcript
+# Transition (see §5): stop umnia-val-legacy7 before scenario 8:
+docker compose -f deploy/windows/compose.legacy.yml -p umnia-val-legacy7 stop; Check 'stop legacy7'
 ```
 
-## 11. Scenario 8 — Backup hash + restore evidence (use the backup from §6b or §10)
+## 11. Scenario 8 — Backup hash + restore evidence (self-contained)
+
+**Why the previous recipe was incomplete.** It restored the custom dump into a bare postgres container with `--no-owner` and expected success. Installed `pg_restore --help` (PostgreSQL 16.15, from the `postgres:16-bookworm` image) and the official docs state: `-O, --no-owner` skips restoration of object OWNERSHIP only; access privileges (GRANT/REVOKE) are restored unless `-x, --no-privileges` (`--no-acl`) is also given. The synthetic dump's GRANTs reference roles that do not exist in a bare container (notably `umnia_business`), so the restore would fail under `--exit-on-error`. Sources: `pg_restore --help` from the image binaries (OBSERVED on the preparer's VM); PostgreSQL docs, `https://www.postgresql.org/docs/devel/app-pgrestore.html` (OFFICIAL, retrieved 2026-11-06).
+
+**Recipe (self-contained).** The disposable container mirrors what the real target's initdb does at upgrade step 5: it pre-creates the roles the dump's ACLs reference. The restore uses `--no-owner --exit-on-error` WITHOUT `--no-privileges`, so the production ACL semantics are validated (the GRANTs must succeed), not skipped. Any `pg_restore` error fails the scenario; errors are never ignored. The backup used is the §6b backup recorded in `$run\logs\backup-6b.txt`; if that file is unavailable, this scenario is BLOCKED (do not silently substitute another backup).
 
 ```powershell
-Start-Transcript -Path C:\umnia-validation\logs\scenario-8.log
-$backup = Get-ChildItem C:\umnia-validation\backups\*.dump | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-Get-FileHash -Algorithm SHA256 $backup.FullName
-# Record the hash. Listing alone is NOT proof — restore into a disposable container:
-docker run -d --name umnia-val-restore-check -e POSTGRES_PASSWORD=ValRestore123! -e POSTGRES_USER=umnia_bootstrap -e POSTGRES_DB=umnia_business postgres:16-bookworm
-Start-Sleep -Seconds 10
-docker cp $backup.FullName umnia-val-restore-check:/tmp/check.dump
-docker exec umnia-val-restore-check pg_restore -U umnia_bootstrap -d umnia_business --no-owner --exit-on-error /tmp/check.dump; $LASTEXITCODE
-# expect: 0
-docker exec umnia-val-restore-check psql -U umnia_bootstrap -d umnia_business -tAc "SELECT count(*) FROM workspaces;"
-# expect: equal to the source workspace count recorded in scenario 4/5.
-docker exec umnia-val-restore-check psql -U umnia_bootstrap -d umnia_business -tAc "SELECT count(*) FROM workspaces WHERE name = 'Toko Lama';"
-# expect: 1
-docker rm -f umnia-val-restore-check
+Start-Transcript -Path "$run\logs\scenario-8.log"
+cd "$run\UMNIA-APP"; Check 'cd run checkout'
+$backup = Get-Content "$run\logs\backup-6b.txt"
+if (-not (Test-Path $backup)) { throw "FAILED: recorded §6b backup not found: $backup" }
+Get-FileHash -Algorithm SHA256 $backup
+# Record the hash in results.md. A pg_restore listing alone is NOT proof — restore below.
+docker run -d --name umnia-val-restore-check -e POSTGRES_PASSWORD=ValRestore123! -e POSTGRES_USER=umnia_bootstrap -e POSTGRES_DB=umnia_business postgres:16-bookworm; Check 'start restore-check container'
+Start-Sleep -Seconds 15
+docker cp $backup umnia-val-restore-check:/tmp/check.dump; Check 'cp backup into restore-check'
+# (a) Inventory the roles/ACLs the dump references:
+docker exec umnia-val-restore-check pg_restore -f - /tmp/check.dump | Select-String -Pattern 'GRANT|REVOKE|OWNER TO' | Out-File -Encoding ascii "$run\logs\restore-acl-inventory.txt"; Check 'ACL inventory'
+Get-Content "$run\logs\restore-acl-inventory.txt"
+# Expect GRANTs to umnia_business (and postgres, which already exists in every
+# postgres container). RECORD ACTUAL. Any other role in the inventory must be
+# pre-created below (NOLOGIN) and recorded; do not proceed with an unlisted role.
+# (b) Pre-create the required fixture roles (mirrors the real target's initdb):
+docker exec umnia-val-restore-check psql -U umnia_bootstrap -d umnia_business -tAc "CREATE ROLE umnia_business NOLOGIN;"; Check 'pre-create umnia_business role'
+# (c) Restore with production ACL semantics (no --no-privileges), failing loudly:
+docker exec umnia-val-restore-check pg_restore -U umnia_bootstrap -d umnia_business --no-owner --exit-on-error /tmp/check.dump; Check 'pg_restore with ACLs'
+# (d) Validate counts and ACL semantics separately. The umnia-val-new target is
+# stopped at this point (see §5), so start only its postgres for the read,
+# then stop it again (same pattern as §9b):
+docker compose -f deploy/windows/compose.yml -p umnia-val-new up -d postgres-business; Check 'start target postgres for read'
+Start-Sleep -Seconds 15
+$wsCount = docker exec umnia-val-restore-check psql -U umnia_bootstrap -d umnia_business -tAc "SELECT count(*) FROM workspaces;"; Check 'restored workspaces count'
+$wsTarget = docker compose -f deploy/windows/compose.yml -p umnia-val-new exec -T postgres-business psql -U umnia_bootstrap -d umnia_business -tAc "SELECT count(*) FROM workspaces;"; Check 'target workspaces count'
+if ($wsCount -ne $wsTarget) { throw "FAILED: restored workspaces ($wsCount) != target workspaces ($wsTarget)" }
+docker compose -f deploy/windows/compose.yml -p umnia-val-new stop; Check 'stop target after read'
+$fixtureRestored = docker exec umnia-val-restore-check psql -U umnia_bootstrap -d umnia_business -tAc "SELECT count(*) FROM workspaces WHERE name = 'Toko Lama';"; Check 'restored fixture'
+if ($fixtureRestored -ne '1') { throw "FAILED: restored fixture count is $fixtureRestored, expected 1" }
+$grantsRestored = docker exec umnia-val-restore-check psql -U umnia_bootstrap -d umnia_business -tAc "SELECT count(*) FROM information_schema.routine_privileges WHERE routine_schema = 'app' AND routine_name IN ('accept_invite', 'has_permission', 'is_member', 'register_subject', 'session_subject', 'subject_by_email') AND grantee IN ('postgres', 'umnia_business');"; Check 'restored EXECUTE grants'
+if ($grantsRestored -ne '12') { throw "FAILED: restored EXECUTE grants count is $grantsRestored, expected 12" }
+Write-Host "RESTORE OK workspaces=$wsCount grants=$grantsRestored"
+# Do NOT remove the container here. Stop it and leave it for the cleanup approval (§13):
+docker stop umnia-val-restore-check; Check 'stop restore-check container'
 Stop-Transcript
 ```
 
 ## 12. Evidence capture (every scenario)
 
-- One transcript per scenario in `C:\umnia-validation\logs\` (do not overwrite).
+- One transcript per scenario in `$run\logs\` (do not overwrite).
 - For every command: the exact command line, exit code (`$LASTEXITCODE`), and output.
-- Record: OS build (`winver` / `Get-ComputerInfo`), `docker --version`, `docker compose version`, `docker info` Server section, image digests (`docker image inspect postgres:16-bookworm --format '{{.Id}}'`, same for rustfs).
-- Record the backup SHA-256 hash and the restored row counts (§11).
+- `$run\results.md`: one line per scenario (`scenario N: PASS|FAIL|NOT RUN — <transcript> — <evidence>`); a FAIL line records the failing command and transcript line. Scenarios not attempted are NOT RUN.
+- Record: OS build (`Get-ComputerInfo`), the exact PowerShell executable path and version, `docker --version`, `docker compose version`, `docker info` Server section, image digests (`docker image inspect postgres:16-bookworm --format '{{.Id}}'`, same for `rustfs/rustfs:1.0.4`).
+- Record the backup SHA-256 hash (§6b) and the restored row counts (§11).
 - Redact real credentials before sharing logs (the packet uses synthetic ones only).
 
-## 13. Cleanup proposal (SEPARATE — do NOT run without authorization)
+## 13. Cleanup proposal — APPROVAL REQUIRED (separate; never part of the test steps)
 
-These commands remove ONLY the `umnia-val-*` test projects/volumes and the isolated checkout. They must never be pointed at `umnia`/`umnia-legacy` or any user volume.
+Do NOT run anything in this section without explicit approval. It removes ONLY the resources created by this run, identified by their exact run-scoped names. Never point these commands at `umnia`/`umnia-legacy` or any user volume. A synthetic-looking name is not permission by itself — the approval must name this run directory.
 
 ```powershell
-cd C:\umnia-validation\UMNIA-APP
+cd "$run\UMNIA-APP"
 docker compose -f deploy/windows/compose.yml -p umnia-val-fresh down -v
 docker compose -f deploy/windows/compose.yml -p umnia-val-neg down -v
 docker compose -f deploy/windows/compose.yml -p umnia-val-new down -v
 docker compose -f deploy/windows/compose.yml -p umnia-val-new2 down -v
 docker compose -f deploy/windows/compose.yml -p umnia-val-new7 down -v
 docker compose -f deploy/windows/compose.legacy.yml -p umnia-val-legacy down -v
+docker compose -f deploy/windows/compose.legacy.yml -p umnia-val-legacy7 down -v
+docker rm -f umnia-val-restore-check
 docker volume ls | Select-String -Pattern 'umnia-val-'
-# expect: no umnia-val-* volumes remain; if any remain, remove each by name
+# Expect: no umnia-val-* volumes remain. If any remain, remove each by name
 # with: docker volume rm <name>  (only after confirming the name starts with umnia-val-)
-Remove-Item -Recurse -Force C:\umnia-validation\UMNIA-APP
-# Keep C:\umnia-validation\logs\ and C:\umnia-validation\backups\ as evidence.
+Remove-Item -Force "$run\UMNIA-APP\deploy\windows\compose-badtag.yml"
+Remove-Item -Force "$run\bad-compose.yml"
+Remove-Item -Force "$run\compose-no-pg.yml"
+Remove-Item -Recurse -Force "$run\UMNIA-APP"
+# Keep $run\logs\, $run\backups\, and $run\results.md as evidence.
 ```
 
-## 14. What this packet does NOT claim
+## 14. Static checks performed on this packet (preparer, 2026-11-06)
+
+- **Revision pin:** the `$run` checkout detaches the full reviewed commit `934ad4b8b79ae3cd5dca01121a270fd6f8f955f1` and asserts `git rev-parse HEAD` equals it; the delivery commit is `10bc3de`. The packet never checks out the moving branch.
+- **PowerShell syntax:** every ```powershell block in this file (16 blocks) was extracted and parsed with `[System.Management.Automation.Language.Parser]::ParseFile` under PowerShell 7.5.4 on the preparer's Linux VM — syntax only. Result: **16/16 PARSE OK, 0 failures**. A scan for PowerShell 7-only syntax (`??`, `?.`, `&&`, `||`, ternary) found no PowerShell operators: the only `||` occurrences are PostgreSQL `||` string concatenation inside SQL string literals. This is NOT a PowerShell 5.1 parse: 5.1 parsing of these blocks remains for the operator/reviewer on Windows. (For reference, the reviewer already parsed the 934ad4b upgrade script with explicit `C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`, version 5.1.26100.9818, zero errors — parser evidence only.)
+- **Cited script strings:** all 11 literal strings cited from the upgrade script (`penulis berhenti: tidak ada sesi aktif`, `UPGRADE SELESAI`, `UPGRADE GAGAL`, step markers, etc.) were verified to exist verbatim in `deploy/windows/Upgrade-UmniaVolume.ps1` at `934ad4b` (11/11). All 5 referenced repo paths exist. `deploy/windows/compose.yml` contains exactly 3 `image: postgres:16-bookworm` lines, matching the bad-tag check in §10.
+- **Destructive commands:** `down -v` and `docker rm -f` occur ONLY in §13 (approval-required cleanup) plus one prose prohibition in §10; no test step deletes anything.
+- **Command review:** every `docker`/`docker compose`/`psql`/`pg_dump`/`pg_restore` command was checked against the submitted script's actual commands (`deploy/windows/Upgrade-UmniaVolume.ps1` at `934ad4b`, OBSERVED) and the Compose contract (`deploy/windows/compose.yml`, OBSERVED). Step markers cited (`== 0c.`, `== 1.`, `== 4.`, `== 5.`, `UPGRADE SELESAI.`/`UPGRADE GAGAL:`) are the script's literal `Write-Step`/`Write-Host` strings.
+- **pg_restore semantics:** `--no-owner` skips ownership only; `--no-privileges`/`--no-acl` skips GRANT/REVOKE — verified from installed `pg_restore --help` (PostgreSQL 16.15, from the `postgres:16-bookworm` image) and the official docs, `https://www.postgresql.org/docs/devel/app-pgrestore.html`.
+- **Not checked:** actual execution on Windows (NOT RUN); PowerShell 5.1 parsing of these blocks (NOT RUN here); Docker Desktop behavior on Windows (NOT RUN).
+
+## 15. What this packet does NOT claim
 
 - It was not executed anywhere; no PASS/FAIL counts exist yet.
 - A successful run of this packet proves the Windows runtime for revision `934ad4b` only — not the full F1 gate (login/workspace UI, module registry, admin-plane proof remain separate work).

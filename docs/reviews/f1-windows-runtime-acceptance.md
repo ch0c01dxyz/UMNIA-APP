@@ -1,8 +1,8 @@
 # F1-WINDOWS-RUNTIME-ACCEPTANCE — laporan lingkungan + paket validasi (2026-11-06)
 
-STATUS: BLOCKED (tidak ada runtime Windows di VM ini) | TASK_ID: F1-PACKET-BOOTSTRAP-FIXES | FILES CHANGED: paket `docs/reviews/f1-windows-runtime-acceptance/WINDOWS-VALIDATION-PACKET.md` (3 koreksi: urutan bootstrap helper, role restore-check, metadata delivery) + laporan ini | TESTS: 0 pass / 0 fail / 0 skipped / 8 skenario NOT RUN (BLOCKED); verifikasi statis paket: 15/15 blok PowerShell parse OK (pwsh 7.5.4, syntax-only), order check 95 call sites OK, fresh-session helper test T1–T9b lolos, 11/11 string skrip terverifikasi | RISK / BLOCKERS: tidak ada Windows, tidak ada Windows PowerShell 5.1, tidak ada Docker daemon — runtime Windows tidak dapat diuji dari VM ini | NEXT ACTION: jalankan paket validasi (versi `2026-11-06`) pada host Windows nyata (Docker Desktop), lalu laporkan hasilnya ke reviewer
+STATUS: BLOCKED (tidak ada runtime Windows di VM ini) | TASK_ID: F1-WINDOWS-RUNTIME-ACCEPTANCE | FILES CHANGED: laporan ini (catatan run attempt, §10) — paket tidak diubah | TESTS: 0 pass / 0 fail / 0 skipped / 8 skenario NOT RUN (BLOCKED); paket terverifikasi: SHA-256 cocok dengan hash reviewer, HEAD `cfa8a64` | RISK / BLOCKERS: tidak ada Windows, tidak ada Windows PowerShell 5.1, tidak ada Docker daemon — runtime Windows tidak dapat dieksekusi dari VM ini | NEXT ACTION: operator membawa paket (versi `2026-11-06`, commit `cfa8a64`, SHA-256 `b6199d10…`) ke host Windows nyata (Docker Desktop) dan menjalankan skenario 1–8 di sana; lihat §10
 
-Pengiriman: laporan ini + paket validasi terkoreksi di-commit dan di-push ke `origin/f1-03-identity` (ikuti aturan commit/push tetap; hash commit pada laporan akhir).
+Pengiriman: laporan ini di-commit dan di-push ke `origin/f1-03-identity` (ikuti aturan commit/push tetap; hash commit pada laporan akhir). Paket tidak diubah pada tugas ini.
 
 ## 1. Keputusan review yang diterima (reviewer, OBSERVED dari prompt tugas)
 
@@ -93,3 +93,35 @@ Application source tidak berubah sejak `934ad4b`; scoped source PASS tetap valid
 - Eksekusi PowerShell 5.1 atas skrip upgrade (parser 0 error bukan bukti eksekusi).
 - UI login/workspace, mailer undangan, module registry (F1-04), dan bukti segregasi admin-plane — pekerjaan terpisah, bukan bagian tugas ini.
 - CI run 42091279923 tidak diverifikasi ulang dari VM ini.
+
+## 10. Run attempt 2026-11-06 (TASK_ID: F1-WINDOWS-RUNTIME-ACCEPTANCE) — BLOCKED, no resources created
+
+**Packet verification (TESTED, sebelum inspeksi lingkungan).** HEAD `cfa8a646e6f1c3d309ceca70495be143bddc986c` (`cfa8a64`, "F1-PACKET-BOOTSTRAP-FIXES"), `origin/f1-03-identity` sama, working tree bersih. Paket `docs/reviews/f1-windows-runtime-acceptance/WINDOWS-VALIDATION-PACKET.md` SHA-256 `b6199d106649b9a94bb0a4fd8345911986b02c07394c905c48c74f54a45a08b7` — **cocok persis** dengan hash yang diverifikasi reviewer. Code under test tetap `934ad4b8b79ae3cd5dca01121a270fd6f8f955f1`. Reviewer: 15/15 blok PowerShell parse dengan Windows PowerShell 5.1.26100.9818 eksplisit; helper terfokus (sukses, native failure, unexpected success pada negatif) terverifikasi; restore role inventory hanya di-review di level sumber — perilaku `pg_restore` aktual tetap harus diuji.
+
+**Environment inspection (OBSERVED, perintah nyata, VM ini — prasyarat paket §0):**
+
+| Prasyarat paket | Hasil aktual | Perintah |
+|---|---|---|
+| P1 Windows 10/11 | **GAGAL — Linux Ubuntu 24.04.5 LTS**, kernel 7.0.0-39-generic | `uname -a`, `/etc/os-release` |
+| P2 Windows PowerShell 5.1 | **GAGAL — `powershell` tidak ditemukan**; `/mnt/c` tidak ada; `wsl.exe` tidak ditemukan | `command -v powershell`, `ls /mnt/c`, `command -v wsl.exe` |
+| P3 Docker Desktop daemon | **GAGAL — tidak ada `dockerd`, tidak ada `/var/run/docker.sock`, `docker info` tanpa Server** (client statis 29.1.3 ada di `~/workspace/tools/docker/`) | `~/workspace/tools/docker/docker info`, `pgrep -a dockerd`, `ls /var/run/docker.sock` |
+| pwsh 7.5.4 Core | Ada — **bukan** pengganti PS 5.1 (dilarang sebagai bukti Windows) | `pwsh -Command '$PSVersionTable'` |
+
+**Keputusan: BLOCKED.** Tiga prasyarat paket gagal sekaligus (P1, P2, P3). Sesuai instruksi tugas, pekerjaan dependen DIHENTIKAN di sini; tidak ada skenario yang dijalankan, tidak ada substitusi (PostgreSQL native Linux, pwsh di Linux, mock Docker, sukses parser) yang dipakai sebagai bukti Windows. Tidak ada rewrite aplikasi atau dokumentasi spekulatif yang dibuat karena lingkungan yang sama masih belum tersedia.
+
+**Eight-scenario results matrix (semua NOT RUN — BLOCKED):**
+
+| # | Skenario | Status | Bukti / alasan |
+|---|---|---|---|
+| 1 | Fresh startup Windows Compose | NOT RUN (BLOCKED) | P1+P2+P3 gagal (lihat tabel di atas) |
+| 2 | Readiness negative (migrasi belum jalan → tidak ready) | NOT RUN (BLOCKED) | Sama |
+| 3 | Legacy upgrade via PS 5.1 (running + stopped source) | NOT RUN (BLOCKED) | Sama |
+| 4 | Maintenance sumber sebelum snapshot (writer terkendali) | NOT RUN (BLOCKED) | Sama |
+| 5 | Identitas runtime target + isolasi tenant (14 langkah) | NOT RUN (BLOCKED) | Sama |
+| 6 | Negatif: equal/occupied/missing/invalid file/inspection failure | NOT RUN (BLOCKED) | Sama |
+| 7 | Kegagalan terkendali sesudah source shutdown + pemulihan | NOT RUN (BLOCKED) | Sama |
+| 8 | Hash backup + bukti restore (bukan hanya `pg_restore -l`) | NOT RUN (BLOCKED) | Sama; perilaku `pg_restore` aktual tetap UNKNOWN |
+
+**Resource inventory (OBSERVED): tidak ada resource tes yang dibuat.** Tidak ada container, volume, project Compose, file backup, run directory, atau layanan yang di-start. Checkout pengguna, `.env`, services, database, dan volume tidak disentuh. Tidak ada software yang di-install/di-upgrade. Tidak ada cleanup yang dibutuhkan dan tidak ada cleanup yang dilakukan (tidak ada yang dibuat untuk dibersihkan).
+
+**Handoff ke operator (melalui user, bukan pesan eksternal otomatis).** Paket yang harus dibawa ke host Windows yang mampu: `docs/reviews/f1-windows-runtime-acceptance/WINDOWS-VALIDATION-PACKET.md`, versi `2026-11-06`, delivery commit `cfa8a64`, SHA-256 `b6199d106649b9a94bb0a4fd8345911986b02c07394c905c48c74f54a45a08b7`, code under test `934ad4b8b79ae3cd5dca01121a270fd6f8f955f1` (di-pin di checkout run terisolasi sesuai §1 paket). Prasyarat host (paket §0): Windows 10/11 64-bit + virtualisasi aktif; Windows PowerShell 5.1 di `C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe` (catat versi aktual); Docker Desktop 4.x+ mode Linux containers + WSL 2 backend, daemon berjalan (`docker info` menunjukkan Server); Git untuk Windows; port 5432/5433/8080/9000/3000 bebas; image `postgres:16-bookworm` + `rustfs/rustfs:1.0.4`; ~10 GB disk. Operator menjalankan skenario 1–8 sesuai urutan paket dengan kredensial/proyek/data sintetis terisolasi, dan mengembalikan transcript + `results.md` + hash backup per §12 paket. Tidak ada pesan eksternal yang dikirim otomatis oleh tugas ini.

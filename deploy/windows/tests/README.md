@@ -32,3 +32,31 @@ PGUSER/PGDATABASE sengaja TIDAK diset — skrip initdb harus bekerja
 tanpa default tersembunyi. `INITDB_SRC` (dir initdb alternatif) dan
 `INITDB_SOURCED=1` / `INITDB_EXECUTABLE=1` tersedia untuk fixture
 lama dan kedua mode entrypoint (.sh di-source vs dijalankan).
+
+## Upgrade: `mock-docker-faithful.ps1` + `test-upgrade-scenarios.ps1`
+
+Skenario regresi untuk `../Upgrade-UmniaVolume.ps1` (F1-UPGRADE-SAFETY-REVIEW).
+Mock `docker` di sini BUKAN canned-success: ia mengeksekusi binary
+postgres image asli dan API asli terhadap cluster nyata (fixture legacy
+dengan `POSTGRES_USER=umnia_business` saja, tanpa `umnia_bootstrap`).
+Yang masih di-mock dan harus dilabeli sebagai itu: transport Docker
+itu sendiri, staging `/tmp` container, service `web` (flag saja), dan
+HTTP PowerShell (didelegasikan ke curl, semua panggilan dicatat).
+
+```powershell
+pwsh -NoProfile -File deploy/windows/tests/test-upgrade-scenarios.ps1 -Scenario fixed-negative
+pwsh -NoProfile -File deploy/windows/tests/test-upgrade-scenarios.ps1 -Scenario all
+```
+
+Skenario: `baseline-mf1`, `baseline-mf2-equal`,
+`baseline-mf2-existing-target`, `baseline-mf3-writer`,
+`baseline-mf4-probe` (reproduksi cacat pada baseline 599e40e;
+baseline disimpan di `baseline-Upgrade-UmniaVolume.ps1`),
+`fixed-happy`, `fixed-negative`, `fixed-failure-after-down`,
+`fixed-isolated-api` (perbaikan saat ini). `fixed-isolated-api` harus
+jalan selagi API target dari `fixed-happy` masih hidup. Prasyarat sama
+seperti di atas, ditambah pwsh, binary `business-api` (dibangun otomatis
+bila belum ada di `tests/bin/`, gitignored), dan `manage-test-env.sh`
+untuk membangun fixture. `docker run`/`compose up` di host Windows
+tetap UNVERIFIED — harness ini membuktikan logika skrip + mekanika
+postgres/API, bukan runtime Windows.

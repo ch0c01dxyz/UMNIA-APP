@@ -65,6 +65,49 @@ if command -v pwsh >/dev/null 2>&1; then
   else bad "upgrade script parses (pwsh)"; fi
 else skip "upgrade script parses (pwsh not available)"; fi
 
+# 5. Upgrade-safety guarantees (F1-UPGRADE-SAFETY-REVIEW, MF1-MF4).
+# MF1: source identity is the legacy bootstrap account by default.
+if grep -q '\[string\]\$SourceDbUser = "umnia_business"' "$WIN/Upgrade-UmniaVolume.ps1" \
+   && grep -q 'current_user' "$WIN/Upgrade-UmniaVolume.ps1"; then
+  ok "upgrade: source identity defaults to legacy umnia_business + verified by SQL"
+else bad "upgrade: source identity defaults to legacy umnia_business + verified by SQL"; fi
+# MF1: README manual path dumps with the legacy source identity, not bootstrap.
+if grep -q 'pg_dump -U umnia_business' "$WIN/README.md" \
+   && ! grep -q -- '-p umnia-legacy exec -T postgres-business pg_dump -U umnia_bootstrap' "$WIN/README.md"; then
+  ok "README manual dump uses the legacy source identity"
+else bad "README manual dump uses the legacy source identity"; fi
+# MF2: preflight rejects equal projects and occupied targets before any mutation.
+if grep -q 'Normalize-ProjectName' "$WIN/Upgrade-UmniaVolume.ps1" \
+   && grep -q 'sama sesudah normalisasi' "$WIN/Upgrade-UmniaVolume.ps1" \
+   && grep -q 'Target tidak fresh' "$WIN/Upgrade-UmniaVolume.ps1"; then
+  ok "upgrade: preflight rejects equal projects + occupied target"
+else bad "upgrade: preflight rejects equal projects + occupied target"; fi
+# MF2: recovery stops the new project first, then restarts the full old stack.
+if grep -q -- '-p $NewProject down' "$WIN/Upgrade-UmniaVolume.ps1" \
+   && grep -q -- '-p $OldProject up -d' "$WIN/Upgrade-UmniaVolume.ps1"; then
+  ok "upgrade: recovery stops new project before restarting old stack"
+else bad "upgrade: recovery stops new project before restarting old stack"; fi
+# MF3: maintenance gate is mandatory before the dump.
+if grep -q '\[switch\]\$ConfirmMaintenance' "$WIN/Upgrade-UmniaVolume.ps1" \
+   && grep -q 'if (-not $ConfirmMaintenance)' "$WIN/Upgrade-UmniaVolume.ps1" \
+   && grep -q "@('business-api', 'web')" "$WIN/Upgrade-UmniaVolume.ps1" \
+   && grep -q "@('stop', \$svc)" "$WIN/Upgrade-UmniaVolume.ps1"; then
+  ok "upgrade: -ConfirmMaintenance gate + writers stopped before dump"
+else bad "upgrade: -ConfirmMaintenance gate + writers stopped before dump"; fi
+# MF4: upgrade verification is read-only — no mutating HTTP, no test
+# accounts/workspaces in user data (the old UpgradePass123 probe is gone).
+if ! grep -q 'Invoke-RestMethod' "$WIN/Upgrade-UmniaVolume.ps1" \
+   && ! grep -q 'UpgradePass123' "$WIN/Upgrade-UmniaVolume.ps1" \
+   && ! grep -q -- '-Method Post' "$WIN/Upgrade-UmniaVolume.ps1"; then
+  ok "upgrade: verification is read-only (no mutating HTTP, no test accounts)"
+else bad "upgrade: verification is read-only (no mutating HTTP, no test accounts)"; fi
+# Upgrade regression harness is present in the repo.
+if [ -f "$WIN/tests/mock-docker-faithful.ps1" ] \
+   && [ -f "$WIN/tests/test-upgrade-scenarios.ps1" ] \
+   && [ -f "$WIN/tests/manage-test-env.sh" ]; then
+  ok "upgrade regression harness present (faithful mock + scenarios)"
+else bad "upgrade regression harness present (faithful mock + scenarios)"; fi
+
 # 4. Optional container test (official image entrypoint).
 if [ "${1:-}" = "--container-test" ]; then
   if [ -x "$WIN/tests/run-entrypoint.sh" ] \

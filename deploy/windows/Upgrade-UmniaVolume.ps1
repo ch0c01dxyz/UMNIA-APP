@@ -11,10 +11,45 @@
   bootstrap) — satu-satunya jalur yang didukung adalah dump/restore ke
   volume baru seperti yang dilakukan skrip ini.
 
+  Identitas sumber (MF1): volume lama HANYA punya akun bootstrap
+  umnia_business. Skrip ini memakai -SourceDbUser (default
+  umnia_business) untuk SEMUA perintah ke sumber lama, dan
+  umnia_bootstrap hanya untuk target baru. Sebelum dump, skrip membaca
+  identitas cluster aktual dengan query SQL terautentikasi (SELECT
+  current_user + tabel workspaces); pg_isready saja tidak cukup karena
+  ia tidak memverifikasi kredensial/identitas role. Skrip TIDAK PERNAH
+  membuat superuser baru di database lama.
+
+  Preflight (MF2): SEBELUM ada perintah yang mengubah keadaan, skrip
+  menolak project lama/baru yang sama (setelah normalisasi nama Compose),
+  menolak target yang sudah terisi (container berjalan atau volume
+  <NewProject>_postgres-business-data / postgres-admin-data / rustfs-data
+  sudah ada), dan memastikan sumber benar-benar ada (container +
+  volume-nya, termasuk nama volume dari `docker inspect`). Target yang
+  terisi TIDAK PERNAH dihapus/ditimpa/dibersihkan oleh skrip ini.
+
+  Quiesce (MF3): penulis HARUS berhenti sebelum dump. Skrip menghentikan
+  business-api dan web project lama, lalu memeriksa secara observabel
+  (container berhenti + tidak ada sesi penulis aktif di pg_stat_activity)
+  sebelum dump, dan penulis tetap berhenti sampai cutover (stack baru
+  jalan) atau pemulihan. Penulis eksternal (klien DB langsung, instance
+  API lain) TIDAK BISA dihentikan skrip ini: operator WAJIB menghentikan
+  mereka dan mengonfirmasi dengan -ConfirmMaintenance. Tanpa flag itu
+  skrip menolak jalan. Batas jaminan ini didokumentasikan di bawah.
+
+  Validasi (MF4): verifikasi default skrip ini HANYA read-only
+  (/readyz + query SELECT). Skrip TIDAK membuat akun/workspace tes di
+  database pengguna. Skenario isolasi API (register/login/403) dijalankan
+  terpisah pada fixture sintetis terisolasi, bukan di sini.
+
   Urutan (gagal di langkah mana pun = berhenti, jangan lanjut):
-    0. Pastikan stack LAMA berjalan (hanya postgres-business) dan
-       password .env cocok (pg_isready). TIDAK ADA langkah destruktif
-       sebelum backup tervalidasi.
+    0. Preflight: normalisasi + bandingkan project, periksa target
+       kosong, periksa sumber ada (termasuk nama volume via inspect).
+       TIDAK ADA perintah mutating sebelum preflight lolos.
+    0b. Jalankan postgres lama bila berhenti, lalu verifikasi identitas
+       sumber dengan SQL terautentikasi.
+    0c. Maintenance: -ConfirmMaintenance wajib; hentikan penulis
+       (business-api, web) + periksa observabel tidak ada penulis aktif.
     1. Dump database lama dari DALAM container lama dengan pg_dump -Fc
        (custom format) --no-owner ke /tmp di dalam container.
     2. Salin file backup keluar dengan `docker cp` (binary-safe; TIDAK
@@ -31,9 +66,9 @@
     7. Jalankan stack baru penuh (`up --build`): service migrate
        menjalankan ulang 001+002 sebagai bootstrap, menormalkan
        kepemilikan tabel/fungsi dan hak EXECUTE.
-    8. Verifikasi: role runtime f/f, migrasi 002 tercatat, 6 fungsi helper
-       punya EXECUTE untuk postgres DAN umnia_business, /readyz 200, dan
-       probe isolasi API (pengguna baru tidak bisa membaca workspace lama).
+    8. Verifikasi read-only: role runtime f/f, migrasi 002 tercatat,
+       6 fungsi helper punya EXECUTE untuk postgres DAN umnia_business,
+       /readyz 200, dan hitung workspaces hasil restore (SELECT saja).
 
   Project Compose yang berbeda => volume berbeda:
   volume lama  = <OldProject>_postgres-business-data  (disentuh? TIDAK)
@@ -43,14 +78,17 @@
   ini menegakkannya lewat urutan langkah.
 
   JALUR PEMULIHAN bila gagal sesudah langkah 4: volume lama masih utuh.
-  Jalankan (ganti nama project bila memakai -OldProject lain):
-    docker compose -f deploy/windows/compose.yml -p umnia-legacy up -d
-  lalu perbaiki penyebabnya dan ulangi skrip ini (file backup baru akan
-  dibuat dengan timestamp baru; file lama tidak pernah ditimpa).
+  Skrip mencetak perintah pemulihan lengkap saat gagal (lihat
+  Get-RecoveryText): hentikan project baru dulu bila ia memakai port,
+  lalu jalankan kembali stack LAMA LENGKAP (termasuk business-api,
+  supaya penulis bisa menulis lagi) dengan file compose ASLI yang
+  membuat volume lama (POSTGRES_USER=umnia_business) — BUKAN file
+  compose baru. Beri file itu lewat -LegacyComposeFile; bila tidak
+  diisi, skrip memakai -ComposeFile dan mencetak peringatan eksplisit.
 
   Skrip ini TIDAK PERNAH menulis/menimpa .env. Satu file .env yang sama
   dipakai kedua project (password bootstrap/runtime harus sama dengan
-  yang dipakai stack lama, kalau tidak langkah 0 sudah gagal).
+  yang dipakai stack lama, kalau tidak langkah 0b sudah gagal).
 
 .NOTES
   Sintaks dijaga kompatibel Windows PowerShell 5.1 (tanpa ??, ?:, dan
@@ -64,18 +102,45 @@ param(
   [string]$OldProject = "umnia-legacy",
   [string]$NewProject = "umnia",
   [string]$BackupDir = "backups",
-  [string]$ApiBase = "http://localhost:8080"
+  [string]$ApiBase = "http://localhost:8080",
+  [string]$SourceDbUser = "umnia_business",
+  [string]$SourceDbName = "umnia_business",
+  [string]$LegacyComposeFile = "",
+  [switch]$ConfirmMaintenance
 )
 
 $ErrorActionPreference = 'Stop'
+$script:backupFull = "(belum dibuat)"
 
 function Write-Step($Text) { Write-Host ""; Write-Host "== $Text" }
+function Normalize-ProjectName($Name) {
+  # Compose menormalkan nama project: huruf kecil, hanya [a-z0-9_-].
+  $n = $Name.ToLower() -replace '[^a-z0-9_-]', ''
+  return $n.TrimStart('-', '_')
+}
+function Test-VolumeExists($VolumeName) {
+  $null = & docker volume inspect $VolumeName 2>$null
+  return ($LASTEXITCODE -eq 0)
+}
 function Get-RecoveryText {
+  $legacyFile = $LegacyComposeFile
+  $warn = ""
+  if ([string]::IsNullOrWhiteSpace($legacyFile)) {
+    $legacyFile = $ComposeFile
+    $warn = "  PERINGATAN: -LegacyComposeFile tidak diisi — perintah di bawah memakai $ComposeFile;`n  pastikan itu file compose ASLI yang membuat volume lama (POSTGRES_USER=umnia_business),`n  BUKAN file compose baru (yang memakai umnia_bootstrap + migrate).`n"
+  }
   return @"
-JALUR PEMULIHAN: volume lama masih utuh.
-  docker compose -f $ComposeFile -p $OldProject up -d
-  (volume: ${OldProject}_postgres-business-data)
-  Perbaiki penyebab kegagalan, lalu ulangi skrip ini.
+JALUR PEMULIHAN: volume lama masih utuh (tidak pernah dihapus).
+  Backup       : $script:backupFull
+  Volume lama  : ${OldProject}_postgres-business-data
+  1. Bila project baru sempat jalan dan memakai port host yang sama,
+     hentikan dulu (tanpa -v):
+       docker compose -f $ComposeFile -p $NewProject down
+  2. Jalankan kembali stack LAMA LENGKAP (termasuk business-api, supaya
+     penulis bisa menulis lagi) dengan file compose ASLI volume lama:
+       docker compose -f $legacyFile -p $OldProject up -d
+$warn  3. Perbaiki penyebab kegagalan, lalu ulangi skrip ini (file backup
+     baru akan dibuat dengan timestamp baru; file lama tidak ditimpa).
 "@
 }
 function Invoke-Compose($Project, $Arguments) {
@@ -99,21 +164,66 @@ function Get-ServiceContainer($Project, $Service) {
   if ([string]::IsNullOrWhiteSpace($id)) { throw "Container $Service project $Project tidak ditemukan/berjalan." }
   return $id.Trim()
 }
+function Get-ServiceContainerOrNull($Project, $Service) {
+  # '' bila service tidak ada / tidak berjalan (bukan error fatal di sini).
+  try { $id = Invoke-ComposeCapture $Project @('ps', '-q', $Service) } catch { return '' }
+  if ([string]::IsNullOrWhiteSpace($id)) { return '' }
+  return $id.Trim()
+}
 function Invoke-DockerCp($Source, $Destination) {
   Write-Host "  > docker cp $Source $Destination"
   & docker cp $Source $Destination
   if ($LASTEXITCODE -ne 0) { throw "docker cp gagal (exit $LASTEXITCODE): $Source -> $Destination" }
 }
+function Invoke-SourceSql($Query) {
+  return Invoke-ComposeCapture $OldProject @('exec', '-T', 'postgres-business', 'psql', '-U', $SourceDbUser, '-d', $SourceDbName, '-tAc', $Query)
+}
 
 try {
-  Write-Step "0. Prasyarat"
+  Write-Step "0. Prasyarat + preflight (tanpa perintah mutating)"
   foreach ($tool in @('docker')) {
     if (-not (Get-Command $tool -ErrorAction SilentlyContinue)) { throw "Perintah '$tool' tidak ditemukan di PATH." }
   }
   if (-not (Test-Path $ComposeFile)) { throw "Compose file tidak ditemukan: $ComposeFile" }
   if (-not (Test-Path ".env")) {
-    Write-Warning ".env tidak ditemukan — memakai password default compose. Bila stack lama memakai password kustom, langkah 0 akan gagal; isi .env dulu."
+    Write-Warning ".env tidak ditemukan — memakai password default compose. Bila stack lama memakai password kustom, langkah 0b akan gagal; isi .env dulu."
   }
+
+  # MF2: tolak project yang sama (setelah normalisasi nama Compose).
+  # Pemeriksaan ini murni string — nol panggilan docker.
+  $oldNorm = Normalize-ProjectName $OldProject
+  $newNorm = Normalize-ProjectName $NewProject
+  if ([string]::IsNullOrWhiteSpace($oldNorm) -or [string]::IsNullOrWhiteSpace($newNorm)) {
+    throw "Nama project tidak valid sesudah normalisasi: OldProject='$OldProject' NewProject='$NewProject'."
+  }
+  if ($oldNorm -eq $newNorm) {
+    throw "OldProject dan NewProject sama sesudah normalisasi ('$oldNorm'): upgrade butuh dua project berbeda (volume berbeda). Periksa -OldProject/-NewProject."
+  }
+  Write-Host "  project lama: $OldProject (normalisasi: $oldNorm)"
+  Write-Host "  project baru: $NewProject (normalisasi: $newNorm)"
+
+  # MF2: tolak target yang sudah terisi (read-only saja; tidak ada yang
+  # dihapus/ditimpa/dibersihkan). Dicek sebelum sumber disentuh.
+  $still = Invoke-ComposeCapture $NewProject @('ps', '-q')
+  if (-not [string]::IsNullOrWhiteSpace($still)) {
+    throw "Target tidak fresh: project $NewProject masih punya container berjalan. Hentikan/hapus project itu secara manual dulu, atau pilih -NewProject lain. Skrip tidak menghapus target."
+  }
+  foreach ($vol in @("${NewProject}_postgres-business-data", "${NewProject}_postgres-admin-data", "${NewProject}_rustfs-data")) {
+    if (Test-VolumeExists $vol) {
+      throw "Target tidak fresh: volume $vol sudah ada. Pilih -NewProject lain, atau hapus volume itu secara manual sesudah yakin. Skrip tidak menghapus volume."
+    }
+  }
+  Write-Host "  target fresh: tidak ada container/volume $NewProject"
+
+  # MF1/MF2: pastikan volume sumber benar-benar ada. Volume adalah
+  # identitas durable sumber (container bisa berhenti, volume tetap ada).
+  # Default -OldProject 'umnia-legacy' BUKAN bukti nama project asli
+  # pengguna: bila volume sumber tidak ditemukan, skrip berhenti di sini
+  # dan meminta -OldProject yang benar.
+  if (-not (Test-VolumeExists "${OldProject}_postgres-business-data")) {
+    throw "Sumber tidak ditemukan: volume ${OldProject}_postgres-business-data tidak ada. Periksa -OldProject (default 'umnia-legacy' bukan bukti nama project asli Anda)."
+  }
+  Write-Host "  sumber: volume ${OldProject}_postgres-business-data ada"
 
   $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
   if (-not (Test-Path $BackupDir)) { New-Item -ItemType Directory -Force -Path $BackupDir | Out-Null }
@@ -121,19 +231,75 @@ try {
   $backupPath = Join-Path $BackupDir $backupName
   $backupFull = [System.IO.Path]::GetFullPath($backupPath)
   if (Test-Path $backupFull) { throw "File backup sudah ada (tidak pernah ditimpa): $backupFull" }
+  $script:backupFull = $backupFull
 
-  Write-Step "0b. Jalankan postgres lama dan periksa password .env"
-  Invoke-Compose $OldProject @('up', '-d', 'postgres-business')
+  Write-Step "0b. Jalankan postgres lama dan verifikasi identitas sumber"
+  $oldCidPre = Get-ServiceContainerOrNull $OldProject 'postgres-business'
+  if ([string]::IsNullOrWhiteSpace($oldCidPre)) {
+    # Satu-satunya mutasi sebelum dump bila sumber berhenti: start
+    # non-destruktif (tidak mengubah data; perlu untuk verifikasi identitas).
+    Write-Host "  postgres lama berhenti — start non-destruktif untuk verifikasi identitas"
+    Invoke-Compose $OldProject @('up', '-d', 'postgres-business')
+  } else {
+    Write-Host "  postgres lama sudah berjalan (tidak di-start ulang)"
+  }
   $ready = $false
   for ($i = 0; $i -lt 12; $i++) {
-    & docker compose -f $ComposeFile -p $OldProject exec -T postgres-business pg_isready -U umnia_bootstrap -d umnia_business | Out-Null
+    & docker compose -f $ComposeFile -p $OldProject exec -T postgres-business pg_isready -U $SourceDbUser -d $SourceDbName | Out-Null
     if ($LASTEXITCODE -eq 0) { $ready = $true; break }
     Start-Sleep -Seconds 5
   }
-  if (-not $ready) { throw "postgres lama tidak ready (periksa password .env / log container)." }
+  if (-not $ready) { throw "postgres lama tidak ready sebagai $SourceDbUser (periksa -SourceDbUser/-SourceDbName, password .env / log container)." }
+  # MF1: identitas cluster aktual via SQL terautentikasi — pg_isready saja
+  # tidak memverifikasi kredensial/identitas role.
+  $who = Invoke-SourceSql "SELECT current_user;"
+  if ($who -ne $SourceDbUser) { throw "Identitas sumber tidak cocok: current_user='$who', harap '$SourceDbUser'. Periksa -SourceDbUser." }
+  $wsTable = Invoke-SourceSql "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'workspaces';"
+  if ($wsTable -ne '1') { throw "Database sumber tidak berisi tabel workspaces (dapat: '$wsTable'). Periksa -SourceDbName / -OldProject." }
+  Write-Host "  identitas sumber OK: current_user=$who, tabel workspaces ada"
+  # Catat nama volume aktual dari `docker inspect` (bukan asumsi nama).
+  $oldCid = Get-ServiceContainer $OldProject 'postgres-business'
+  $inspectRaw = & docker inspect $oldCid 2>&1
+  if ($LASTEXITCODE -ne 0) { throw "docker inspect gagal untuk container sumber $oldCid." }
+  $inspect = ($inspectRaw | Out-String) | ConvertFrom-Json
+  $srcVol = $null
+  foreach ($m in @($inspect[0].Mounts)) {
+    if ($m.Destination -eq '/var/lib/postgresql/data') { $srcVol = $m.Name }
+  }
+  if ([string]::IsNullOrWhiteSpace($srcVol)) {
+    throw "Volume sumber tidak bisa dipastikan dari docker inspect (mount /var/lib/postgresql/data tidak ditemukan)."
+  }
+  Write-Host "  sumber: container $oldCid, volume $srcVol"
+
+  Write-Step "0c. Maintenance: hentikan penulis sebelum dump"
+  if (-not $ConfirmMaintenance) {
+    throw "Mode maintenance belum dikonfirmasi: hentikan SEMUA penulis eksternal (klien DB langsung, instance API lain di luar Compose ini) lalu jalankan lagi dengan -ConfirmMaintenance. Skrip hanya bisa menghentikan penulis yang dikelola Compose (business-api, web); penulis langsung ke database adalah tanggung jawab operator."
+  }
+  foreach ($svc in @('business-api', 'web')) {
+    $id = Get-ServiceContainerOrNull $OldProject $svc
+    if (-not [string]::IsNullOrWhiteSpace($id)) {
+      Invoke-Compose $OldProject @('stop', $svc)
+      Write-Host "  penulis dihentikan: $svc"
+    } else {
+      Write-Host "  penulis tidak berjalan (dilewati): $svc"
+    }
+  }
+  # Pemeriksaan observabel: container penulis berhenti + tidak ada sesi
+  # penulis aktif di database (diulang sebentar karena koneksi menutup
+  # asinkron sesudah stop).
+  $quiet = $false
+  for ($i = 0; $i -lt 5; $i++) {
+    $apiLeft = Get-ServiceContainerOrNull $OldProject 'business-api'
+    $webLeft = Get-ServiceContainerOrNull $OldProject 'web'
+    $active = Invoke-SourceSql "SELECT count(*) FROM pg_stat_activity WHERE usename = '$SourceDbUser' AND state = 'active' AND pid <> pg_backend_pid();"
+    if ([string]::IsNullOrWhiteSpace($apiLeft) -and [string]::IsNullOrWhiteSpace($webLeft) -and $active -eq '0') { $quiet = $true; break }
+    Start-Sleep -Seconds 2
+  }
+  if (-not $quiet) { throw "Penulis masih aktif sesudah stop (api/web berjalan atau sesi $SourceDbUser aktif). Jangan dump selagi ada penulis; periksa container dan koneksi database lama." }
+  Write-Host "  penulis berhenti: tidak ada sesi aktif $SourceDbUser"
 
   Write-Step "1. Dump database lama (custom format, --no-owner)"
-  Invoke-Compose $OldProject @('exec', '-T', 'postgres-business', 'pg_dump', '-U', 'umnia_bootstrap', '-d', 'umnia_business', '--no-owner', '-Fc', '-f', '/tmp/umnia-backup.dump')
+  Invoke-Compose $OldProject @('exec', '-T', 'postgres-business', 'pg_dump', '-U', $SourceDbUser, '-d', $SourceDbName, '--no-owner', '-Fc', '-f', '/tmp/umnia-backup.dump')
 
   Write-Step "2. Salin backup keluar (docker cp, binary-safe)"
   $oldCid = Get-ServiceContainer $OldProject 'postgres-business'
@@ -181,7 +347,7 @@ try {
   if ($grantCheck -ne '12') { throw "Hak EXECUTE helper bukan 6 fungsi x 2 grantee (dapat: '$grantCheck', harap 12)." }
   Write-Host "  role f/f OK, 002_identity OK, EXECUTE 12/12 OK"
 
-  Write-Step "8b. Verifikasi API (readyz + isolasi)"
+  Write-Step "8b. Verifikasi API (read-only: /readyz + hitung workspaces)"
   $ready = $false
   for ($i = 0; $i -lt 24; $i++) {
     try {
@@ -191,24 +357,9 @@ try {
     Start-Sleep -Seconds 5
   }
   if (-not $ready) { throw "/readyz tidak 200 sesudah 120 detik." }
-  $suffix = Get-Date -Format 'yyyyMMddHHmmss'
-  $ownerBody = @{ email = "owner-upgrade-$suffix@contoh.id"; password = 'UpgradePass123' } | ConvertTo-Json
-  $owner = Invoke-RestMethod -Uri "$ApiBase/auth/register" -Method Post -ContentType 'application/json' -Body $ownerBody
-  $ownerLogin = Invoke-RestMethod -Uri "$ApiBase/auth/login" -Method Post -ContentType 'application/json' -Body $ownerBody
-  $staffBody = @{ email = "staff-upgrade-$suffix@contoh.id"; password = 'UpgradePass123' } | ConvertTo-Json
-  $staff = Invoke-RestMethod -Uri "$ApiBase/auth/register" -Method Post -ContentType 'application/json' -Body $staffBody
-  $staffLogin = Invoke-RestMethod -Uri "$ApiBase/auth/login" -Method Post -ContentType 'application/json' -Body $staffBody
-  $wsBody = @{ name = "Toko Upgrade $suffix" } | ConvertTo-Json
-  $ws = Invoke-RestMethod -Uri "$ApiBase/workspaces" -Method Post -ContentType 'application/json' -Headers @{ Authorization = "Bearer $($ownerLogin.token)" } -Body $wsBody
-  try {
-    Invoke-RestMethod -Uri "$ApiBase/workspaces/$($ws.id)" -Method Get -Headers @{ Authorization = "Bearer $($staffLogin.token)" } | Out-Null
-    throw "Isolasi GAGAL: pengguna baru bisa membaca workspace orang lain (harap 403)."
-  } catch {
-    $status = $null
-    if ($_.Exception.Response) { $status = [int]$_.Exception.Response.StatusCode }
-    if ($status -ne 403) { throw "Isolasi: harap 403, dapat $status." }
-  }
-  Write-Host "  /readyz 200 OK, isolasi API OK (pengguna baru 403 sebelum undangan)"
+  $wsCount = Invoke-ComposeCapture $NewProject @('exec', '-T', 'postgres-business', 'psql', '-U', 'umnia_bootstrap', '-d', 'umnia_business', '-tAc', "SELECT count(*) FROM workspaces;")
+  Write-Host "  /readyz 200 OK, workspaces hasil restore: $wsCount (read-only; tidak ada akun/workspace tes yang dibuat)"
+  Write-Host "  Uji isolasi tenant (register/login/403) TIDAK dijalankan di sini: jalankan terpisah pada fixture sintetis terisolasi."
 
   Write-Host ""
   Write-Host "UPGRADE SELESAI."

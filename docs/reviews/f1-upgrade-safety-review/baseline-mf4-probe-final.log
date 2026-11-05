@@ -1,0 +1,8 @@
+
+=== baseline-mf4-probe: production upgrade creates test accounts (MF4 repro) ===
+CHECK PASS: MF4 repro: baseline upgrade itself succeeds
+CHECK PASS: MF4 repro: synthetic accounts created in restored DB (subjects=2)
+CHECK PASS: MF4 repro: synthetic workspace created in restored DB (ws=1)
+CHECK PASS: MF4 repro: upgrade path sent mutating HTTP requests
+
+--- 4 checks, failures: 0 ---

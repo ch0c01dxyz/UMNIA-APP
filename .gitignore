@@ -3,3 +3,4 @@ node_modules/
 .nuxt/
 .output/
 services/business-api/business-api
+deploy/windows/tests/bin/

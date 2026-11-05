@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"strings"
 	"testing"
@@ -188,6 +189,138 @@ func TestInviteAcceptAndSingleUse(t *testing.T) {
 	events, _ := body["events"].([]any)
 	if len(events) < 3 {
 		t.Fatalf("audit: want >=3 events, got %d (%v)", len(events), body)
+	}
+}
+
+// Koneksi tes harus memakai role runtime (bukan superuser): RLS hanya
+// berlaku untuk role itu, dan superuser melewati RLS apa pun flag-nya.
+func TestRuntimeRoleIsNotSuperuser(t *testing.T) {
+	db := testDB(t)
+	var user string
+	var super, bypass bool
+	err := db.QueryRow(
+		`SELECT current_user, rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user`,
+	).Scan(&user, &super, &bypass)
+	if err != nil {
+		t.Fatalf("role lookup: %v", err)
+	}
+	if super || bypass {
+		t.Fatalf("role runtime %q harus NOSUPERUSER/NOBYPASSRLS, got super=%v bypass=%v", user, super, bypass)
+	}
+}
+
+func TestInviteExpiredRejected(t *testing.T) {
+	db := testDB(t)
+	srv := httptest.NewServer(newMux(db))
+	defer srv.Close()
+	suffix := time.Now().UnixNano()
+	emailA := fmt.Sprintf("exp-owner-%d@contoh.id", suffix)
+	emailB := fmt.Sprintf("exp-staff-%d@contoh.id", suffix)
+	tokenA := registerAndLogin(t, srv, emailA)
+	tokenB := registerAndLogin(t, srv, emailB)
+	ws := createWorkspace(t, srv, tokenA, "Usaha Expired")
+	code, body := doJSON(t, srv, "POST", "/workspaces/"+ws+"/invites", tokenA, map[string]string{
+		"email": emailB, "role": "cashier",
+	})
+	if code != http.StatusCreated {
+		t.Fatalf("create invite: want 201, got %d (%v)", code, body)
+	}
+	inviteToken, _ := body["token"].(string)
+	// Kedaluwarsakan undangan lewat transaksi tenant owner (RLS
+	// mengizinkan UPDATE ini karena owner punya izin invite_members).
+	var subjectA string
+	if err := db.QueryRow(`SELECT id FROM app.subject_by_email($1)`, emailA).Scan(&subjectA); err != nil {
+		t.Fatalf("subject_by_email: %v", err)
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	if _, err := tx.Exec(`SELECT set_config('app.current_workspace_id', $1, true)`, ws); err != nil {
+		tx.Rollback()
+		t.Fatalf("set workspace: %v", err)
+	}
+	if _, err := tx.Exec(`SELECT set_config('app.current_subject_id', $1, true)`, subjectA); err != nil {
+		tx.Rollback()
+		t.Fatalf("set subject: %v", err)
+	}
+	if _, err := tx.Exec(`UPDATE staff_invites SET expires_at = now() - interval '1 hour' WHERE workspace_id = $1`, ws); err != nil {
+		tx.Rollback()
+		t.Fatalf("expire invite: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	code, _ = doJSON(t, srv, "POST", "/invites/accept", tokenB, map[string]string{
+		"workspace_id": ws, "token": inviteToken,
+	})
+	if code != http.StatusConflict {
+		t.Fatalf("accept expired: want 409, got %d", code)
+	}
+}
+
+func TestCashierCannotReadAuditOrMembers(t *testing.T) {
+	db := testDB(t)
+	srv := httptest.NewServer(newMux(db))
+	defer srv.Close()
+	suffix := time.Now().UnixNano()
+	emailA := fmt.Sprintf("perm-owner-%d@contoh.id", suffix)
+	emailB := fmt.Sprintf("perm-staff-%d@contoh.id", suffix)
+	tokenA := registerAndLogin(t, srv, emailA)
+	tokenB := registerAndLogin(t, srv, emailB)
+	ws := createWorkspace(t, srv, tokenA, "Usaha Perm")
+	code, body := doJSON(t, srv, "POST", "/workspaces/"+ws+"/invites", tokenA, map[string]string{
+		"email": emailB, "role": "cashier",
+	})
+	if code != http.StatusCreated {
+		t.Fatalf("create invite: want 201, got %d (%v)", code, body)
+	}
+	inviteToken, _ := body["token"].(string)
+	code, _ = doJSON(t, srv, "POST", "/invites/accept", tokenB, map[string]string{
+		"workspace_id": ws, "token": inviteToken,
+	})
+	if code != http.StatusOK {
+		t.Fatalf("accept: want 200, got %d", code)
+	}
+	code, _ = doJSON(t, srv, "GET", "/workspaces/"+ws+"/audit", tokenB, nil)
+	if code != http.StatusForbidden {
+		t.Fatalf("kasir GET audit: want 403, got %d", code)
+	}
+	code, _ = doJSON(t, srv, "GET", "/workspaces/"+ws+"/members", tokenB, nil)
+	if code != http.StatusForbidden {
+		t.Fatalf("kasir GET members: want 403, got %d", code)
+	}
+}
+
+// Readiness harus 200 pada database yang sudah dimigrasi, dan "error"
+// pada database kosong tanpa skema (ping saja tidak cukup).
+func TestReadyzRequiresMigratedSchema(t *testing.T) {
+	db := testDB(t)
+	srv := httptest.NewServer(newMux(db))
+	defer srv.Close()
+	code, body := doJSON(t, srv, "GET", "/readyz", "", nil)
+	if code != http.StatusOK {
+		t.Fatalf("readyz pada DB termigrasi: want 200, got %d (%v)", code, body)
+	}
+	// Database kosong: ganti nama database di URL tes menjadi umnia_empty
+	// (disediakan setup CI/lokal); bila tidak tersedia, lewati tes negatif
+	// ini saja — tes integrasi utama tidak dilewati.
+	rawURL := os.Getenv("BUSINESS_DATABASE_URL")
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		t.Fatalf("parse test URL: %v", err)
+	}
+	u.Path = "/umnia_empty"
+	emptyDB, err := sql.Open("pgx", u.String())
+	if err != nil {
+		t.Skipf("tidak bisa membuka umnia_empty: %v", err)
+	}
+	defer emptyDB.Close()
+	if err := emptyDB.Ping(); err != nil {
+		t.Skipf("umnia_empty tidak tersedia: %v", err)
+	}
+	if got := checkDatabase(emptyDB); got != "error" {
+		t.Fatalf("checkDatabase pada DB kosong: want error, got %q", got)
 	}
 }
 

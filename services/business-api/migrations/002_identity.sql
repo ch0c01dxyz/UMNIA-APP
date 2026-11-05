@@ -342,6 +342,11 @@ ALTER TABLE audit_events OWNER TO umnia_business;
 -- Fungsi helper tetap milik postgres (superuser) supaya SECURITY DEFINER
 -- benar-benar melewati RLS yang di-FORCE; kalau dimiliki umnia_business,
 -- fungsi itu ikut tersaring RLS dan is_member akan rekursif/terblokir.
+-- URUTAN INI PENTING: alih kepemilikan HARUS sebelum REVOKE/GRANT di bawah.
+-- ALTER ... OWNER TO membuang entri ACL yang diberikan pemilik lama (terbukti:
+-- migrasi ulang pada volume lama yang fungsinya masih milik umnia_business
+-- membuat GRANT ke umnia_business hilang, proacl hanya {postgres=X}).
+-- Bila GRANT jalan dulu, grant itu ikut terbuang saat kepemilikan dialihkan.
 ALTER FUNCTION app.reject_audit_change() OWNER TO postgres;
 ALTER FUNCTION app.is_member(UUID, UUID) OWNER TO postgres;
 ALTER FUNCTION app.has_permission(UUID, UUID, TEXT) OWNER TO postgres;
@@ -349,3 +354,29 @@ ALTER FUNCTION app.subject_by_email(TEXT) OWNER TO postgres;
 ALTER FUNCTION app.register_subject(TEXT, TEXT) OWNER TO postgres;
 ALTER FUNCTION app.session_subject(TEXT) OWNER TO postgres;
 ALTER FUNCTION app.accept_invite(UUID, UUID, TEXT) OWNER TO postgres;
+
+-- Pengerasan SECURITY DEFINER: kunci search_path ke public supaya pemanggil
+-- tidak bisa mengarahkan fungsi ke tabel bayangan lewat search_path-nya
+-- sendiri, dan batasi EXECUTE hanya ke role aplikasi (default PostgreSQL
+-- adalah EXECUTE TO PUBLIC, yang akan membiarkan role mana pun memanggil
+-- subject_by_email dan membaca hash password).
+-- Sengaja SETELAH alih kepemilikan di atas, supaya GRANT ini (pemberinya
+-- postgres, pemilik baru) tidak terbuang oleh ALTER ... OWNER TO.
+ALTER FUNCTION app.is_member(UUID, UUID) SET search_path = public;
+ALTER FUNCTION app.has_permission(UUID, UUID, TEXT) SET search_path = public;
+ALTER FUNCTION app.subject_by_email(TEXT) SET search_path = public;
+ALTER FUNCTION app.register_subject(TEXT, TEXT) SET search_path = public;
+ALTER FUNCTION app.session_subject(TEXT) SET search_path = public;
+ALTER FUNCTION app.accept_invite(UUID, UUID, TEXT) SET search_path = public;
+REVOKE EXECUTE ON FUNCTION app.is_member(UUID, UUID) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION app.has_permission(UUID, UUID, TEXT) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION app.subject_by_email(TEXT) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION app.register_subject(TEXT, TEXT) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION app.session_subject(TEXT) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION app.accept_invite(UUID, UUID, TEXT) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION app.is_member(UUID, UUID) TO umnia_business;
+GRANT EXECUTE ON FUNCTION app.has_permission(UUID, UUID, TEXT) TO umnia_business;
+GRANT EXECUTE ON FUNCTION app.subject_by_email(TEXT) TO umnia_business;
+GRANT EXECUTE ON FUNCTION app.register_subject(TEXT, TEXT) TO umnia_business;
+GRANT EXECUTE ON FUNCTION app.session_subject(TEXT) TO umnia_business;
+GRANT EXECUTE ON FUNCTION app.accept_invite(UUID, UUID, TEXT) TO umnia_business;

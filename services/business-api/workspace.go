@@ -213,6 +213,14 @@ func (s *server) handleListMembers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback()
+	// Kasir hanya punya view_workspace, bukan view_members: daftar anggota
+	// wajib ditolak 403, bukan sekadar disaring RLS (RLS saja mengizinkan
+	// anggota mana pun membaca membership workspace-nya sendiri).
+	allowed, err := s.hasPermission(tx, id, subject, "view_members")
+	if err != nil || !allowed {
+		writeError(w, http.StatusForbidden, "tidak punya izin melihat anggota")
+		return
+	}
 	rows, err := tx.Query(
 		`SELECT m.subject_id, s.email, m.status, COALESCE(mr.role, '')
 		 FROM workspace_memberships m

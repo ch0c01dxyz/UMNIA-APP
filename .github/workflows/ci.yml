@@ -9,6 +9,26 @@ on:
 jobs:
   business-api:
     runs-on: ubuntu-latest
+    # Gate integrasi: tes memakai PostgreSQL nyata dengan role runtime,
+    # bukan sekadar unit test yang bisa lolos lewat t.Skip. Tanpa URL
+    # database, job ini sengaja gagal (lihat langkah Test), bukan hijau
+    # dengan tes integrasi dilewati seperti sebelumnya.
+    env:
+      BUSINESS_DATABASE_URL: postgres://umnia_business:ci-runtime-only@localhost:5432/umnia_test?sslmode=disable
+    services:
+      postgres:
+        image: postgres:16-bookworm
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: ci-bootstrap-only
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -23,8 +43,32 @@ jobs:
           test -z "$(gofmt -l .)"
           go vet ./...
         working-directory: services/business-api
-      - name: Test
-        run: go test ./...
+      # Password di bawah HANYA fixture CI yang dibuang tiap run, bukan
+      # rahasia produksi. Role runtime meniru deployment: NOSUPERUSER,
+      # NOBYPASSRLS, pemilik database tes; migrasi dijalankan akun
+      # bootstrap superuser (postgres) seperti service migrate Windows.
+      - name: Prepare test database
+        run: |
+          for i in $(seq 1 30); do
+            pg_isready -h localhost -p 5432 -U postgres && break || sleep 2
+          done
+          PGPASSWORD=ci-bootstrap-only psql -h localhost -U postgres -d postgres \
+            -v ON_ERROR_STOP=1 \
+            -c "CREATE ROLE umnia_business NOSUPERUSER NOBYPASSRLS LOGIN PASSWORD 'ci-runtime-only';" \
+            -c "CREATE DATABASE umnia_test OWNER umnia_business;" \
+            -c "CREATE DATABASE umnia_empty;"
+          PGPASSWORD=ci-bootstrap-only psql -h localhost -U postgres -d umnia_test \
+            -v ON_ERROR_STOP=1 -1 \
+            -f services/business-api/migrations/001_init.sql \
+            -f services/business-api/migrations/002_identity.sql
+      - name: Test (integration gate)
+        run: |
+          test -n "$BUSINESS_DATABASE_URL" || { echo "BUSINESS_DATABASE_URL wajib di gate integrasi"; exit 1; }
+          go test -v ./... 2>&1 | tee test.log
+          test "${PIPESTATUS[0]}" -eq 0
+          # Anti-skip: bila satu pun tes ter-SKIP, gate gagal. Mode
+          # unit-only lokal (tanpa URL) tetap boleh, tapi bukan gate ini.
+          if grep -q "SKIP" test.log; then echo "tes integrasi ter-SKIP di gate, gagal"; exit 1; fi
         working-directory: services/business-api
 
   web:

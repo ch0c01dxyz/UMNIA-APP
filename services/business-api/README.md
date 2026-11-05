@@ -58,6 +58,15 @@ di host Windows, seperti F1-01).
 
 ## F1-03 — identity, workspace, RBAC, undangan, audit, RLS
 
+Kontrak role database: migrasi mengasumsikan role runtime bernama
+`umnia_business` (pemilik tabel, penerima GRANT EXECUTE fungsi helper)
+dan role superuser `postgres` (pemilik fungsi helper SECURITY DEFINER).
+Deployment WAJIB membuat kedua role itu sebelum migrasi — di Linux
+oleh `deploy/linux/configure-postgres.sh`, di Windows oleh initdb
+Compose. Role runtime harus NOSUPERUSER dan NOBYPASSRLS; superuser
+melewati RLS apa pun flag-nya, jadi API tidak boleh memakai akun
+bootstrap/superuser.
+
 Endpoint (semua kecuali `/auth/*` memakai `Authorization: Bearer <token>`):
 
 ```bash
@@ -78,13 +87,27 @@ berdasarkan membership aktif. Fungsi helper RLS (`app.is_member`,
 postgres (superuser) supaya SECURITY DEFINER benar-benar melewati RLS;
 kalau dimiliki role aplikasi, fungsi itu ikut tersaring dan gagal.
 
-Tes integrasi dilewati bila `BUSINESS_DATABASE_URL` kosong (supaya CI
-tanpa database tetap hijau); jalankan lokal dengan URL dari `.env`:
+Tes integrasi dilewati bila `BUSINESS_DATABASE_URL` kosong (mode
+unit-only lokal); jalankan lokal dengan URL dari `.env`:
 
 ```bash
 BUSINESS_DATABASE_URL='postgres://umnia_business:PASSWORD@localhost:5432/umnia_business?sslmode=disable' \
   go test ./services/business-api/...
 ```
+
+Gate CI (`.github/workflows/ci.yml`) berbeda: ia memakai service
+PostgreSQL, membuat role runtime + database tes, menjalankan migrasi
+sebagai bootstrap, lalu menjalankan tes dengan URL terisi dan GAGAL
+bila ada tes yang ter-SKIP atau URL kosong. Jangan menyamakan hijau
+unit-only lokal dengan lulus gate integrasi.
+
+Readiness `/readyz` memeriksa migrasi `002_identity` sudah terapan,
+bukan hanya ping: database kosong tanpa skema dilaporkan `error`
+(503), bukan `ok`.
+
+Windows: lihat `deploy/windows/README.md` — akun bootstrap vs runtime,
+service `migrate`, dan jalur upgrade volume lama. Compose Windows
+masih UNVERIFIED di host Windows.
 
 ## Yang sengaja TIDAK ada di F1-03
 

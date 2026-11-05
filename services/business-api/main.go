@@ -57,6 +57,9 @@ func handleHealthz(w http.ResponseWriter, r *http.Request) {
 
 // databaseStatus mem-ping PostgreSQL bisnis bila URL-nya dikonfigurasi.
 // Ping dibatasi 2 detik supaya readiness tidak menggantung pada DB mati.
+// Ping saja tidak cukup: database kosong tanpa skema harus dilaporkan
+// "error" (degraded), bukan "ok" — jadi readiness juga memeriksa migrasi
+// identity F1-03 sudah terapan.
 func databaseStatus() string {
 	url := os.Getenv("BUSINESS_DATABASE_URL")
 	if url == "" {
@@ -67,9 +70,19 @@ func databaseStatus() string {
 		return "error"
 	}
 	defer db.Close()
+	return checkDatabase(db)
+}
+
+func checkDatabase(db *sql.DB) string {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	if err := db.PingContext(ctx); err != nil {
+		return "error"
+	}
+	var one int
+	err := db.QueryRowContext(ctx,
+		`SELECT 1 FROM schema_migrations WHERE version = '002_identity'`).Scan(&one)
+	if err != nil {
 		return "error"
 	}
 	return "ok"

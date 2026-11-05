@@ -56,8 +56,39 @@ Windows: `docker compose -f deploy/windows/compose.yml up --build`
 menjalankan postgres-business, postgres-admin, dan RustFS (UNVERIFIED
 di host Windows, seperti F1-01).
 
-## Yang sengaja TIDAK ada di F1-01/F1-02
+## F1-03 — identity, workspace, RBAC, undangan, audit, RLS
 
-Auth, workspace, RBAC/RLS, modul, finance — masuk F1-03 dan seterusnya
-sesuai `FAST_TRACK.md`. Linter khusus web (ESLint) belum dipasang;
-lint = gofmt + go vet (API) + build Nuxt (web).
+Endpoint (semua kecuali `/auth/*` memakai `Authorization: Bearer <token>`):
+
+```bash
+POST /auth/register   # {email, password>=8} -> 201 {id, email}
+POST /auth/login      # -> 200 {token, subject_id}; token berlaku 24 jam
+POST /workspaces      # {name} -> 201; pembuat jadi owner + anggota aktif
+GET  /workspaces/{id} # anggota saja; non-anggota -> 403 (bukan 404)
+GET  /workspaces/{id}/members
+POST /workspaces/{id}/invites  # owner/manager saja; {email, role} -> 201 {token}
+POST /invites/accept  # {workspace_id, token} -> 200; token sekali pakai (72 jam)
+GET  /workspaces/{id}/audit    # owner/manager saja; append-only di database
+```
+
+Isolasi ditegakkan dua lapis: transaksi API menyetel `app.current_subject_id`
+dan `app.current_workspace_id`, dan PostgreSQL RLS (FORCE) menyaring baris
+berdasarkan membership aktif. Fungsi helper RLS (`app.is_member`,
+`app.has_permission`, `app.session_subject`, `app.accept_invite`) milik
+postgres (superuser) supaya SECURITY DEFINER benar-benar melewati RLS;
+kalau dimiliki role aplikasi, fungsi itu ikut tersaring dan gagal.
+
+Tes integrasi dilewati bila `BUSINESS_DATABASE_URL` kosong (supaya CI
+tanpa database tetap hijau); jalankan lokal dengan URL dari `.env`:
+
+```bash
+BUSINESS_DATABASE_URL='postgres://umnia_business:PASSWORD@localhost:5432/umnia_business?sslmode=disable' \
+  go test ./services/business-api/...
+```
+
+## Yang sengaja TIDAK ada di F1-03
+
+UI login/workspace (web masih skeleton F1-01), mailer undangan (token
+undangan dikembalikan sekali ke pengundang — di produksi harus lewat
+email), logout/refresh token, dan modul (F1-04). Linter khusus web
+(ESLint) belum dipasang; lint = gofmt + go vet (API) + build Nuxt (web).

@@ -45,11 +45,15 @@ ensure_role umnia_admin "$UMNIA_ADMIN_DB_PASSWORD"
 ensure_db umnia_business umnia_business
 ensure_db umnia_admin umnia_admin
 
-# Migrasi awal business DB (hanya tabel schema_migrations di F1-02).
+# Migrasi business DB, berurutan berdasarkan nama file (001, 002, ...).
 # Jalankan dari root repo. SQL dialirkan lewat stdin, bukan -f, supaya
 # user postgres tidak perlu hak baca atas direktori workspace.
-sudo -u postgres psql -v ON_ERROR_STOP=1 -d umnia_business \
-  < services/business-api/migrations/001_init.sql
+# Setiap migrasi idempotent dan mencatat versinya di schema_migrations
+# (001) atau aman dijalankan ulang (002+).
+for migration in services/business-api/migrations/*.sql; do
+  echo "Menerapkan $migration ..."
+  sudo -u postgres psql -v ON_ERROR_STOP=1 -d umnia_business < "$migration"
+done
 
 echo "PostgreSQL siap: umnia_business + umnia_admin (terpisah)."
 echo "Contoh URL bisnis (isi password dari .env, jangan commit):"

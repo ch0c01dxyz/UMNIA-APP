@@ -11,7 +11,7 @@ func get(t *testing.T, path string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodGet, path, nil)
 	rec := httptest.NewRecorder()
-	newMux().ServeHTTP(rec, req)
+	newMux(nil).ServeHTTP(rec, req)
 	return rec
 }
 

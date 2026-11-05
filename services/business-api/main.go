@@ -1,9 +1,9 @@
-// Package main adalah business API UMNIA (F1-01 skeleton + F1-02 database).
+// Package main adalah business API UMNIA (F1-01 skeleton + F1-02 database
+// + F1-03 identity/workspace).
 //
-// Belum ada auth, workspace, maupun logika bisnis — semua itu masuk di
-// F1-03 dan seterusnya. Readiness memeriksa PostgreSQL bisnis bila
-// BUSINESS_DATABASE_URL terisi; tanpa URL itu, database dilaporkan
-// "not_configured" (bukan bukti database siap).
+// Readiness memeriksa PostgreSQL bisnis bila BUSINESS_DATABASE_URL terisi;
+// tanpa URL itu, database dilaporkan "not_configured" (bukan bukti database
+// siap). Endpoint auth/workspace mengembalikan 503 bila db nil.
 package main
 
 import (
@@ -96,12 +96,22 @@ func handleReadyz(w http.ResponseWriter, r *http.Request) {
 }
 
 // newMux dipakai main dan tes, supaya tes menguji handler yang sama
-// dengan yang benar-benar dijalankan server.
-func newMux() *http.ServeMux {
+// dengan yang benar-benar dijalankan server. db boleh nil (untuk tes
+// health/readiness); handler auth/workspace membalas 503 dalam kasus itu.
+func newMux(db *sql.DB) *http.ServeMux {
+	srv := &server{db: db}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", handleRoot)
 	mux.HandleFunc("/healthz", handleHealthz)
 	mux.HandleFunc("/readyz", handleReadyz)
+	mux.HandleFunc("POST /auth/register", srv.handleRegister)
+	mux.HandleFunc("POST /auth/login", srv.handleLogin)
+	mux.HandleFunc("POST /workspaces", srv.authMiddleware(srv.handleCreateWorkspace))
+	mux.HandleFunc("GET /workspaces/{id}", srv.authMiddleware(srv.handleGetWorkspace))
+	mux.HandleFunc("GET /workspaces/{id}/members", srv.authMiddleware(srv.handleListMembers))
+	mux.HandleFunc("POST /workspaces/{id}/invites", srv.authMiddleware(srv.handleCreateInvite))
+	mux.HandleFunc("POST /invites/accept", srv.authMiddleware(srv.handleAcceptInvite))
+	mux.HandleFunc("GET /workspaces/{id}/audit", srv.authMiddleware(srv.handleListAudit))
 	return mux
 }
 
@@ -114,9 +124,20 @@ func envOr(key, fallback string) string {
 
 func main() {
 	addr := envOr("HTTP_LISTEN_ADDR", ":8080")
+	// Koneksi dibuka tanpa ping: server tetap menyala bila DB mati, dan
+	// /readyz yang melaporkan status database (pola F1-02).
+	var db *sql.DB
+	if url := os.Getenv("BUSINESS_DATABASE_URL"); url != "" {
+		var err error
+		db, err = sql.Open("pgx", url)
+		if err != nil {
+			log.Fatalf("open database: %v", err)
+		}
+		defer db.Close()
+	}
 	srv := &http.Server{
 		Addr:              addr,
-		Handler:           newMux(),
+		Handler:           newMux(db),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	log.Printf("business-api listening on %s (env=%s)", addr, envOr("APP_ENV", "development"))

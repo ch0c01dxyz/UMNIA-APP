@@ -1,0 +1,71 @@
+# F1-WINDOWS-RUNTIME-ACCEPTANCE — laporan lingkungan + paket validasi (2026-11-06)
+
+STATUS: BLOCKED (tidak ada runtime Windows di VM ini) | TASK_ID: F1-WINDOWS-RUNTIME-ACCEPTANCE | FILES CHANGED: laporan ini + `f1-windows-runtime-acceptance/WINDOWS-VALIDATION-PACKET.md` | TESTS: 0 pass / 0 fail / 0 skipped / 8 skenario NOT RUN (BLOCKED) | RISK / BLOCKERS: tidak ada Windows, tidak ada Windows PowerShell 5.1, tidak ada Docker daemon — runtime Windows tidak dapat diuji dari VM ini | NEXT ACTION: jalankan paket validasi pada host Windows nyata (Docker Desktop), lalu laporkan hasilnya ke reviewer
+
+## 1. Keputusan review yang diterima (reviewer, OBSERVED dari prompt tugas)
+
+- Scoped source review `934ad4b8b79ae3cd5dca01121a270fd6f8f955f1`: **PASS** untuk dua perbaikan (routing file compose asli; inspeksi fail-closed). Reviewer menjalankan fungsi hasil ekstraksi AST: routing sumber/target lolos, exception inspeksi sintetis propagates, query kosong yang sukses tetap absent; parsing skrip 0 error.
+- GitHub Actions run 42091279923: SUCCESS, 14 PASS / 0 FAIL / 0 SKIP (reviewer; tidak diverifikasi ulang dari VM ini — `gh` tidak login).
+- Semua 26 entri manifest final-guards cocok dengan blob Git yang di-commit — **diverifikasi ulang secara lokal pada tugas ini** (TESTED, §3).
+- Windows runtime acceptance: **PENDING**. Overall F1 gate: **NOT COMPLETE**. Tidak ada merge/deploy/migrasi data pengguna yang diotorisasi.
+
+## 2. Lingkungan validasi aktual (OBSERVED — perintah nyata, VM ini)
+
+| Komponen | Hasil aktual | Perintah |
+|---|---|---|
+| OS | **Linux Ubuntu 24.04.5 LTS**, kernel 7.0.0-39-generic, x86_64 — BUKAN Windows | `uname -a`, `/etc/os-release` |
+| Windows PowerShell 5.1 (`powershell`) | **TIDAK ADA** | `command -v powershell` |
+| PowerShell 7.5.4 Core (`pwsh`) | Ada di `~/workspace/tools/pwsh/pwsh`, edition Core — **bukan** pengganti PS 5.1 (dilarang tugas ini sebagai bukti Windows) | `pwsh -Command '$PSVersionTable'` |
+| WSL / Windows host | **TIDAK ADA** (`wsl.exe` tidak ada, `/mnt/c` tidak ada) | `command -v wsl.exe`, `ls /mnt/c` |
+| Docker client | 29.1.3 (binary statis) | `docker --version` |
+| Docker Compose plugin | v2.40.1 | `docker compose version` |
+| Docker daemon/engine | **TIDAK BERJALAN** — `docker info` exit 1: `failed to connect to the docker API at unix:///var/run/docker.sock`; tidak ada proses `dockerd` | `docker info`, `pgrep -a dockerd` |
+| Port 5432/5433/8080/9000/3000 | Tidak ada yang listen di VM ini (bebas, tidak relevan untuk Windows) | `ss -tln` |
+| HEAD / tree | `934ad4b8b79ae3cd5dca01121a270fd6f8f955f1`, branch `f1-03-identity`, tree bersih | `git rev-parse`, `git status` |
+
+**Kesimpulan lingkungan: BLOCKED.** Tidak ada satu pun prasyarat runtime Windows yang tersedia. Sesuai instruksi tugas, pengujian dependen (skenario 1–8) DIHENTIKAN di sini; tidak ada substitusi (PostgreSQL native Linux, pwsh di Linux, mock Docker, atau sukses parser) yang dipakai sebagai bukti Windows.
+
+## 3. Verifikasi independen yang masih bisa dilakukan di VM ini (TESTED)
+
+- **Integritas bundle final-guards:** `cd docs/reviews/f1-upgrade-final-guards && sha256sum -c MANIFEST.sha256` → semua 26 entri OK, exit 0. `git ls-files -s` menunjukkan 27 file terlacak di direktori itu (26 entri manifest + `MANIFEST.sha256` sendiri) pada commit `934ad4b`. Ini membuktikan integritas artefak, BUKAN kebenaran perilaku (sesuai peringatan tugas).
+- **Hash skrip yang diuji:** `deploy/windows/Upgrade-UmniaVolume.ps1` SHA-256 `74dbe651b4836caa4a9d947145693222378e45752d2a20ccfc7f80b1d42c5057` — sama dengan yang tercatat di laporan final-guards.
+- **Kontrak compose yang dipakai paket (OBSERVED):** `deploy/windows/compose.yml` — postgres-business `127.0.0.1:5432`, postgres-admin `127.0.0.1:5433`, migrate (`psql -1` 001+002 sebagai `umnia_bootstrap`, `depends_on` postgres healthy, `restart: "no"`), rustfs `127.0.0.1:9000`, business-api build `../../services/business-api` (`127.0.0.1:8080`, `depends_on` postgres healthy + migrate `service_completed_successfully`, healthcheck `curl -f /healthz`), web build `../../apps/web` (`127.0.0.1:3000`). Volume `<project>_postgres-business-data` / `postgres-admin-data` / `rustfs-data`. Readiness: `/readyz` mensyaratkan `schema_migrations` versi `002_identity` (`services/business-api/main.go:84`).
+
+## 4. Per-scenario evidence (semua NOT RUN — BLOCKED)
+
+| # | Skenario | Status | Bukti / alasan |
+|---|---|---|---|
+| 1 | Fresh startup Windows Compose | NOT RUN (BLOCKED) | Tidak ada Docker daemon/engine Windows |
+| 2 | Readiness negative (migrasi belum jalan → tidak ready) | NOT RUN (BLOCKED) | Sama |
+| 3 | Legacy upgrade via PS 5.1 (running + stopped source) | NOT RUN (BLOCKED) | Tidak ada PS 5.1, tidak ada daemon |
+| 4 | Maintenance sumber sebelum snapshot (writer terkendali) | NOT RUN (BLOCKED) | Sama |
+| 5 | Identitas runtime target + isolasi tenant (14 langkah) | NOT RUN (BLOCKED) | Sama |
+| 6 | Negatif: equal/occupied/missing/invalid file/inspection failure | NOT RUN (BLOCKED) | Sama |
+| 7 | Kegagalan terkendali sesudah source shutdown + pemulihan | NOT RUN (BLOCKED) | Sama |
+| 8 | Hash backup + bukti restore (bukan hanya `pg_restore -l`) | NOT RUN (BLOCKED) | Sama |
+
+Tidak ada skenario yang dijalankan, sebagian dijalankan, atau diklaim lolos dari VM ini. Total suite 110-check dari tugas sebelumnya TIDAK dijalankan ulang di sini dan TIDAK diklaim.
+
+## 5. Inventaris resource (OBSERVED)
+
+- **Tidak ada resource tes yang dibuat pada tugas ini.** Tidak ada container, volume, project Compose, file backup, atau layanan yang di-start. Tidak ada perubahan pada database/volume pengguna (tidak ada yang disentuh). Tidak ada software yang di-install/di-upgrade.
+- Satu-satunya artefak baru: laporan ini + paket validasi di bawah (file dokumentasi di repo).
+
+## 6. Prasyarat yang hilang — daftar eksak (untuk host Windows)
+
+1. Host Windows 10/11 (64-bit) dengan virtualisasi aktif; Docker Desktop 4.x+ mode Linux containers + WSL 2 backend; daemon berjalan dan `docker info` menunjukkan Server.
+2. Windows PowerShell 5.1 bawaan (`$PSVersionTable.PSVersion` = 5.1.x); Git untuk Windows.
+3. Port `127.0.0.1:5432, 5433, 8080, 9000, 3000` bebas.
+4. Akses internet untuk pull image `postgres:16-bookworm` dan `rustfs/rustfs:1.0.4` (atau image sudah ter-cache).
+5. ~10 GB ruang disk kosong; checkout terisolasi (bukan repo kerja pengguna).
+
+## 7. Paket validasi siap jalan
+
+`f1-windows-runtime-acceptance/WINDOWS-VALIDATION-PACKET.md` — prasyarat, checkout terisolasi pada `934ad4b`, kredensial sintetis, file compose legacy yang harus dibuat operator, perintah PowerShell 5.1 eksak untuk skenario 1–8 (termasuk writer terkendali, workflow isolasi tenant 14 langkah dalam PowerShell, negatif, kegagalan sesudah shutdown via konflik port nyata, dan verifikasi restore pada container sekali-pakai), cara menangkap bukti (transcript + hash), serta proposal cleanup terpisah. Paket ini adalah dokumen persiapan (PROPOSED) — belum dieksekusi di mana pun.
+
+## 8. Batasan yang belum teruji (UNKNOWN — tetap terbuka)
+
+- Seluruh runtime Windows (startup, readiness negatif, upgrade PS 5.1, quiesce, negatif, pemulihan, bukti restore).
+- Eksekusi PowerShell 5.1 atas skrip upgrade (parser 0 error bukan bukti eksekusi).
+- UI login/workspace, mailer undangan, module registry (F1-04), dan bukti segregasi admin-plane — pekerjaan terpisah, bukan bagian tugas ini.
+- CI run 42091279923 tidak diverifikasi ulang dari VM ini.

@@ -1,0 +1,56 @@
+
+== 0. Prasyarat + preflight (tanpa perintah mutating)
+.env tidak ditemukan — memakai password default compose. Bila stack lama memakai password kustom, langkah 0b akan gagal; isi .env dulu.
+  project lama: umnia-legacy (normalisasi: umnia-legacy)
+  project baru: umnia (normalisasi: umnia)
+  > docker compose -f /tmp/umnia legacy/faildown/compose.yml -p umnia-legacy config -q
+  file compose lama valid: /tmp/umnia legacy/faildown/compose.yml
+  target fresh: tidak ada container/volume umnia
+  sumber: volume umnia-legacy_postgres-business-data ada
+
+== 0b. Jalankan postgres lama dan verifikasi identitas sumber
+  postgres lama sudah berjalan (tidak di-start ulang)
+  identitas sumber OK: current_user=umnia_business, tabel workspaces ada
+  sumber: container deadbeef0001, volume legacy-old_postgres-business-data
+
+== 0c. Maintenance: hentikan penulis sebelum dump
+  > docker compose -f /tmp/umnia legacy/faildown/compose.yml -p umnia-legacy stop business-api
+  penulis dihentikan: business-api
+  > docker compose -f /tmp/umnia legacy/faildown/compose.yml -p umnia-legacy stop web
+  penulis dihentikan: web
+  penulis berhenti: tidak ada sesi aktif umnia_business
+
+== 1. Dump database lama (custom format, --no-owner)
+  > docker compose -f /tmp/umnia legacy/faildown/compose.yml -p umnia-legacy exec -T postgres-business pg_dump -U umnia_business -d umnia_business --no-owner -Fc -f /tmp/umnia-backup.dump
+
+== 2. Salin backup keluar (docker cp, binary-safe)
+  > docker cp deadbeef0001:/tmp/umnia-backup.dump /tmp/umnia-upg-faildown-b883835a/backups/umnia-backup-20261106-020727.dump
+
+== 3. Validasi backup SEBELUM menghentikan stack lama
+  ukuran backup: 33462 byte
+  pg_restore -l OK (memuat tabel workspaces)
+  > docker compose -f /tmp/umnia legacy/faildown/compose.yml -p umnia-legacy exec -T postgres-business rm -f /tmp/umnia-backup.dump
+
+== 4. Hentikan stack lama (volume DIPERTAHANKAN, tanpa -v)
+  > docker compose -f /tmp/umnia legacy/faildown/compose.yml -p umnia-legacy down
+
+== 5. Jalankan postgres project baru (volume kosong -> initdb)
+  > docker compose -f /home/hatch/workspace/UMNIA-APP/deploy/windows/compose.yml -p umnia up -d postgres-business
+
+== 6. Restore backup ke database baru
+  > docker cp /tmp/umnia-upg-faildown-b883835a/backups/umnia-backup-20261106-020727.dump cafef00d0002:/tmp/umnia-backup.dump
+  > docker compose -f /home/hatch/workspace/UMNIA-APP/deploy/windows/compose.yml -p umnia exec -T postgres-business pg_restore -U umnia_bootstrap -d umnia_business --no-owner --exit-on-error /tmp/umnia-backup.dump
+mock: injected pg_restore failure (FailRestore)
+
+UPGRADE GAGAL: Perintah gagal (exit 1): docker compose -f /home/hatch/workspace/UMNIA-APP/deploy/windows/compose.yml -p umnia exec -T postgres-business pg_restore -U umnia_bootstrap -d umnia_business --no-owner --exit-on-error /tmp/umnia-backup.dump
+JALUR PEMULIHAN: volume lama masih utuh (tidak pernah dihapus).
+  Backup       : /tmp/umnia-upg-faildown-b883835a/backups/umnia-backup-20261106-020727.dump
+  Volume lama  : umnia-legacy_postgres-business-data
+  1. Bila project baru sempat jalan dan memakai port host yang sama,
+     hentikan dulu (tanpa -v):
+       docker compose -f "/home/hatch/workspace/UMNIA-APP/deploy/windows/compose.yml" -p umnia down
+  2. Jalankan kembali stack LAMA LENGKAP (termasuk business-api, supaya
+     penulis bisa menulis lagi) dengan file compose ASLI volume lama:
+       docker compose -f "/tmp/umnia legacy/faildown/compose.yml" -p umnia-legacy up -d
+  3. Perbaiki penyebab kegagalan, lalu ulangi skrip ini (file backup
+     baru akan dibuat dengan timestamp baru; file lama tidak ditimpa).

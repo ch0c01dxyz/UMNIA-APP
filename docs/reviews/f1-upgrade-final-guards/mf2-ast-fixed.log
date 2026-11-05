@@ -1,0 +1,12 @@
+extracted function extent:
+function Get-ServiceContainerOrNull($Project, $Service) {
+  # '' HANYA bila `ps -q` SUKSES dengan output kosong (service tidak
+  # berjalan). Kegagalan perintah/konfig/daemon TIDAK ditelan: exception
+  # dari Invoke-ComposeCapture dibiarkan naik supaya quiescence gagal
+  # tertutup (fail-closed) — ketiadaan hasil BUKAN bukti penulis berhenti.
+  $id = Invoke-ComposeCapture $Project @('ps', '-q', $Service)
+  if ([string]::IsNullOrWhiteSpace($id)) { return '' }
+  return $id.Trim()
+}
+exception propagated: synthetic Docker error: Cannot connect to the Docker daemon
+MF2 NOT reproduced: error propagates (fail-closed)

@@ -43,9 +43,11 @@
   terpisah pada fixture sintetis terisolasi, bukan di sini.
 
   Urutan (gagal di langkah mana pun = berhenti, jangan lanjut):
-    0. Preflight: normalisasi + bandingkan project, periksa target
-       kosong, periksa sumber ada (termasuk nama volume via inspect).
-       TIDAK ADA perintah mutating sebelum preflight lolos.
+    0. Prasyarat + preflight: file compose lama WAJIB ada dan valid
+       (Test-Path + `docker compose config -q`); normalisasi +
+       bandingkan project, periksa target kosong, periksa sumber ada
+       (termasuk nama volume via inspect). TIDAK ADA perintah mutating
+       sebelum preflight lolos.
     0b. Jalankan postgres lama bila berhenti, lalu verifikasi identitas
        sumber dengan SQL terautentikasi.
     0c. Maintenance: -ConfirmMaintenance wajib; hentikan penulis
@@ -77,14 +79,32 @@
   jadi stack lama HARUS berhenti dulu sebelum stack baru jalan — skrip
   ini menegakkannya lewat urutan langkah.
 
+  Routing file compose (FINAL-GUARDS): SEMUA operasi project LAMA
+  memakai file compose ASLI yang membuat volume lama, lewat parameter
+  WAJIB -LegacyComposeFile — tanpa fallback ke file compose baru.
+  -LegacyComposeFile harus ada (Test-Path) dan valid (`docker compose
+  config -q`) SEBELUM perintah mutating apa pun; bila tidak ada/tidak
+  valid skrip berhenti. Operasi project BARU memakai -ComposeFile.
+  Routing ini hidup di helper bersama (Get-ComposeFile, dipakai
+  Invoke-Compose/Invoke-ComposeCapture), bukan di tiap langkah.
+
+  Pemeriksaan inspeksi (FINAL-GUARDS): query `ps -q` yang GAGAL
+  (daemon mati, config rusak) TIDAK ditelan menjadi "tidak berjalan".
+  Get-ServiceContainerOrNull hanya mengubah output kosong dari query
+  yang SUKSES menjadi '' — exception dibiarkan naik supaya quiescence
+  gagal tertutup (fail-closed). Service penulis yang memang tidak
+  terdefinisi di config lama dibedakan lewat cek eksplisit
+  Test-ServiceDefined (`docker compose config --services`), bukan
+  lewat menelan error.
+
   JALUR PEMULIHAN bila gagal sesudah langkah 4: volume lama masih utuh.
   Skrip mencetak perintah pemulihan lengkap saat gagal (lihat
   Get-RecoveryText): hentikan project baru dulu bila ia memakai port,
   lalu jalankan kembali stack LAMA LENGKAP (termasuk business-api,
   supaya penulis bisa menulis lagi) dengan file compose ASLI yang
   membuat volume lama (POSTGRES_USER=umnia_business) — BUKAN file
-  compose baru. Beri file itu lewat -LegacyComposeFile; bila tidak
-  diisi, skrip memakai -ComposeFile dan mencetak peringatan eksplisit.
+  compose baru. Path file dalam perintah pemulihan dikutip (aman bila
+  path mengandung spasi).
 
   Skrip ini TIDAK PERNAH menulis/menimpa .env. Satu file .env yang sama
   dipakai kedua project (password bootstrap/runtime harus sama dengan
@@ -105,7 +125,7 @@ param(
   [string]$ApiBase = "http://localhost:8080",
   [string]$SourceDbUser = "umnia_business",
   [string]$SourceDbName = "umnia_business",
-  [string]$LegacyComposeFile = "",
+  [Parameter(Mandatory=$true)][string]$LegacyComposeFile,
   [switch]$ConfirmMaintenance
 )
 
@@ -118,44 +138,68 @@ function Normalize-ProjectName($Name) {
   $n = $Name.ToLower() -replace '[^a-z0-9_-]', ''
   return $n.TrimStart('-', '_')
 }
+function Get-ComposeFile($Project) {
+  # Routing: operasi OldProject SELALU memakai file compose ASLI
+  # (-LegacyComposeFile); operasi NewProject memakai -ComposeFile.
+  # Project yang bukan keduanya adalah kesalahan pemanggil — throw.
+  if ($Project -eq $OldProject) { return $LegacyComposeFile }
+  if ($Project -eq $NewProject) { return $ComposeFile }
+  throw "Project tidak dikenal: $Project (harap '$OldProject' atau '$NewProject')."
+}
+function Test-ServiceDefined($Project, $Service) {
+  # Cek eksplisit apakah service terdefinisi di file compose project
+  # itu (untuk penulis OPSIONAL di konfigurasi legacy). Kegagalan
+  # `config --services` (konfig rusak/daemon mati) dibiarkan naik —
+  # bukan ditelan menjadi "tidak terdefinisi".
+  $services = Invoke-ComposeCapture $Project @('config', '--services')
+  return (($services -split "`n") | ForEach-Object { $_.Trim() }) -contains $Service
+}
+function Test-PostgresReady($Project, $User, $Db) {
+  # pg_isready via file compose project itu (routing lewat helper).
+  # Mengembalikan $true bila server menerima koneksi (ingat: ini hanya
+  # liveness — identitas role tetap diverifikasi query SQL terpisah).
+  $file = Get-ComposeFile $Project
+  & docker compose -f $file -p $Project exec -T postgres-business pg_isready -U $User -d $Db | Out-Null
+  return ($LASTEXITCODE -eq 0)
+}
 function Test-VolumeExists($VolumeName) {
   $null = & docker volume inspect $VolumeName 2>$null
   return ($LASTEXITCODE -eq 0)
 }
 function Get-RecoveryText {
-  $legacyFile = $LegacyComposeFile
-  $warn = ""
-  if ([string]::IsNullOrWhiteSpace($legacyFile)) {
-    $legacyFile = $ComposeFile
-    $warn = "  PERINGATAN: -LegacyComposeFile tidak diisi — perintah di bawah memakai $ComposeFile;`n  pastikan itu file compose ASLI yang membuat volume lama (POSTGRES_USER=umnia_business),`n  BUKAN file compose baru (yang memakai umnia_bootstrap + migrate).`n"
-  }
+  # -LegacyComposeFile bersifat wajib, jadi tidak ada fallback ke file
+  # baru dan tidak ada peringatan — file di bawah SELALU file asli.
+  # Path dikutip supaya perintah tetap benar bila mengandung spasi.
   return @"
 JALUR PEMULIHAN: volume lama masih utuh (tidak pernah dihapus).
   Backup       : $script:backupFull
   Volume lama  : ${OldProject}_postgres-business-data
   1. Bila project baru sempat jalan dan memakai port host yang sama,
      hentikan dulu (tanpa -v):
-       docker compose -f $ComposeFile -p $NewProject down
+       docker compose -f "$ComposeFile" -p $NewProject down
   2. Jalankan kembali stack LAMA LENGKAP (termasuk business-api, supaya
      penulis bisa menulis lagi) dengan file compose ASLI volume lama:
-       docker compose -f $legacyFile -p $OldProject up -d
-$warn  3. Perbaiki penyebab kegagalan, lalu ulangi skrip ini (file backup
+       docker compose -f "$LegacyComposeFile" -p $OldProject up -d
+  3. Perbaiki penyebab kegagalan, lalu ulangi skrip ini (file backup
      baru akan dibuat dengan timestamp baru; file lama tidak ditimpa).
 "@
 }
 function Invoke-Compose($Project, $Arguments) {
-  # Jalankan `docker compose -f <file> -p <project> <args>`, throw bila gagal.
-  $cmd = "docker compose -f $ComposeFile -p $Project $Arguments"
+  # Jalankan `docker compose -f <file> -p <project> <args>` dengan file
+  # yang di-routing Get-ComposeFile; throw bila gagal.
+  $file = Get-ComposeFile $Project
+  $cmd = "docker compose -f $file -p $Project $Arguments"
   Write-Host "  > $cmd"
-  & docker compose -f $ComposeFile -p $Project @Arguments
+  & docker compose -f $file -p $Project @Arguments
   if ($LASTEXITCODE -ne 0) {
     throw "Perintah gagal (exit $LASTEXITCODE): $cmd"
   }
 }
 function Invoke-ComposeCapture($Project, $Arguments) {
-  $out = & docker compose -f $ComposeFile -p $Project @Arguments 2>&1
+  $file = Get-ComposeFile $Project
+  $out = & docker compose -f $file -p $Project @Arguments 2>&1
   if ($LASTEXITCODE -ne 0) {
-    throw "Perintah gagal (exit $LASTEXITCODE): docker compose -f $ComposeFile -p $Project $($Arguments -join ' ')"
+    throw "Perintah gagal (exit $LASTEXITCODE): docker compose -f $file -p $Project $($Arguments -join ' ')"
   }
   return ($out | Out-String).Trim()
 }
@@ -165,8 +209,11 @@ function Get-ServiceContainer($Project, $Service) {
   return $id.Trim()
 }
 function Get-ServiceContainerOrNull($Project, $Service) {
-  # '' bila service tidak ada / tidak berjalan (bukan error fatal di sini).
-  try { $id = Invoke-ComposeCapture $Project @('ps', '-q', $Service) } catch { return '' }
+  # '' HANYA bila `ps -q` SUKSES dengan output kosong (service tidak
+  # berjalan). Kegagalan perintah/konfig/daemon TIDAK ditelan: exception
+  # dari Invoke-ComposeCapture dibiarkan naik supaya quiescence gagal
+  # tertutup (fail-closed) — ketiadaan hasil BUKAN bukti penulis berhenti.
+  $id = Invoke-ComposeCapture $Project @('ps', '-q', $Service)
   if ([string]::IsNullOrWhiteSpace($id)) { return '' }
   return $id.Trim()
 }
@@ -185,6 +232,8 @@ try {
     if (-not (Get-Command $tool -ErrorAction SilentlyContinue)) { throw "Perintah '$tool' tidak ditemukan di PATH." }
   }
   if (-not (Test-Path $ComposeFile)) { throw "Compose file tidak ditemukan: $ComposeFile" }
+  # FINAL-GUARDS: file compose ASLI wajib ada — tanpa fallback ke file baru.
+  if (-not (Test-Path $LegacyComposeFile)) { throw "File compose lama tidak ditemukan: $LegacyComposeFile (parameter -LegacyComposeFile WAJIB — beri file compose ASLI yang membuat volume lama)." }
   if (-not (Test-Path ".env")) {
     Write-Warning ".env tidak ditemukan — memakai password default compose. Bila stack lama memakai password kustom, langkah 0b akan gagal; isi .env dulu."
   }
@@ -201,6 +250,11 @@ try {
   }
   Write-Host "  project lama: $OldProject (normalisasi: $oldNorm)"
   Write-Host "  project baru: $NewProject (normalisasi: $newNorm)"
+
+  # FINAL-GUARDS: file compose lama harus VALID sebelum perintah
+  # mutating apa pun (read-only; config rusak = berhenti di sini).
+  Invoke-Compose $OldProject @('config', '-q')
+  Write-Host "  file compose lama valid: $LegacyComposeFile"
 
   # MF2: tolak target yang sudah terisi (read-only saja; tidak ada yang
   # dihapus/ditimpa/dibersihkan). Dicek sebelum sumber disentuh.
@@ -245,8 +299,7 @@ try {
   }
   $ready = $false
   for ($i = 0; $i -lt 12; $i++) {
-    & docker compose -f $ComposeFile -p $OldProject exec -T postgres-business pg_isready -U $SourceDbUser -d $SourceDbName | Out-Null
-    if ($LASTEXITCODE -eq 0) { $ready = $true; break }
+    if (Test-PostgresReady $OldProject $SourceDbUser $SourceDbName) { $ready = $true; break }
     Start-Sleep -Seconds 5
   }
   if (-not $ready) { throw "postgres lama tidak ready sebagai $SourceDbUser (periksa -SourceDbUser/-SourceDbName, password .env / log container)." }
@@ -275,7 +328,15 @@ try {
   if (-not $ConfirmMaintenance) {
     throw "Mode maintenance belum dikonfirmasi: hentikan SEMUA penulis eksternal (klien DB langsung, instance API lain di luar Compose ini) lalu jalankan lagi dengan -ConfirmMaintenance. Skrip hanya bisa menghentikan penulis yang dikelola Compose (business-api, web); penulis langsung ke database adalah tanggung jawab operator."
   }
+  # Penulis yang terdefinisi di config lama saja yang dihentikan dan
+  # diperiksa. Service yang memang tidak ada di config lama (mis. web)
+  # dilewati secara eksplisit — BUKAN lewat menelan error query.
+  $writerSvcs = @()
   foreach ($svc in @('business-api', 'web')) {
+    if (Test-ServiceDefined $OldProject $svc) { $writerSvcs += $svc }
+    else { Write-Host "  penulis tidak terdefinisi di config lama (dilewati): $svc" }
+  }
+  foreach ($svc in $writerSvcs) {
     $id = Get-ServiceContainerOrNull $OldProject $svc
     if (-not [string]::IsNullOrWhiteSpace($id)) {
       Invoke-Compose $OldProject @('stop', $svc)
@@ -289,10 +350,11 @@ try {
   # asinkron sesudah stop).
   $quiet = $false
   for ($i = 0; $i -lt 5; $i++) {
-    $apiLeft = Get-ServiceContainerOrNull $OldProject 'business-api'
-    $webLeft = Get-ServiceContainerOrNull $OldProject 'web'
+    $left = @()
+    foreach ($svc in $writerSvcs) { $left += Get-ServiceContainerOrNull $OldProject $svc }
+    $anyLeft = @($left | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }).Count -gt 0
     $active = Invoke-SourceSql "SELECT count(*) FROM pg_stat_activity WHERE usename = '$SourceDbUser' AND state = 'active' AND pid <> pg_backend_pid();"
-    if ([string]::IsNullOrWhiteSpace($apiLeft) -and [string]::IsNullOrWhiteSpace($webLeft) -and $active -eq '0') { $quiet = $true; break }
+    if (-not $anyLeft -and $active -eq '0') { $quiet = $true; break }
     Start-Sleep -Seconds 2
   }
   if (-not $quiet) { throw "Penulis masih aktif sesudah stop (api/web berjalan atau sesi $SourceDbUser aktif). Jangan dump selagi ada penulis; periksa container dan koneksi database lama." }
@@ -323,8 +385,7 @@ try {
   Invoke-Compose $NewProject @('up', '-d', 'postgres-business')
   $ready = $false
   for ($i = 0; $i -lt 12; $i++) {
-    & docker compose -f $ComposeFile -p $NewProject exec -T postgres-business pg_isready -U umnia_bootstrap -d umnia_business | Out-Null
-    if ($LASTEXITCODE -eq 0) { $ready = $true; break }
+    if (Test-PostgresReady $NewProject 'umnia_bootstrap' 'umnia_business') { $ready = $true; break }
     Start-Sleep -Seconds 5
   }
   if (-not $ready) { throw "postgres baru tidak ready (periksa log initdb)." }

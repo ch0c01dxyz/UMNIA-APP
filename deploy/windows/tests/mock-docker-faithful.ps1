@@ -233,17 +233,40 @@ function docker {
       $proj = Get-ProjectState $project
       $verb = $sub[0]
       switch ($verb) {
+        'config' {
+          # config -q: validate the file. config --services: list the
+          # services defined by this project's compose file.
+          if ($global:UpgradeTestState.FailConfig -eq $project) {
+            Write-Host "mock docker config: injected config failure (FailConfig)"
+            $code = 1
+          } elseif ($sub -contains '-q') {
+            $code = 0
+          } elseif ($sub -contains '--services') {
+            $proj.Services
+            $code = 0
+          } else { throw "mock: unimplemented docker compose config args '$($sub -join ' ')'" }
+        }
         'ps' {
           # ps -q [service]: CIDs of RUNNING services only.
           $svc = $null
           $qIdx = [Array]::IndexOf($sub, '-q')
           if ($qIdx -ge 0 -and $qIdx + 1 -lt $sub.Count) { $svc = $sub[$qIdx + 1] }
-          $out = @()
-          if (-not $svc -or $svc -eq 'postgres-business') { if (Test-PostgresRunning $proj) { $out += $proj.Cid } }
-          if (-not $svc -or $svc -eq 'business-api') { if (Test-ApiRunning $proj) { $out += "$($proj.Cid)-api" } }
-          if (-not $svc -or $svc -eq 'web') { if ($proj.WebRunning) { $out += "$($proj.Cid)-web" } }
-          $out
-          $code = 0
+          if ($global:UpgradeTestState.FailPs -eq "$project/$svc") {
+            Write-Host "mock docker ps: injected query failure (FailPs)"
+            $code = 1
+          } elseif ($svc -and ($proj.Services -notcontains $svc)) {
+            # Real compose errors on an undefined service; it must not
+            # be silently read as "not running".
+            Write-Host "mock docker ps: no such service '$svc'"
+            $code = 1
+          } else {
+            $out = @()
+            if (-not $svc -or $svc -eq 'postgres-business') { if (Test-PostgresRunning $proj) { $out += $proj.Cid } }
+            if (-not $svc -or $svc -eq 'business-api') { if (Test-ApiRunning $proj) { $out += "$($proj.Cid)-api" } }
+            if (-not $svc -or $svc -eq 'web') { if ($proj.WebRunning) { $out += "$($proj.Cid)-web" } }
+            $out
+            $code = 0
+          }
         }
         'up' {
           $svc = $null

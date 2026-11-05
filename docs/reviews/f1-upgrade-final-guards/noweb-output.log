@@ -1,0 +1,60 @@
+
+== 0. Prasyarat + preflight (tanpa perintah mutating)
+.env tidak ditemukan — memakai password default compose. Bila stack lama memakai password kustom, langkah 0b akan gagal; isi .env dulu.
+  project lama: umnia-legacy (normalisasi: umnia-legacy)
+  project baru: umnia (normalisasi: umnia)
+  > docker compose -f /tmp/umnia legacy/noweb/compose.yml -p umnia-legacy config -q
+  file compose lama valid: /tmp/umnia legacy/noweb/compose.yml
+  target fresh: tidak ada container/volume umnia
+  sumber: volume umnia-legacy_postgres-business-data ada
+
+== 0b. Jalankan postgres lama dan verifikasi identitas sumber
+  postgres lama sudah berjalan (tidak di-start ulang)
+  identitas sumber OK: current_user=umnia_business, tabel workspaces ada
+  sumber: container deadbeef0001, volume legacy-old_postgres-business-data
+
+== 0c. Maintenance: hentikan penulis sebelum dump
+  penulis tidak terdefinisi di config lama (dilewati): web
+  > docker compose -f /tmp/umnia legacy/noweb/compose.yml -p umnia-legacy stop business-api
+  penulis dihentikan: business-api
+  penulis berhenti: tidak ada sesi aktif umnia_business
+
+== 1. Dump database lama (custom format, --no-owner)
+  > docker compose -f /tmp/umnia legacy/noweb/compose.yml -p umnia-legacy exec -T postgres-business pg_dump -U umnia_business -d umnia_business --no-owner -Fc -f /tmp/umnia-backup.dump
+
+== 2. Salin backup keluar (docker cp, binary-safe)
+  > docker cp deadbeef0001:/tmp/umnia-backup.dump /tmp/umnia-upg-noweb-df4b9f1b/backups/umnia-backup-20261106-020354.dump
+
+== 3. Validasi backup SEBELUM menghentikan stack lama
+  ukuran backup: 31651 byte
+  pg_restore -l OK (memuat tabel workspaces)
+  > docker compose -f /tmp/umnia legacy/noweb/compose.yml -p umnia-legacy exec -T postgres-business rm -f /tmp/umnia-backup.dump
+
+== 4. Hentikan stack lama (volume DIPERTAHANKAN, tanpa -v)
+  > docker compose -f /tmp/umnia legacy/noweb/compose.yml -p umnia-legacy down
+
+== 5. Jalankan postgres project baru (volume kosong -> initdb)
+  > docker compose -f /home/hatch/workspace/UMNIA-APP/deploy/windows/compose.yml -p umnia up -d postgres-business
+
+== 6. Restore backup ke database baru
+  > docker cp /tmp/umnia-upg-noweb-df4b9f1b/backups/umnia-backup-20261106-020354.dump cafef00d0002:/tmp/umnia-backup.dump
+  > docker compose -f /home/hatch/workspace/UMNIA-APP/deploy/windows/compose.yml -p umnia exec -T postgres-business pg_restore -U umnia_bootstrap -d umnia_business --no-owner --exit-on-error /tmp/umnia-backup.dump
+  > docker compose -f /home/hatch/workspace/UMNIA-APP/deploy/windows/compose.yml -p umnia exec -T postgres-business rm -f /tmp/umnia-backup.dump
+
+== 7. Jalankan stack baru penuh (migrate menormalkan kepemilikan)
+  > docker compose -f /home/hatch/workspace/UMNIA-APP/deploy/windows/compose.yml -p umnia up --build -d
+
+== 8a. Verifikasi database
+  role f/f OK, 002_identity OK, EXECUTE 12/12 OK
+
+== 8b. Verifikasi API (read-only: /readyz + hitung workspaces)
+  [http] GET http://127.0.0.1:18081/readyz -> 200
+  /readyz 200 OK, workspaces hasil restore: 1 (read-only; tidak ada akun/workspace tes yang dibuat)
+  Uji isolasi tenant (register/login/403) TIDAK dijalankan di sini: jalankan terpisah pada fixture sintetis terisolasi.
+
+UPGRADE SELESAI.
+  Backup       : /tmp/umnia-upg-noweb-df4b9f1b/backups/umnia-backup-20261106-020354.dump
+  Volume lama  : umnia-legacy_postgres-business-data (masih ada; hapus hanya sesudah yakin)
+  Volume baru  : umnia_postgres-business-data
+  Hapus volume lama (HANYA bila sudah yakin, TIDAK bisa dibatalkan):
+    docker volume rm umnia-legacy_postgres-business-data

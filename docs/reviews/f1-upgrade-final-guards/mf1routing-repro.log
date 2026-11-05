@@ -1,0 +1,7 @@
+
+=== baseline-mf1-routing: stopped source starts with the NEW config (MF1 repro) ===
+CHECK PASS: MF1 repro: stopped source is started at all
+CHECK PASS: MF1 repro: source start used the NEW compose file (not the legacy one)
+CHECK PASS: MF1 repro: source readiness used the NEW compose file
+
+--- 3 checks, failures: 0 ---

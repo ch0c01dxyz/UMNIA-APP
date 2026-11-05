@@ -76,6 +76,13 @@ case "${1:?command}" in
     api_stop $H/api-new.pid
     pg_stop $H/pgdata-upgraded-new 55437
     ;;
+  stop-legacy)
+    # Stop legacy-project services WITHOUT deleting the volume (for the
+    # stopped-source upgrade path: source postgres + writers stopped,
+    # data intact).
+    api_stop $H/api-legacy.pid
+    pg_stop $H/pgdata-legacy-old 55436
+    ;;
   reset-target)
     api_stop $H/api-new.pid
     pg_stop $H/pgdata-upgraded-new 55437

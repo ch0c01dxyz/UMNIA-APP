@@ -1,0 +1,7 @@
+
+=== baseline-mf3-writer: writes lost between dump and cutover (MF3 repro) ===
+CHECK PASS: MF3 repro: writer acknowledged writes AFTER the dump snapshot
+CHECK PASS: MF3 repro: target is missing acknowledged writes (target=122 expected=122, after-dump lost=2)
+  writes n0->dump: 25, after dump: 2, target=122 expected=122
+
+--- 2 checks, failures: 0 ---

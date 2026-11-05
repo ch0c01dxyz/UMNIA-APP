@@ -1,0 +1,18 @@
+
+=== fixed-inspection-failure: inspection errors fail closed (MF2) ===
+CHECK PASS: fixed inspection: source query error aborts
+CHECK PASS: fixed inspection: no dump after source query error
+CHECK PASS: fixed inspection: no source shutdown after source query error
+CHECK PASS: fixed inspection: zero mutating calls after source query error
+CHECK PASS: fixed inspection: writer query error aborts
+CHECK PASS: fixed inspection: no dump after writer query error
+CHECK PASS: fixed inspection: no source shutdown after writer query error
+CHECK PASS: fixed inspection: zero mutating calls after writer query error
+CHECK PASS: fixed inspection: malformed legacy config aborts
+CHECK PASS: fixed inspection: malformed config fails before any mutating command
+CHECK PASS: fixed inspection: malformed config error names the legacy file
+CHECK PASS: fixed inspection: missing legacy file aborts
+CHECK PASS: fixed inspection: missing legacy file fails with ZERO docker calls
+CHECK PASS: fixed inspection: missing legacy file error names the file
+
+--- 14 checks, failures: 0 ---

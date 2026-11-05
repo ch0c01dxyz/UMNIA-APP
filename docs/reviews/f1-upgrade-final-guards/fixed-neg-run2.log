@@ -1,0 +1,27 @@
+
+=== fixed-negative: preflight rejects equal/occupied/wrong-source ===
+CHECK PASS: fixed negative: equal projects rejected
+CHECK PASS: fixed negative: equal projects produced ZERO docker calls
+psql:/home/hatch/workspace/UMNIA-APP/services/business-api/migrations/002_identity.sql:114: NOTICE:  trigger "audit_events_append_only" for relation "audit_events" does not exist, skipping
+psql:/home/hatch/workspace/UMNIA-APP/services/business-api/migrations/002_identity.sql:232: NOTICE:  policy "self_only" for relation "identity_subjects" does not exist, skipping
+psql:/home/hatch/workspace/UMNIA-APP/services/business-api/migrations/002_identity.sql:238: NOTICE:  policy "member_subject" for relation "identity_subjects" does not exist, skipping
+psql:/home/hatch/workspace/UMNIA-APP/services/business-api/migrations/002_identity.sql:249: NOTICE:  policy "member_workspace" for relation "workspaces" does not exist, skipping
+psql:/home/hatch/workspace/UMNIA-APP/services/business-api/migrations/002_identity.sql:263: NOTICE:  policy "member_membership" for relation "workspace_memberships" does not exist, skipping
+psql:/home/hatch/workspace/UMNIA-APP/services/business-api/migrations/002_identity.sql:281: NOTICE:  policy "member_roles" for relation "membership_roles" does not exist, skipping
+psql:/home/hatch/workspace/UMNIA-APP/services/business-api/migrations/002_identity.sql:299: NOTICE:  policy "self_session" for relation "sessions" does not exist, skipping
+psql:/home/hatch/workspace/UMNIA-APP/services/business-api/migrations/002_identity.sql:304: NOTICE:  policy "member_invite" for relation "staff_invites" does not exist, skipping
+psql:/home/hatch/workspace/UMNIA-APP/services/business-api/migrations/002_identity.sql:315: NOTICE:  policy "member_audit" for relation "audit_events" does not exist, skipping
+CHECK PASS: fixed negative: occupied target rejected
+CHECK PASS: fixed negative: occupied target produced ZERO mutating docker calls
+CHECK PASS: fixed negative: target marker untouched
+CHECK PASS: fixed negative: legacy API still running
+CHECK PASS: fixed negative: occupied volume rejected with containers stopped
+CHECK PASS: fixed negative: volume rejection names the volume
+CHECK PASS: fixed negative: volume rejection produced ZERO mutating docker calls
+CHECK PASS: fixed negative: wrong source identity rejected
+CHECK PASS: fixed negative: source ops used the legacy file, target ops the new file
+CHECK PASS: fixed negative: wrong source produced ZERO mutating docker calls
+CHECK PASS: fixed negative: no dump on wrong source
+CHECK PASS: fixed negative: legacy fixture intact
+
+--- 14 checks, failures: 0 ---

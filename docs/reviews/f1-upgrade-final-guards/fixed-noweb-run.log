@@ -1,0 +1,8 @@
+
+=== fixed-missing-writer: legacy config without web still upgrades ===
+CHECK PASS: fixed missing-writer: script exits 0
+CHECK PASS: fixed missing-writer: web was never queried on the legacy project
+CHECK PASS: fixed missing-writer: fixture workspace preserved
+CHECK PASS: fixed missing-writer: new API readyz 200
+
+--- 4 checks, failures: 0 ---

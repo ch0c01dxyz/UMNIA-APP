@@ -44,25 +44,40 @@ lama vs baru, sehingga volume lama tidak pernah tersentuh):
 .\deploy\windows\Upgrade-UmniaVolume.ps1 -OldProject umnia-legacy -NewProject umnia -ConfirmMaintenance -LegacyComposeFile deploy/windows/compose.yml
 ```
 
+**File compose lama (`-LegacyComposeFile`, WAJIB):** beri file compose
+ASLI yang membuat volume lama. SEMUA operasi project lama (inspeksi,
+start, readiness, query SQL, stop penulis, dump, shutdown, pemulihan)
+memakai file ini; operasi project baru memakai `-ComposeFile`. Skrip
+memeriksa file lama ada (`Test-Path`) dan valid
+(`docker compose config -q`) SEBELUM perintah mutating apa pun — bila
+tidak ada/tidak valid skrip berhenti. Tidak ada fallback ke file compose
+baru. Perintah pemulihan yang dicetak mengutip path file (aman bila path
+mengandung spasi).
+
 **Syarat maintenance (`-ConfirmMaintenance`, wajib):** sebelum dump,
 skrip menghentikan penulis yang dikelola Compose (`business-api` dan
 `web` project lama) dan memeriksa tidak ada sesi aktif untuk akun sumber
-di `pg_stat_activity`. Penulis tetap berhenti sampai cutover selesai
+di `pg_stat_activity`. Service penulis yang memang tidak terdefinisi di
+file compose lama dilewati secara eksplisit (cek `config --services`),
+bukan lewat menelan error. Penulis tetap berhenti sampai cutover selesai
 atau pemulihan berhasil. Batas jaminan: skrip hanya bisa menghentikan
 penulis yang dikelola Compose; klien DB langsung / instansi API di luar
 Compose adalah tanggung jawab operator — pastikan tidak ada penulis
 lain sebelum menjalankan skrip. Tanpa `-ConfirmMaintenance` skrip
-berhenti sebelum menyentuh apa pun.
+berhenti sebelum menyentuh apa pun. Bila pemeriksaan status penulis
+GAGAL (daemon mati, config rusak), skrip berhenti dan TIDAK menganggap
+penulis sudah berhenti — ketiadaan hasil query bukan bukti.
 
 Yang dilakukan skrip (berhenti bila ada langkah gagal; jalur pemulihan
 dicetak bila gagal):
 
-1. **Preflight, tanpa perintah mutating:** tolak bila `-OldProject` dan
-   `-NewProject` sama sesudah normalisasi, bila project baru masih punya
-   container berjalan atau volumenya sudah ada, dan bila volume sumber
-   tidak ada. Default `-OldProject umnia-legacy` BUKAN bukti nama project
-   asli Anda — bila volume sumber tidak ditemukan, isi `-OldProject`
-   yang benar.
+1. **Preflight, tanpa perintah mutating:** file compose lama
+   (`-LegacyComposeFile`) harus ada dan valid (`config -q`); tolak bila
+   `-OldProject` dan `-NewProject` sama sesudah normalisasi, bila
+   project baru masih punya container berjalan atau volumenya sudah ada,
+   dan bila volume sumber tidak ada. Default `-OldProject umnia-legacy`
+   BUKAN bukti nama project asli Anda — bila volume sumber tidak
+   ditemukan, isi `-OldProject` yang benar.
 2. **Verifikasi identitas sumber:** postgres lama dijalankan bila
    berhenti, lalu skrip memeriksa dengan query SQL terautentikasi bahwa
    `current_user` adalah akun sumber (`-SourceDbUser`, default
@@ -92,10 +107,10 @@ dicetak bila gagal):
    dicetak: (1) hentikan project baru dulu (`-p <NewProject> down`,
    tanpa `-v`) supaya port host bebas, (2) jalankan kembali stack LAMA
    LENGKAP (termasuk `business-api`, supaya penulis bisa menulis lagi)
-   dengan file compose ASLI volume lama (`-LegacyComposeFile`; bila
-   parameter ini kosong, skrip memakai `-ComposeFile` dan mencetak
-   peringatan eksplisit bahwa file itu harus file asli, bukan file
-   compose baru). Volume lama tidak pernah dihapus oleh skrip.
+   dengan file compose ASLI volume lama (`-LegacyComposeFile` — parameter
+   wajib, tidak ada fallback ke file baru). Path file dalam perintah
+   pemulihan dikutip, jadi tetap benar bila mengandung spasi. Volume
+   lama tidak pernah dihapus oleh skrip.
 
 Kedua project memakai port host yang sama (5432/5433/8080/9000/3000),
 jadi stack lama harus berhenti dulu sebelum stack baru jalan — skrip
@@ -105,7 +120,10 @@ timestamp). Perintah `docker volume rename` **tidak ada** (Docker hanya
 punya create/inspect/ls/prune/rm) — jangan pakai.
 
 Jalur manual yang setara (bila tidak memakai skrip; ganti
-`<cid-lama>`/`<cid-baru>` dengan ID container dari `docker compose ps -q`).
+`<cid-lama>`/`<cid-baru>` dengan ID container dari `docker compose ps -q`,
+dan ganti `deploy/windows/compose.yml` pada perintah `-p umnia-legacy`
+dengan file compose ASLI yang membuat volume lama — skrip melakukan
+routing yang sama untuk semua operasi sumber).
 **Identitas sumber:** dump dan pemeriksaan kesiapan pada volume lama
 memakai akun ASLI volume itu (`umnia_business`, dari `POSTGRES_USER`
 saat volume dibuat) — JANGAN memakai `umnia_bootstrap` pada sumber,
@@ -170,12 +188,15 @@ Jalur dump/restore ini diuji pada database uji (fixture workspace
 dipertahankan, role runtime NOSUPERUSER/NOBYPASSRLS, hak EXECUTE 6/6,
 API lolos), bukan pada data pengguna. Lihat laporan
 `docs/reviews/f1-foundation-remediation-review/REVIEW.md`,
-`docs/reviews/f1-windows-review-fixes.md`, dan
+`docs/reviews/f1-windows-review-fixes.md`,
 `docs/reviews/f1-upgrade-safety-review.md` (skrip upgrade diperbaiki:
 identitas sumber terverifikasi, preflight tanpa mutasi, quiesce
 penulis, verifikasi read-only — diuji dengan mock docker yang
 mengeksekusi binary postgres/API asli terhadap cluster nyata, bukan
-mock canned-success).
+mock canned-success), dan
+`docs/reviews/f1-upgrade-final-guards.md` (routing file compose lama
+untuk semua operasi sumber, file lama wajib + valid sebelum mutasi,
+pemeriksaan penulis fail-closed).
 
 ## Yang belum terbukti
 

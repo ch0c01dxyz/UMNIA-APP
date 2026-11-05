@@ -108,6 +108,43 @@ if [ -f "$WIN/tests/mock-docker-faithful.ps1" ] \
   ok "upgrade regression harness present (faithful mock + scenarios)"
 else bad "upgrade regression harness present (faithful mock + scenarios)"; fi
 
+# 6. Final guards (F1-UPGRADE-FINAL-GUARDS).
+# MF1: legacy compose file is mandatory and routed via a shared helper:
+# OldProject ops use -LegacyComposeFile, NewProject ops use -ComposeFile.
+if grep -q 'Mandatory.*\$LegacyComposeFile' "$WIN/Upgrade-UmniaVolume.ps1" \
+   && grep -q 'function Get-ComposeFile' "$WIN/Upgrade-UmniaVolume.ps1" \
+   && grep -q 'return \$LegacyComposeFile' "$WIN/Upgrade-UmniaVolume.ps1" \
+   && grep -q 'return \$ComposeFile' "$WIN/Upgrade-UmniaVolume.ps1"; then
+  ok "upgrade: legacy file mandatory + routed via Get-ComposeFile"
+else bad "upgrade: legacy file mandatory + routed via Get-ComposeFile"; fi
+# MF1: legacy file must exist and be valid (config -q) before any mutation;
+# no silent fallback to the new compose file remains.
+if grep -q 'Test-Path \$LegacyComposeFile' "$WIN/Upgrade-UmniaVolume.ps1" \
+   && grep -q "config', '-q'" "$WIN/Upgrade-UmniaVolume.ps1" \
+   && ! grep -q 'LegacyComposeFile tidak diisi' "$WIN/Upgrade-UmniaVolume.ps1"; then
+  ok "upgrade: legacy file precondition (exists + config -q), no fallback"
+else bad "upgrade: legacy file precondition (exists + config -q), no fallback"; fi
+# MF1: recovery commands quote the file paths (safe when paths contain spaces).
+if grep -q -- '-f "$ComposeFile"' "$WIN/Upgrade-UmniaVolume.ps1" \
+   && grep -q -- '-f "$LegacyComposeFile"' "$WIN/Upgrade-UmniaVolume.ps1"; then
+  ok "upgrade: recovery commands quote compose file paths"
+else bad "upgrade: recovery commands quote compose file paths"; fi
+# MF2: failed inspection is NOT swallowed into "not running"; optional
+# writers are distinguished by an explicit config --services check.
+if ! grep -q "catch { return '' }" "$WIN/Upgrade-UmniaVolume.ps1" \
+   && grep -q 'function Test-ServiceDefined' "$WIN/Upgrade-UmniaVolume.ps1" \
+   && grep -q "config', '--services'" "$WIN/Upgrade-UmniaVolume.ps1"; then
+  ok "upgrade: inspection fails closed + optional writers via config --services"
+else bad "upgrade: inspection fails closed + optional writers via config --services"; fi
+# Final-guards regression harness: eb25a8f baseline + new scenarios.
+if [ -f "$WIN/tests/baseline-eb25a8f-Upgrade-UmniaVolume.ps1" ] \
+   && grep -q 'fixed-stopped-source' "$WIN/tests/test-upgrade-scenarios.ps1" \
+   && grep -q 'fixed-inspection-failure' "$WIN/tests/test-upgrade-scenarios.ps1" \
+   && grep -q 'fixed-missing-writer' "$WIN/tests/test-upgrade-scenarios.ps1" \
+   && grep -q 'stop-legacy' "$WIN/tests/manage-test-env.sh"; then
+  ok "upgrade final-guards harness present (eb25a8f baseline + new scenarios)"
+else bad "upgrade final-guards harness present (eb25a8f baseline + new scenarios)"; fi
+
 # 4. Optional container test (official image entrypoint).
 if [ "${1:-}" = "--container-test" ]; then
   if [ -x "$WIN/tests/run-entrypoint.sh" ] \

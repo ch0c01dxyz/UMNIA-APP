@@ -1,0 +1,15 @@
+
+== 0. Prasyarat + preflight (tanpa perintah mutating)
+
+UPGRADE GAGAL: File compose lama tidak ditemukan: /tmp/umnia legacy/does-not-exist/compose.yml (parameter -LegacyComposeFile WAJIB — beri file compose ASLI yang membuat volume lama).
+JALUR PEMULIHAN: volume lama masih utuh (tidak pernah dihapus).
+  Backup       : (belum dibuat)
+  Volume lama  : umnia-legacy_postgres-business-data
+  1. Bila project baru sempat jalan dan memakai port host yang sama,
+     hentikan dulu (tanpa -v):
+       docker compose -f "/home/hatch/workspace/UMNIA-APP/deploy/windows/compose.yml" -p umnia down
+  2. Jalankan kembali stack LAMA LENGKAP (termasuk business-api, supaya
+     penulis bisa menulis lagi) dengan file compose ASLI volume lama:
+       docker compose -f "/tmp/umnia legacy/does-not-exist/compose.yml" -p umnia-legacy up -d
+  3. Perbaiki penyebab kegagalan, lalu ulangi skrip ini (file backup
+     baru akan dibuat dengan timestamp baru; file lama tidak ditimpa).

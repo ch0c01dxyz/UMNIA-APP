@@ -1,0 +1,18 @@
+
+=== fixed-happy: legacy upgrade with quiesce + correct source identity ===
+CHECK PASS: fixed happy: script exits 0
+CHECK PASS: fixed happy: source ops used the legacy file, target ops the new file
+CHECK PASS: fixed happy: dump used the legacy source identity
+CHECK PASS: fixed happy: no umnia_bootstrap on the source path
+CHECK PASS: fixed happy: writers stopped before dump
+CHECK PASS: fixed happy: no acknowledged write after dump (after=0)
+CHECK PASS: fixed happy: target preserves all pre-dump writes (target=11 expected=11)
+CHECK PASS: fixed happy: no synthetic accounts added (subjects=1 expected=1, writer account excluded)
+CHECK PASS: fixed happy: fixture workspace preserved
+CHECK PASS: fixed happy: role f/f
+CHECK PASS: fixed happy: 002_identity recorded
+CHECK PASS: fixed happy: EXECUTE grants 12
+CHECK PASS: fixed happy: upgrade sent no mutating HTTP request
+CHECK PASS: fixed happy: new API readyz 200
+
+--- 14 checks, failures: 0 ---

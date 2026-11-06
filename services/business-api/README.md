@@ -153,18 +153,58 @@ hanya owner yang punya izin baru `manage_modules` dan boleh menulis
 instalasi. Readiness `/readyz` kini mewajibkan keempat marker
 001–004.
 
-**Yang belum ada:** endpoint aktivasi/deaktivasi dan baca-state
-(B3), grant entitlement nyata, resolver dependensi, dan capability
-guard (F2-01). Penyimpanan ini saja tidak memberi kemampuan yang bisa
-dieksekusi pada modul mana pun.
+**Yang belum ada:** grant entitlement nyata, resolver dependensi, dan
+capability guard (F2-01). Penyimpanan ini saja tidak memberi kemampuan
+yang bisa dieksekusi pada modul mana pun.
+
+## F1-04B-B3 — handler state instalasi (entitled intent, metadata-only)
+
+Tiga rute terautentikasi di bawah `/workspaces/{id}/modules/{module_id}`:
+
+- `POST .../activate` — body JSON `{"version":"0.1.0"}` (versi eksplisit
+  dan terdaftar, wajib; tanpa default versi terbaru). Tulis memakai
+  `manage_modules` (owner saja).
+- `POST .../deactivate` — tanpa body; tidak butuh entitlement.
+- `GET ...` — baca state memakai `view_workspace` (anggota mana pun).
+
+Respons state: `{"module_id","version":null-atau-string,"status":
+"active"|"inactive","activated_at":null-atau-timestamp,"deactivated_at":
+null-atau-timestamp}`. Modul dikenal yang belum pernah diinstal
+mengembalikan 200 `inactive` tanpa membuat baris. Modul tak dikenal
+404; versi tak terdaftar 404; versi pin berbeda 409 (walau inactive);
+tanpa entitlement 403; dependensi/konflik tak terpenuhi 409.
+
+**Entitled intent, bukan hak efektif atau kesehatan layanan.** Aktivasi
+mencatat maksud instalasi yang berhak: entitlement dicek dulu (403 bila
+absen), lalu resolver metadata — requires non-optional harus dipenuhi
+penyedia eligible (aktif + entitled) di workspace yang sama, konflik
+ditolak dari kedua arah daftar, satu exclusive_group hanya boleh satu
+modul aktif. Aktivasi yang sudah aktif dengan versi sama adalah no-op
+200 tanpa cek entitlement/audit/perubahan timestamp — snapshot maksud
+itu tetap ada walau entitlement dicabut; deaktivasi sesudah revoke
+tetap berhasil. Otorisasi, cek state, mutasi, dan audit berjalan dalam
+satu transaksi dengan kunci baris workspace (`SELECT ... FOR UPDATE`)
+sesudah otorisasi; isolasi efektif read committed (diverifikasi tes).
+Audit `module_activated`/`module_deactivated` memakai `entity_id`
+NULL, `entity_type` `module_installation`, dan details
+`{module_id, version, old_status, new_status}`; no-op tidak menambah
+audit; riwayat tidak pernah dihapus.
+
+**Batas:** tidak ada otoritas pemberian entitlement nyata atau billing
+(entitlement hanya dibaca dari snapshot `module_entitlements`), tidak
+ada guard capability, dan tidak ada endpoint bisnis — handler bisnis
+masa depan (F2) tetap wajib memeriksa hak, instalasi aktif, kesiapan
+penyedia nyata, dan kebijakan pengguna/sumber daya. Rental/Spa kanonis
+tetap tidak bisa diaktifkan karena kapabilitas wajibnya tidak punya
+penyedia.
 
 ## Yang sengaja TIDAK ada di F1-03
 
 UI login/workspace (web masih skeleton F1-01), mailer undangan (token
 undangan dikembalikan sekali ke pengundang — di produksi harus lewat
-email), logout/refresh token, dan endpoint aktivasi/deaktivasi modul,
-grant entitlement nyata, serta capability guard (F1-04B ke atas;
-F1-04A baru menyediakan katalog read-only, F1-04B-B1 baru menyediakan
-penyimpanan instalasi/entitlement tanpa endpoint aktivasi, tanpa grant
-nyata, tanpa guard). Linter khusus web (ESLint) belum dipasang; lint =
-gofmt + go vet (API) + build Nuxt (web).
+email), logout/refresh token, grant entitlement nyata, serta capability
+guard (F1-04B ke atas; F1-04A baru menyediakan katalog read-only,
+F1-04B-B1 menyediakan penyimpanan instalasi/entitlement, F1-04B-B3
+menyediakan handler state instalasi metadata-only). Linter khusus web
+(ESLint) belum dipasang; lint = gofmt + go vet (API) + build Nuxt
+(web).

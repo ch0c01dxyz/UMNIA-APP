@@ -322,6 +322,21 @@ func TestReadyzRequiresMigratedSchema(t *testing.T) {
 	if got := checkDatabase(emptyDB); got != "error" {
 		t.Fatalf("checkDatabase pada DB kosong: want error, got %q", got)
 	}
+	// Database yang berhenti di 002 (tanpa registry 003) juga belum
+	// siap: readiness wajib memeriksa kedua versi, bukan hanya 002.
+	// umnia_partial disediakan setup CI/lokal (001+002 saja).
+	u.Path = "/umnia_partial"
+	partialDB, err := sql.Open("pgx", u.String())
+	if err != nil {
+		t.Skipf("tidak bisa membuka umnia_partial: %v", err)
+	}
+	defer partialDB.Close()
+	if err := partialDB.Ping(); err != nil {
+		t.Skipf("umnia_partial tidak tersedia: %v", err)
+	}
+	if got := checkDatabase(partialDB); got != "error" {
+		t.Fatalf("checkDatabase pada DB 002-saja: want error, got %q", got)
+	}
 }
 
 func TestRLSBlocksDirectCrossTenantRead(t *testing.T) {

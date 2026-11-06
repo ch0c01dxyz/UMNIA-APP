@@ -59,7 +59,7 @@ func handleHealthz(w http.ResponseWriter, r *http.Request) {
 // Ping dibatasi 2 detik supaya readiness tidak menggantung pada DB mati.
 // Ping saja tidak cukup: database kosong tanpa skema harus dilaporkan
 // "error" (degraded), bukan "ok" — jadi readiness juga memeriksa migrasi
-// identity F1-03 sudah terapan.
+// identity F1-03 dan registry katalog F1-04A sudah terapan.
 func databaseStatus() string {
 	url := os.Getenv("BUSINESS_DATABASE_URL")
 	if url == "" {
@@ -79,10 +79,12 @@ func checkDatabase(db *sql.DB) string {
 	if err := db.PingContext(ctx); err != nil {
 		return "error"
 	}
-	var one int
+	var count int
+	// Kedua versi wajib ada: database yang berhenti di 002 (tanpa
+	// registry katalog 003) belum siap, sama seperti database kosong.
 	err := db.QueryRowContext(ctx,
-		`SELECT 1 FROM schema_migrations WHERE version = '002_identity'`).Scan(&one)
-	if err != nil {
+		`SELECT count(*) FROM schema_migrations WHERE version IN ('002_identity', '003_modules')`).Scan(&count)
+	if err != nil || count != 2 {
 		return "error"
 	}
 	return "ok"
@@ -122,6 +124,7 @@ func newMux(db *sql.DB) *http.ServeMux {
 	mux.HandleFunc("POST /workspaces", srv.authMiddleware(srv.handleCreateWorkspace))
 	mux.HandleFunc("GET /workspaces/{id}", srv.authMiddleware(srv.handleGetWorkspace))
 	mux.HandleFunc("GET /workspaces/{id}/members", srv.authMiddleware(srv.handleListMembers))
+	mux.HandleFunc("GET /workspaces/{id}/modules", srv.authMiddleware(srv.handleListModules))
 	mux.HandleFunc("POST /workspaces/{id}/invites", srv.authMiddleware(srv.handleCreateInvite))
 	mux.HandleFunc("POST /invites/accept", srv.authMiddleware(srv.handleAcceptInvite))
 	mux.HandleFunc("GET /workspaces/{id}/audit", srv.authMiddleware(srv.handleListAudit))

@@ -47,6 +47,49 @@ jobs:
           test -z "$(gofmt -l .)"
           go vet ./...
         working-directory: services/business-api
+      # Validasi manifest modul terhadap skema kanonis (F1-04A): memakai
+      # helper validate() dari scripts/validate_blueprint.py saja, tanpa
+      # menjalankan main() (yang juga memeriksa tugas + dokumen wajib).
+      # jsonschema diinstal eksplisit ke venv terisolasi (bukan asumsi
+      # preinstalled); versinya dicetak ke log. Cek negatif memakai
+      # validator kanonis yang sama, bukan parser duplikat.
+      - name: Validate module manifests (canonical schema)
+        run: |
+          python3 -m venv /tmp/umnia-validate-venv
+          /tmp/umnia-validate-venv/bin/pip install --quiet jsonschema
+          /tmp/umnia-validate-venv/bin/python -c "import importlib.metadata; print('jsonschema', importlib.metadata.version('jsonschema'))"
+          /tmp/umnia-validate-venv/bin/python -c "
+          import sys
+          sys.path.insert(0, 'scripts')
+          from validate_blueprint import validate
+          n = validate('schemas/module-manifest.schema.json', 'examples/*.module.json', 'id')
+          assert n == 4, f'want 4 module manifests, got {n}'
+          print(f'VALIDATED: {n} module manifests')
+          "
+          /tmp/umnia-validate-venv/bin/python - <<'PY'
+          import copy, json
+          import jsonschema
+          from pathlib import Path
+          schema = json.loads(Path('schemas/module-manifest.schema.json').read_text())
+          jsonschema.Draft202012Validator.check_schema(schema)
+          v = jsonschema.Draft202012Validator(schema)
+          base = json.loads(Path('examples/finance-basic.module.json').read_text())
+          cases = {
+              'unknown field': lambda d: d.update({'tidak_dikenal': True}),
+              'missing nested required field': lambda d: d['display'].pop('name_id'),
+              'malformed version': lambda d: d.update({'version': '0.1'}),
+          }
+          for name, mutate in cases.items():
+              d = copy.deepcopy(base)
+              mutate(d)
+              try:
+                  v.validate(d)
+              except jsonschema.ValidationError:
+                  print(f'PASS negative: {name} ditolak')
+              else:
+                  raise SystemExit(f'FAIL negative: {name} lolos validasi')
+          print('VALIDATED: 3 negative schema checks')
+          PY
       # Password di bawah HANYA fixture CI yang dibuang tiap run, bukan
       # rahasia produksi. Role runtime meniru deployment: NOSUPERUSER,
       # NOBYPASSRLS, pemilik database tes; migrasi dijalankan akun
@@ -60,8 +103,16 @@ jobs:
             -v ON_ERROR_STOP=1 \
             -c "CREATE ROLE umnia_business NOSUPERUSER NOBYPASSRLS LOGIN PASSWORD 'ci-runtime-only';" \
             -c "CREATE DATABASE umnia_test OWNER umnia_business;" \
-            -c "CREATE DATABASE umnia_empty;"
+            -c "CREATE DATABASE umnia_empty;" \
+            -c "CREATE DATABASE umnia_partial OWNER umnia_business;"
           PGPASSWORD=ci-bootstrap-only psql -h localhost -U postgres -d umnia_test \
+            -v ON_ERROR_STOP=1 -1 \
+            -f services/business-api/migrations/001_init.sql \
+            -f services/business-api/migrations/002_identity.sql \
+            -f services/business-api/migrations/003_modules.sql
+          # Fixture negatif readiness: database yang berhenti di 002
+          # (tanpa registry 003) harus dilaporkan belum siap.
+          PGPASSWORD=ci-bootstrap-only psql -h localhost -U postgres -d umnia_partial \
             -v ON_ERROR_STOP=1 -1 \
             -f services/business-api/migrations/001_init.sql \
             -f services/business-api/migrations/002_identity.sql

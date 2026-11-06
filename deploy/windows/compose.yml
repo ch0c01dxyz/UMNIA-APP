@@ -93,6 +93,8 @@ services:
       - /migrations/001_init.sql
       - -f
       - /migrations/002_identity.sql
+      - -f
+      - /migrations/003_modules.sql
     depends_on:
       postgres-business:
         condition: service_healthy

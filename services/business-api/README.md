@@ -101,17 +101,46 @@ sebagai bootstrap, lalu menjalankan tes dengan URL terisi dan GAGAL
 bila ada tes yang ter-SKIP atau URL kosong. Jangan menyamakan hijau
 unit-only lokal dengan lulus gate integrasi.
 
-Readiness `/readyz` memeriksa migrasi `002_identity` sudah terapan,
-bukan hanya ping: database kosong tanpa skema dilaporkan `error`
-(503), bukan `ok`.
+Readiness `/readyz` memeriksa migrasi `002_identity` dan `003_modules`
+sudah terapan, bukan hanya ping: database kosong tanpa skema atau yang
+berhenti di 002 dilaporkan `error` (503), bukan `ok`.
 
 Windows: lihat `deploy/windows/README.md` — akun bootstrap vs runtime,
 service `migrate`, dan jalur upgrade volume lama. Compose Windows
 masih UNVERIFIED di host Windows.
 
+## F1-04A — registry katalog modul (read-only)
+
+Migrasi `003_modules` menambah tabel global `module_registry`
+(module_id, version, manifest JSONB, registered_at; kunci komposit
+module_id+version) dan men-seed empat contoh manifest yang ada
+(finance.basic, finance.advanced, rental.basic, spa.standard, masing-
+masing 0.1.0) sebagai DEKLARASI — bukan bukti layanan domain atau
+simulation dataset-nya ada. Tabel dimiliki akun bootstrap/migrasi;
+role runtime hanya mendapat SELECT (INSERT/UPDATE/DELETE ditolak).
+
+Endpoint baru:
+
+```bash
+GET /workspaces/{id}/modules   # anggota dengan view_workspace (termasuk kasir) -> 200 {"modules": [manifest utuh, ...]}
+```
+
+Daftar diurutkan menurut identity/version; tidak ada field status
+aktif/entitled/available, tidak ada endpoint mutasi, tidak ada
+aktivasi/deaktivasi, tidak ada entitlement, dan katalog tidak memberi
+izin pengguna maupun kemampuan yang bisa dieksekusi. Non-anggota ->
+403, tanpa token -> 401, id workspace malformed -> 400.
+
+Manifest contoh divalidasi di CI terhadap skema kanonis
+(`schemas/module-manifest.schema.json`) lewat helper
+`scripts/validate_blueprint.py` (plus tiga cek negatif: field tak
+dikenal, field required bersarang hilang, versi malformed).
+
 ## Yang sengaja TIDAK ada di F1-03
 
 UI login/workspace (web masih skeleton F1-01), mailer undangan (token
 undangan dikembalikan sekali ke pengundang — di produksi harus lewat
-email), logout/refresh token, dan modul (F1-04). Linter khusus web
-(ESLint) belum dipasang; lint = gofmt + go vet (API) + build Nuxt (web).
+email), logout/refresh token, dan aktivasi/deaktivasi modul, entitlement,
+serta capability guard (F1-04B ke atas; F1-04A baru menyediakan katalog
+read-only). Linter khusus web (ESLint) belum dipasang; lint = gofmt +
+go vet (API) + build Nuxt (web).

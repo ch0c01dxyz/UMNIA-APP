@@ -113,8 +113,14 @@
 .NOTES
   Sintaks dijaga kompatibel Windows PowerShell 5.1 (tanpa ??, ?:, dan
   tanpa -Encoding utf8NoBOM). Setiap panggilan docker dicek $LASTEXITCODE
-  secara eksplisit — kegagalan native command tidak otomatis throw di
-  PowerShell walau $ErrorActionPreference = 'Stop'.
+  secara eksplisit. PERINGATAN: di Windows PowerShell 5.1 dengan
+  $ErrorActionPreference = 'Stop', stderr dari native command BISA
+  menjadi terminating error sebelum $LASTEXITCODE dibaca — jadi perintah
+  yang hasil negatifnya menulis ke stderr (mis. `docker volume inspect`
+  untuk volume yang tidak ada) TIDAK BOLEH dipakai sebagai probe
+  "tidak ada". Probe semacam itu harus memakai perintah yang SUKSES
+  dengan nol hasil (mis. `docker volume ls -q`) dan membandingkan nama
+  secara eksak; kegagalan perintahnya sendiri tetap throw.
 #>
 [CmdletBinding()]
 param(
@@ -163,8 +169,24 @@ function Test-PostgresReady($Project, $User, $Db) {
   return ($LASTEXITCODE -eq 0)
 }
 function Test-VolumeExists($VolumeName) {
-  $null = & docker volume inspect $VolumeName 2>$null
-  return ($LASTEXITCODE -eq 0)
+  # JANGAN pakai `docker volume inspect`: volume yang tidak ada menulis
+  # ke stderr, dan di Windows PowerShell 5.1 dengan
+  # $ErrorActionPreference = 'Stop' stderr native menjadi terminating
+  # error sebelum $LASTEXITCODE sempat dibaca — padahal "tidak ada"
+  # adalah hasil false yang sah (terbukti QA Windows: preflight abort
+  # pada volume target yang memang belum ada). Sebagai gantinya, daftar
+  # semua volume (read-only; perintah ini SUKSES dengan nol hasil bila
+  # tidak ada volume) dan bandingkan nama secara eksak. Filter `name=`
+  # TIDAK dipakai: menurut dokumentasi Docker ia mencocokkan "all or
+  # part of a volume's name" (substring), jadi volume bernama mirip
+  # bisa salah dikenali. Kegagalan `volume ls` sendiri (daemon mati,
+  # konfigurasi rusak) tetap throw — bukan false.
+  $names = & docker volume ls -q 2>$null
+  if ($LASTEXITCODE -ne 0) {
+    throw "docker volume ls gagal (exit $LASTEXITCODE): tidak dapat memastikan keberadaan volume '$VolumeName'. Periksa Docker daemon."
+  }
+  if ($null -eq $names) { return $false }
+  return ((@($names) | ForEach-Object { "$_".Trim() }) -contains $VolumeName)
 }
 function Get-RecoveryText {
   # -LegacyComposeFile bersifat wajib, jadi tidak ada fallback ke file

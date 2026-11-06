@@ -9,7 +9,8 @@
 #   baseline-mf2-existing-target, baseline-mf3-writer, baseline-mf4-probe,
 #   fixed-happy, fixed-negative, fixed-failure-after-down,
 #   fixed-stopped-source, fixed-stopped-source-recovery,
-#   fixed-inspection-failure, fixed-missing-writer, fixed-isolated-api
+#   fixed-inspection-failure, fixed-missing-writer, fixed-isolated-api,
+#   fixed-volume-probe
 # Exit 0 only if every CHECK in the selected scenarios passes.
 param(
   [string]$Scenario = "all",
@@ -83,8 +84,9 @@ function New-State {
     # Fault injection (test only): FailPs 'project/service' makes that
     # `ps -q` query fail (daemon/config error simulation); FailConfig
     # 'project' makes that project's `config` commands fail (malformed
-    # compose file simulation). Both are '' when disabled.
-    FailPs = ''; FailConfig = ''
+    # compose file simulation); FailVolumeLs $true makes `volume ls`
+    # fail (daemon unreachable simulation). All are off when disabled.
+    FailPs = ''; FailConfig = ''; FailVolumeLs = $false
   }
 }
 function Invoke-Sql($Port, $User, $Query) {
@@ -116,6 +118,22 @@ function Start-Writer($ApiBase, $LogFile, $Prefix, $Interval = '0.5') {
 }
 function Stop-Writer($Proc) {
   if ($Proc -and -not $Proc.HasExited) { Stop-Process -Id $Proc.Id -Force -ErrorAction SilentlyContinue }
+}
+function Get-ScriptFunctionText($Path, $Name) {
+  # Return the full text of ONE function from a script file via its AST,
+  # WITHOUT running the script's top-level code (dot-sourcing the
+  # upgrade script would execute its main body). Same extraction the
+  # Windows reviewer used for the PS5.1 helper check. NOTE: the text
+  # must come from $fn.Extent.Text (the full "function Name(...) { ... }"
+  # definition, param block included) — $fn.Body.GetScriptBlock() alone
+  # drops the param block, leaving every parameter $null. The caller
+  # defines it with Invoke-Expression in its own scope.
+  $t = $null; $e = $null
+  $ast = [System.Management.Automation.Language.Parser]::ParseFile($Path, [ref]$t, [ref]$e)
+  if ($e.Count -gt 0) { throw "parse errors in $Path" }
+  $fn = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $Name }, $true)
+  if (-not $fn) { throw "function $Name not found in $Path" }
+  return $fn.Extent.Text
 }
 function Invoke-Upgrade($ArgHash, $OutLog) {
   $global:DockerLog = @(); $global:HttpLog = @()
@@ -542,6 +560,31 @@ function Invoke-ScenarioFixedMissingWriter {
   Check 'fixed missing-writer: fixture workspace preserved' ((Invoke-Sql 55437 'umnia_bootstrap' "SELECT count(*) FROM workspaces WHERE name='Toko Lama';") -eq '1')
   Check 'fixed missing-writer: new API readyz 200' ((& /usr/bin/curl -s -o /dev/null -w '%{http_code}' --max-time 5 'http://127.0.0.1:18081/readyz') -eq '200')
 }
+function Invoke-ScenarioFixedVolumeProbe {
+  Write-Host "`n=== fixed-volume-probe: Test-VolumeExists on docker volume ls (PS5.1 probe fix) ==="
+  Reset-Env 'rebuild-legacy','reset-target'
+  $global:UpgradeTestState = New-State
+  . "$ReviewDir/mock-docker-faithful.ps1"
+  # A similarly named volume that exists, so a substring/prefix match
+  # would wrongly report the shorter name as present.
+  $global:UpgradeTestState.Volumes['probe_postgres-business-data-extra'] = $global:UpgradeTestState.Projects['umnia-legacy'].PgData
+  Invoke-Expression (Get-ScriptFunctionText $ScriptPath 'Test-VolumeExists')
+  $global:DockerLog = @()
+  Check 'volume probe: existing volume returns true' ((Test-VolumeExists 'umnia-legacy_postgres-business-data') -eq $true)
+  Check 'volume probe: missing exact volume returns false (no throw)' ((Test-VolumeExists 'umnia_postgres-business-data') -eq $false)
+  Check 'volume probe: substring of an existing name returns false' ((Test-VolumeExists 'legacy_postgres-business-data') -eq $false)
+  Check 'volume probe: superstring of an existing name returns false' ((Test-VolumeExists 'umnia-legacy_postgres-business-data2') -eq $false)
+  Check 'volume probe: shorter name with a longer sibling present returns false' ((Test-VolumeExists 'probe_postgres-business-data') -eq $false)
+  Check 'volume probe: longer sibling itself returns true' ((Test-VolumeExists 'probe_postgres-business-data-extra') -eq $true)
+  # Daemon failure must THROW (not look like a missing volume).
+  $global:UpgradeTestState.FailVolumeLs = $true
+  $threw = $false
+  try { $null = Test-VolumeExists 'umnia-legacy_postgres-business-data' } catch { $threw = $true }
+  $global:UpgradeTestState.FailVolumeLs = $false
+  Check 'volume probe: listing failure throws instead of returning false' ($threw -eq $true)
+  # The probe is read-only and creates nothing: only `volume ls` calls.
+  Check 'volume probe: probe issued only read-only volume ls calls' (((Get-MutatingCalls $global:DockerLog).Count -eq 0) -and ($global:DockerLog -match 'volume ls -q'))
+}
 function Invoke-ScenarioFixedIsolatedApi {
   Write-Host "`n=== fixed-isolated-api: tenant isolation on an isolated fixture (MF4 coverage) ==="
   # Runs the isolated API workflow against the NEW cluster API left running
@@ -569,6 +612,7 @@ switch ($Scenario) {
   'fixed-inspection-failure' { Invoke-ScenarioFixedInspectionFailure }
   'fixed-missing-writer' { Invoke-ScenarioFixedMissingWriter }
   'fixed-isolated-api' { Invoke-ScenarioFixedIsolatedApi }
+  'fixed-volume-probe' { Invoke-ScenarioFixedVolumeProbe }
   'all' {
     Invoke-ScenarioBaselineMf1
     Invoke-ScenarioBaselineMf1Routing
@@ -584,6 +628,7 @@ switch ($Scenario) {
     Invoke-ScenarioFixedInspectionFailure
     Invoke-ScenarioFixedMissingWriter
     Invoke-ScenarioFixedIsolatedApi
+    Invoke-ScenarioFixedVolumeProbe
   }
   default { throw "unknown scenario: $Scenario" }
 }

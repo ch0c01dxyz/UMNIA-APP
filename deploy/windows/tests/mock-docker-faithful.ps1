@@ -203,12 +203,30 @@ function docker {
       $code = 0
     }
     elseif ($args[0] -eq 'volume' -and $args[1] -eq 'ls') {
-      # docker volume ls -q --filter name=^<name>$  -> print name iff PGDATA exists
-      $filter = ($args | Where-Object { $_ -like 'name=*' }) -replace '^name=', ''
-      $name = $filter -replace '^\^', '' -replace '\$$', ''
-      $pgdata = Get-VolumePgData $name
-      if ($pgdata -and (Test-Path $pgdata)) { $name }
-      $code = 0
+      # docker volume ls -q [--filter name=^<name>$]
+      # Plain -q: print EVERY existing volume name (PGDATA dir exists).
+      # The upgrade script lists all names and compares exactly in
+      # PowerShell; the daemon's `name=` filter is a SUBSTRING match
+      # (docs.docker.com: "matches on all or part of a volume's name"),
+      # so it must not be used for exact matching. With a name filter
+      # (legacy callers only): print the name iff that volume's PGDATA
+      # exists.
+      if ($global:UpgradeTestState.FailVolumeLs) {
+        Write-Host "mock docker volume ls: injected listing failure (FailVolumeLs)"
+        $code = 1
+      } else {
+        $filter = ($args | Where-Object { $_ -like 'name=*' }) -replace '^name=', ''
+        if ($filter) {
+          $name = $filter -replace '^\^', '' -replace '\$$', ''
+          $pgdata = Get-VolumePgData $name
+          if ($pgdata -and (Test-Path $pgdata)) { $name }
+        } else {
+          foreach ($entry in $global:UpgradeTestState.Volumes.GetEnumerator()) {
+            if (Test-Path $entry.Value) { $entry.Key }
+          }
+        }
+        $code = 0
+      }
     }
     elseif ($args[0] -eq 'volume' -and $args[1] -eq 'inspect') {
       $pgdata = Get-VolumePgData $args[2]

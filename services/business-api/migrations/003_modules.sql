@@ -31,20 +31,25 @@ CREATE TABLE IF NOT EXISTS module_registry (
 
 -- Perbaiki CHECK lama pada database yang sudah menerapkan 003: CREATE
 -- TABLE IF NOT EXISTS di atas tidak menyentuh tabel yang sudah ada,
--- jadi constraint diganti eksplisit di sini. Aman di-rerun (DROP ...
--- IF EXISTS + ADD kembali); baris valid yang sudah ada memenuhi
--- kondisi baru, sedangkan baris tidak valid (bila ada) membuat ADD
--- gagal eksplisit untuk review — tidak pernah ditulis ulang/dihapus
--- diam-diam. Di Windows/CI seluruh file berjalan dalam satu transaksi
--- psql -1, jadi DROP+ADD atomik; di Linux native tiap pernyataan
--- commit sendiri, tetapi rerun berikutnya mengulang ADD yang gagal.
-ALTER TABLE module_registry DROP CONSTRAINT IF EXISTS module_registry_check;
-ALTER TABLE module_registry ADD CONSTRAINT module_registry_check CHECK (
-  manifest->>'id' IS NOT NULL
-    AND manifest->>'version' IS NOT NULL
-    AND manifest->>'id' = module_id
-    AND manifest->>'version' = version
-);
+-- jadi constraint diganti eksplisit di sini. SATU pernyataan ALTER
+-- (DROP+ADD sekaligus) supaya penggantian atomik: bila ADD gagal
+-- (baris lama tidak valid), DROP ikut rollback dan CHECK lama tetap
+-- ada. Dua pernyataan terpisah TIDAK aman: Linux native (maupun psql
+-- tanpa -1) commit tiap pernyataan, sehingga ADD yang gagal
+-- meninggalkan tabel tanpa CHECK. Aman di-rerun (DROP ... IF EXISTS +
+-- ADD kembali); baris valid yang sudah ada memenuhi kondisi baru,
+-- sedangkan baris tidak valid (bila ada) membuat ALTER gagal eksplisit
+-- untuk review — tidak pernah ditulis ulang/dihapus diam-diam. Jangan
+-- bungkus dengan BEGIN/COMMIT di file ini: pemanggil sudah membungkus
+-- 001-003 dalam satu transaksi psql -1.
+ALTER TABLE module_registry
+  DROP CONSTRAINT IF EXISTS module_registry_check,
+  ADD CONSTRAINT module_registry_check CHECK (
+    manifest->>'id' IS NOT NULL
+      AND manifest->>'version' IS NOT NULL
+      AND manifest->>'id' = module_id
+      AND manifest->>'version' = version
+  );
 
 -- Hanya SELECT untuk runtime; tanpa GRANT INSERT/UPDATE/DELETE.
 GRANT SELECT ON module_registry TO umnia_business;

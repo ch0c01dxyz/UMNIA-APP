@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -9,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -364,6 +366,174 @@ func TestModuleRegistryCheckRejectsNullIdentity(t *testing.T) {
 		t.Fatalf("INSERT runtime seharusnya ditolak")
 	} else if !strings.Contains(err.Error(), "permission denied") {
 		t.Fatalf("INSERT runtime: want permission denied, got %v", err)
+	}
+}
+
+// runPsqlFile menjalankan psql ASLI (bukan db.Exec) dengan semantik
+// runner skrip: tiap pernyataan autocommit kecuali -1 diminta.
+// Mengembalikan exit code dan output gabungan.
+func runPsqlFile(t *testing.T, dbURL, file string) (int, string) {
+	t.Helper()
+	psql, err := exec.LookPath("psql")
+	if err != nil {
+		t.Skip("psql tidak ada di PATH, tes runner psql dilewati")
+	}
+	cmd := exec.Command(psql, dbURL, "-v", "ON_ERROR_STOP=1", "-f", file)
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	err = cmd.Run()
+	code := 0
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			code = exitErr.ExitCode()
+		} else {
+			t.Fatalf("jalankan psql: %v", err)
+		}
+	}
+	return code, out.String()
+}
+
+// TestModuleRegistryCheckReplacementIsAtomic: penggantian CHECK harus
+// atomik pada jalur autocommit Linux native (psql TANPA -1). Dengan
+// baris legacy invalid yang sudah COMMITTED: file dua pernyataan lama
+// gagal DAN menghapus CHECK (baseline); file satu ALTER baru gagal
+// tetapi CHECK lama + semua baris tetap ada; rerun valid sesudah baris
+// fixture dihapus berhasil dan memasang CHECK baru.
+func TestModuleRegistryCheckReplacementIsAtomic(t *testing.T) {
+	boot := bootstrapDB(t)
+	bootURL := os.Getenv("BUSINESS_BOOTSTRAP_DATABASE_URL")
+	if _, err := exec.LookPath("psql"); err != nil {
+		t.Skip("psql tidak ada di PATH, tes runner psql dilewati")
+	}
+
+	canonical := func() string {
+		var s string
+		err := boot.QueryRow(`SELECT coalesce(string_agg(module_id || '|' || manifest::text || '|' || registered_at::text, chr(10) ORDER BY module_id), '') FROM module_registry WHERE module_id <> 'qa.null-legacy'`).Scan(&s)
+		if err != nil {
+			t.Fatalf("snapshot kanonis: %v", err)
+		}
+		return s
+	}
+	checkState := func() (int, string) {
+		var n int
+		var def string
+		err := boot.QueryRow(`SELECT count(*), COALESCE(max(pg_get_constraintdef(oid)), '') FROM pg_constraint WHERE conrelid = 'module_registry'::regclass AND contype = 'c'`).Scan(&n, &def)
+		if err != nil {
+			t.Fatalf("baca CHECK: %v", err)
+		}
+		return n, def
+	}
+	rowCount := func() int {
+		var n int
+		if err := boot.QueryRow(`SELECT count(*) FROM module_registry`).Scan(&n); err != nil {
+			t.Fatalf("hitung baris: %v", err)
+		}
+		return n
+	}
+
+	// Jaring pengaman: hapus baris fixture + terapkan ulang 003.
+	t.Cleanup(func() {
+		_, _ = boot.Exec(`DELETE FROM module_registry WHERE module_id = 'qa.null-legacy'`)
+		reapplyMigration003(t, boot)
+	})
+
+	before := canonical()
+	if rowCount() != 4 {
+		t.Fatalf("awal: want 4 baris, got %d", rowCount())
+	}
+
+	// 1. Pasang CHECK lama + satu baris legacy invalid yang COMMITTED.
+	if _, err := boot.Exec(`ALTER TABLE module_registry DROP CONSTRAINT IF EXISTS module_registry_check`); err != nil {
+		t.Fatalf("drop CHECK: %v", err)
+	}
+	if _, err := boot.Exec(`ALTER TABLE module_registry ADD CONSTRAINT module_registry_check ` + oldWeakRegistryCheck); err != nil {
+		t.Fatalf("pasang CHECK lama: %v", err)
+	}
+	if _, err := boot.Exec(`INSERT INTO module_registry (module_id, version, manifest) VALUES ('qa.null-legacy', '0.1.0', '{"id":null,"version":"0.1.0"}'::jsonb)`); err != nil {
+		t.Fatalf("insert baris legacy invalid: %v", err)
+	}
+	nOld, defOld := checkState()
+	if nOld != 1 || rowCount() != 5 {
+		t.Fatalf("fixture: want 1 CHECK + 5 baris, got %d CHECK + %d baris", nOld, rowCount())
+	}
+
+	// 2. Baseline: file DUA pernyataan (f72eac0) lewat psql TANPA -1 —
+	// DROP ter-commit, ADD gagal, CHECK hilang.
+	oldTwoStmt := "ALTER TABLE module_registry DROP CONSTRAINT IF EXISTS module_registry_check;\n" +
+		"ALTER TABLE module_registry ADD CONSTRAINT module_registry_check CHECK (\n" +
+		"  manifest->>'id' IS NOT NULL\n" +
+		"    AND manifest->>'version' IS NOT NULL\n" +
+		"    AND manifest->>'id' = module_id\n" +
+		"    AND manifest->>'version' = version\n" +
+		");\n"
+	oldFile := filepath.Join(t.TempDir(), "003-old-two-statement.sql")
+	if err := os.WriteFile(oldFile, []byte(oldTwoStmt), 0o600); err != nil {
+		t.Fatalf("tulis file baseline: %v", err)
+	}
+	code, out := runPsqlFile(t, bootURL, oldFile)
+	if code == 0 {
+		t.Fatalf("baseline dua pernyataan: seharusnya gagal, malah exit 0 (%s)", out)
+	}
+	t.Logf("baseline psql exit %d (diharapkan bukan 0)", code)
+	n, _ := checkState()
+	if n != 0 {
+		t.Fatalf("baseline: CHECK seharusnya hilang (0), got %d", n)
+	}
+	if rowCount() != 5 {
+		t.Fatalf("baseline: baris seharusnya tetap 5, got %d", rowCount())
+	}
+
+	// 3. Pulihkan CHECK lama (ADD lama lolos karena baris invalid
+	// diizinkan CHECK lama) — titik awal untuk pengujian file baru.
+	if _, err := boot.Exec(`ALTER TABLE module_registry ADD CONSTRAINT module_registry_check ` + oldWeakRegistryCheck); err != nil {
+		t.Fatalf("pulihkan CHECK lama: %v", err)
+	}
+	n, def := checkState()
+	if n != 1 || def != defOld {
+		t.Fatalf("pulihkan CHECK lama: want 1 CHECK dengan definisi lama, got %d (%s)", n, def)
+	}
+
+	// 4. File 003 yang diperbaiki lewat psql TANPA -1 — satu ALTER
+	// atomik: gagal, tetapi CHECK lama + semua baris tetap ada.
+	code, out = runPsqlFile(t, bootURL, filepath.Join("migrations", "003_modules.sql"))
+	if code == 0 {
+		t.Fatalf("003 baru: seharusnya gagal pada baris invalid, malah exit 0 (%s)", out)
+	}
+	t.Logf("003 baru psql exit %d (diharapkan bukan 0)", code)
+	n, def = checkState()
+	if n != 1 {
+		t.Fatalf("003 baru: CHECK seharusnya tetap 1, got %d", n)
+	}
+	if def != defOld {
+		t.Fatalf("003 baru: definisi CHECK seharusnya tetap yang lama, got %s", def)
+	}
+	if rowCount() != 5 {
+		t.Fatalf("003 baru: baris seharusnya tetap 5, got %d", rowCount())
+	}
+	if canonical() != before {
+		t.Fatalf("003 baru: baris kanonis berubah")
+	}
+
+	// 5. Rerun valid lewat psql TANPA -1 sesudah baris fixture dihapus:
+	// exit 0, CHECK baru terpasang, 4 baris kanonis + timestamp utuh.
+	if _, err := boot.Exec(`DELETE FROM module_registry WHERE module_id = 'qa.null-legacy'`); err != nil {
+		t.Fatalf("hapus baris fixture: %v", err)
+	}
+	code, out = runPsqlFile(t, bootURL, filepath.Join("migrations", "003_modules.sql"))
+	if code != 0 {
+		t.Fatalf("rerun valid: want exit 0, got %d (%s)", code, out)
+	}
+	n, def = checkState()
+	if n != 1 {
+		t.Fatalf("rerun valid: want 1 CHECK, got %d", n)
+	}
+	if !strings.Contains(def, "IS NOT NULL") {
+		t.Fatalf("rerun valid: CHECK seharusnya yang baru (null-safe), got %s", def)
+	}
+	if rowCount() != 4 || canonical() != before {
+		t.Fatalf("rerun valid: 4 baris kanonis + timestamp harus utuh")
 	}
 }
 

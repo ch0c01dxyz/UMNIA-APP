@@ -15,6 +15,12 @@ jobs:
     # dengan tes integrasi dilewati seperti sebelumnya.
     env:
       BUSINESS_DATABASE_URL: postgres://umnia_business:ci-runtime-only@localhost:5432/umnia_test?sslmode=disable
+      # Fixture regresi CHECK F1-04A: tes constraint butuh koneksi pemilik
+      # tabel (bootstrap); role runtime ditolak sebelum CHECK (permission
+      # denied), jadi tanpa URL ini tes itu dilewati (bukan PASS).
+      # Password fixture CI yang dibuang tiap run, sama seperti langkah
+      # Prepare di bawah.
+      BUSINESS_BOOTSTRAP_DATABASE_URL: postgres://postgres:ci-bootstrap-only@localhost:5432/umnia_test?sslmode=disable
     services:
       postgres:
         image: postgres:16-bookworm

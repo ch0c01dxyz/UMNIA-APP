@@ -1,7 +1,10 @@
 package main
 
 import (
+	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +14,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // Tes integrasi F1-04A terhadap PostgreSQL asli: registry katalog modul
@@ -178,6 +183,187 @@ func TestListModulesPermissions(t *testing.T) {
 	afterEvents, _ := after["events"].([]any)
 	if len(beforeEvents) != len(afterEvents) {
 		t.Fatalf("audit berubah setelah baca katalog: %d -> %d", len(beforeEvents), len(afterEvents))
+	}
+}
+
+// TestListModulesPermissionQueryErrorIsServerError: kesalahan query izin
+// (bukan penolakan izin) harus 500, bukan 403. Fault disuntik lewat
+// subject INTERNAL yang sengaja tidak valid — fixture tes saja, bukan
+// konteks yang dikendalikan pengguna. app.has_permission memakai
+// argumen UUID, jadi subject ini gagal di dalam PostgreSQL (bukan mock).
+func TestListModulesPermissionQueryErrorIsServerError(t *testing.T) {
+	db := testDB(t)
+	srv := &server{db: db}
+	ws, err := uuidNew()
+	if err != nil {
+		t.Fatalf("uuidNew: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/workspaces/"+ws+"/modules", nil)
+	req.SetPathValue("id", ws)
+	ctx := context.WithValue(req.Context(), ctxSubject, "bukan-uuid")
+	rec := httptest.NewRecorder()
+	srv.handleListModules(rec, req.WithContext(ctx))
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("permission query error: want 500, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	var body map[string]string
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode 500 body: %v", err)
+	}
+	for _, leaked := range []string{"uuid", "has_permission", "invalid input"} {
+		if strings.Contains(body["error"], leaked) {
+			t.Fatalf("500 body membocorkan detail SQL: %q", body["error"])
+		}
+	}
+}
+
+// bootstrapDB membuka koneksi pemilik tabel (bootstrap/superuser) untuk
+// fixture CHECK yang harus mencapai constraint — role runtime ditolak
+// sebelum CHECK (permission denied), jadi koneksi ini satu-satunya cara
+// mengamati check_violation di gate integrasi. URL diisi CI
+// (BUSINESS_BOOTSTRAP_DATABASE_URL); tanpa fixture ini tes dilewati
+// secara jujur (bukan PASS).
+func bootstrapDB(t *testing.T) *sql.DB {
+	t.Helper()
+	url := os.Getenv("BUSINESS_BOOTSTRAP_DATABASE_URL")
+	if url == "" {
+		t.Skip("BUSINESS_BOOTSTRAP_DATABASE_URL kosong, tes fixture bootstrap dilewati")
+	}
+	db, err := sql.Open("pgx", url)
+	if err != nil {
+		t.Fatalf("open bootstrap db: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	if err := db.Ping(); err != nil {
+		t.Fatalf("ping bootstrap db: %v", err)
+	}
+	return db
+}
+
+// CHECK lama yang lemah (menerima JSON null): dipakai fixture untuk
+// membuktikan rerun 003 menggantinya pada database yang sudah 003.
+const oldWeakRegistryCheck = `CHECK (manifest ? 'id' AND manifest ? 'version'
+  AND manifest->>'id' = module_id
+  AND manifest->>'version' = version)`
+
+func reapplyMigration003(t *testing.T, db *sql.DB) {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join("migrations", "003_modules.sql"))
+	if err != nil {
+		t.Fatalf("baca 003_modules.sql: %v", err)
+	}
+	if _, err := db.Exec(string(raw)); err != nil {
+		t.Fatalf("terapkan ulang 003: %v", err)
+	}
+}
+
+func tryRegistryInsert(t *testing.T, db *sql.DB, id, version, manifest string) error {
+	t.Helper()
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx.Rollback()
+	_, err = tx.Exec(`INSERT INTO module_registry (module_id, version, manifest) VALUES ($1, $2, $3::jsonb)`, id, version, manifest)
+	return err
+}
+
+func assertCheckViolation(t *testing.T, err error, what string) {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("%s: seharusnya ditolak check_violation, malah lolos", what)
+	}
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) || pgErr.Code != "23514" {
+		t.Fatalf("%s: want check_violation (23514), got %v", what, err)
+	}
+}
+
+// TestModuleRegistryCheckRejectsNullIdentity: CHECK null-safe — JSON null,
+// kunci hilang, dan mismatch ditolak check_violation; baris valid lolos;
+// rerun 003 mengganti CHECK lama sambil mempertahankan data/timestamp
+// baris yang sudah ada.
+func TestModuleRegistryCheckRejectsNullIdentity(t *testing.T) {
+	db := testDB(t)
+	boot := bootstrapDB(t)
+	// Jaring pengaman: bila tes gagal di tengah, kembalikan constraint
+	// baru dengan menerapkan ulang 003 (cleanup berjalan sebelum
+	// koneksi bootstrap ditutup, karena didaftarkan sesudahnya).
+	t.Cleanup(func() { reapplyMigration003(t, boot) })
+
+	type registryRow struct{ id, version, manifest, registered string }
+	snapshot := func() []registryRow {
+		rows, err := boot.Query(`SELECT module_id, version, manifest::text, registered_at::text FROM module_registry ORDER BY module_id`)
+		if err != nil {
+			t.Fatalf("snapshot registry: %v", err)
+		}
+		defer rows.Close()
+		var out []registryRow
+		for rows.Next() {
+			var r registryRow
+			if err := rows.Scan(&r.id, &r.version, &r.manifest, &r.registered); err != nil {
+				t.Fatalf("scan snapshot: %v", err)
+			}
+			out = append(out, r)
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatalf("rows snapshot: %v", err)
+		}
+		return out
+	}
+	before := snapshot()
+	if len(before) != 4 {
+		t.Fatalf("snapshot: want 4 baris, got %d", len(before))
+	}
+
+	// 1. Pasang kembali CHECK lama (simulasi DB yang sudah menerapkan
+	// 003 sebelum perbaikan) dan buktikan kelemahannya nyata: insert
+	// id JSON null lolos pada constraint lama.
+	if _, err := boot.Exec(`ALTER TABLE module_registry DROP CONSTRAINT IF EXISTS module_registry_check`); err != nil {
+		t.Fatalf("drop CHECK lama: %v", err)
+	}
+	if _, err := boot.Exec(`ALTER TABLE module_registry ADD CONSTRAINT module_registry_check ` + oldWeakRegistryCheck); err != nil {
+		t.Fatalf("pasang CHECK lama: %v", err)
+	}
+	if err := tryRegistryInsert(t, boot, "qa.null-id", "0.1.0", `{"id":null,"version":"0.1.0"}`); err != nil {
+		t.Fatalf("fixture CHECK lama: insert null-id seharusnya lolos pada constraint lama, got %v", err)
+	}
+
+	// 2. Rerun 003: mengganti CHECK lama dengan yang null-safe.
+	reapplyMigration003(t, boot)
+
+	// 3. Data/timestamp baris yang sudah ada dipertahankan persis.
+	after := snapshot()
+	if !reflect.DeepEqual(before, after) {
+		t.Fatalf("rerun 003 mengubah baris registry: sebelum %v, sesudah %v", before, after)
+	}
+
+	// 4. JSON null / kunci hilang / mismatch kini ditolak check_violation.
+	cases := []struct{ id, version, manifest string }{
+		{"qa.null-id", "0.1.0", `{"id":null,"version":"0.1.0"}`},
+		{"qa.null-version", "0.1.0", `{"id":"qa.null-version","version":null}`},
+		{"qa.no-id", "0.1.0", `{"version":"0.1.0"}`},
+		{"qa.no-version", "0.1.0", `{"id":"qa.no-version"}`},
+		{"qa.mismatch-id", "0.1.0", `{"id":"other","version":"0.1.0"}`},
+		{"qa.mismatch-version", "0.2.0", `{"id":"qa.mismatch-version","version":"0.1.0"}`},
+	}
+	for _, c := range cases {
+		assertCheckViolation(t, tryRegistryInsert(t, boot, c.id, c.version, c.manifest), c.id)
+	}
+
+	// 5. Kontrol positif: baris valid tetap lolos (membuktikan tes
+	// mencapai constraint, bukan gagal lebih awal). Rollback supaya
+	// tidak ada baris yang tersisa.
+	if err := tryRegistryInsert(t, boot, "qa.valid", "0.1.0", `{"id":"qa.valid","version":"0.1.0"}`); err != nil {
+		t.Fatalf("insert valid seharusnya lolos: %v", err)
+	}
+
+	// 6. Runtime DML tetap ditolak (bukan bukti CHECK, tapi bagian dari
+	// bukti bahwa perbaikan tidak melonggarkan grant runtime).
+	if _, err := db.Exec(`INSERT INTO module_registry (module_id, version, manifest) VALUES ('qa.rt', '0.1.0', '{}'::jsonb)`); err == nil {
+		t.Fatalf("INSERT runtime seharusnya ditolak")
+	} else if !strings.Contains(err.Error(), "permission denied") {
+		t.Fatalf("INSERT runtime: want permission denied, got %v", err)
 	}
 }
 

@@ -20,9 +20,30 @@ CREATE TABLE IF NOT EXISTS module_registry (
   registered_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (module_id, version),
   -- Identitas/versi kolom harus cocok dengan isi manifest itu sendiri.
-  CHECK (manifest ? 'id' AND manifest ? 'version'
+  -- IS NOT NULL wajib: ->> menghasilkan SQL NULL untuk nilai JSON null
+  -- maupun kunci yang hilang, dan CHECK menerima hasil NULL — tanpa
+  -- penjaga ini, {"id":null} lolos.
+  CHECK (manifest->>'id' IS NOT NULL
+    AND manifest->>'version' IS NOT NULL
     AND manifest->>'id' = module_id
     AND manifest->>'version' = version)
+);
+
+-- Perbaiki CHECK lama pada database yang sudah menerapkan 003: CREATE
+-- TABLE IF NOT EXISTS di atas tidak menyentuh tabel yang sudah ada,
+-- jadi constraint diganti eksplisit di sini. Aman di-rerun (DROP ...
+-- IF EXISTS + ADD kembali); baris valid yang sudah ada memenuhi
+-- kondisi baru, sedangkan baris tidak valid (bila ada) membuat ADD
+-- gagal eksplisit untuk review — tidak pernah ditulis ulang/dihapus
+-- diam-diam. Di Windows/CI seluruh file berjalan dalam satu transaksi
+-- psql -1, jadi DROP+ADD atomik; di Linux native tiap pernyataan
+-- commit sendiri, tetapi rerun berikutnya mengulang ADD yang gagal.
+ALTER TABLE module_registry DROP CONSTRAINT IF EXISTS module_registry_check;
+ALTER TABLE module_registry ADD CONSTRAINT module_registry_check CHECK (
+  manifest->>'id' IS NOT NULL
+    AND manifest->>'version' IS NOT NULL
+    AND manifest->>'id' = module_id
+    AND manifest->>'version' = version
 );
 
 -- Hanya SELECT untuk runtime; tanpa GRANT INSERT/UPDATE/DELETE.

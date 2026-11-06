@@ -32,7 +32,13 @@ func (s *server) handleListModules(w http.ResponseWriter, r *http.Request) {
 	// Kasir punya view_workspace, jadi boleh membaca katalog (tindakan
 	// ini tidak memberi kuasa baru); izin lain tidak dicek di sini.
 	allowed, err := s.hasPermission(tx, id, subject, "view_workspace")
-	if err != nil || !allowed {
+	if err != nil {
+		// Kesalahan query izin adalah kesalahan backend, bukan
+		// penolakan izin: balas 500 terkendali tanpa detail SQL.
+		writeError(w, http.StatusInternalServerError, "izin gagal diperiksa")
+		return
+	}
+	if !allowed {
 		writeError(w, http.StatusForbidden, "bukan anggota workspace ini")
 		return
 	}

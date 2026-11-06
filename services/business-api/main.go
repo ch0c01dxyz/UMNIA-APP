@@ -80,11 +80,15 @@ func checkDatabase(db *sql.DB) string {
 		return "error"
 	}
 	var count int
-	// Kedua versi wajib ada: database yang berhenti di 002 (tanpa
-	// registry katalog 003) belum siap, sama seperti database kosong.
+	// Keempat versi wajib ada: database yang berhenti di 003 (tanpa
+	// penyimpanan instalasi 004) belum siap, sama seperti database
+	// kosong atau yang berhenti di 002. Marker tambahan di luar
+	// keempat nama ini (mis. migrasi masa depan) tidak menggagalkan
+	// readiness — hitungan hanya menyaring keempat nama tersebut,
+	// dan version adalah primary key sehingga hitungan itu cukup.
 	err := db.QueryRowContext(ctx,
-		`SELECT count(*) FROM schema_migrations WHERE version IN ('002_identity', '003_modules')`).Scan(&count)
-	if err != nil || count != 2 {
+		`SELECT count(*) FROM schema_migrations WHERE version IN ('001_init', '002_identity', '003_modules', '004_module_installations')`).Scan(&count)
+	if err != nil || count != 4 {
 		return "error"
 	}
 	return "ok"

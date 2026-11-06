@@ -101,9 +101,11 @@ sebagai bootstrap, lalu menjalankan tes dengan URL terisi dan GAGAL
 bila ada tes yang ter-SKIP atau URL kosong. Jangan menyamakan hijau
 unit-only lokal dengan lulus gate integrasi.
 
-Readiness `/readyz` memeriksa migrasi `002_identity` dan `003_modules`
-sudah terapan, bukan hanya ping: database kosong tanpa skema atau yang
-berhenti di 002 dilaporkan `error` (503), bukan `ok`.
+Readiness `/readyz` memeriksa migrasi `001_init`, `002_identity`,
+`003_modules`, dan `004_module_installations` sudah terapan, bukan
+hanya ping: database kosong tanpa skema atau yang berhenti di 003
+dilaporkan `error` (503), bukan `ok`; marker tambahan di luar keempat
+nama itu tidak menggagalkan readiness.
 
 Windows: lihat `deploy/windows/README.md` — akun bootstrap vs runtime,
 service `migrate`, dan jalur upgrade volume lama. Compose Windows
@@ -136,11 +138,33 @@ Manifest contoh divalidasi di CI terhadap skema kanonis
 `scripts/validate_blueprint.py` (plus tiga cek negatif: field tak
 dikenal, field required bersarang hilang, versi malformed).
 
+## F1-04B-B1 — penyimpanan instalasi modul + entitlement (tanpa endpoint aktivasi)
+
+Migrasi `004_module_installations` menambah dua tabel tenant
+(`module_installations` dan `module_entitlements`), keduanya dimiliki
+akun bootstrap/migrasi dan dilindungi RLS (FORCE). `module_installations`
+satu baris per workspace+modul (status `active`/`inactive`,
+`activated_by` merujuk `identity_subjects`, tanpa DELETE untuk runtime);
+`module_entitlements` satu baris per workspace+modul sebagai snapshot
+hak saat ini (tanpa baris di-seed — tidak ada yang bisa diaktifkan
+sebelum operator memberi grant lewat prosedur yang dibekukan di luar
+B1). Anggota workspace boleh membaca state workspace-nya sendiri;
+hanya owner yang punya izin baru `manage_modules` dan boleh menulis
+instalasi. Readiness `/readyz` kini mewajibkan keempat marker
+001–004.
+
+**Yang belum ada:** endpoint aktivasi/deaktivasi dan baca-state
+(B3), grant entitlement nyata, resolver dependensi, dan capability
+guard (F2-01). Penyimpanan ini saja tidak memberi kemampuan yang bisa
+dieksekusi pada modul mana pun.
+
 ## Yang sengaja TIDAK ada di F1-03
 
 UI login/workspace (web masih skeleton F1-01), mailer undangan (token
 undangan dikembalikan sekali ke pengundang — di produksi harus lewat
-email), logout/refresh token, dan aktivasi/deaktivasi modul, entitlement,
-serta capability guard (F1-04B ke atas; F1-04A baru menyediakan katalog
-read-only). Linter khusus web (ESLint) belum dipasang; lint = gofmt +
-go vet (API) + build Nuxt (web).
+email), logout/refresh token, dan endpoint aktivasi/deaktivasi modul,
+grant entitlement nyata, serta capability guard (F1-04B ke atas;
+F1-04A baru menyediakan katalog read-only, F1-04B-B1 baru menyediakan
+penyimpanan instalasi/entitlement tanpa endpoint aktivasi, tanpa grant
+nyata, tanpa guard). Linter khusus web (ESLint) belum dipasang; lint =
+gofmt + go vet (API) + build Nuxt (web).

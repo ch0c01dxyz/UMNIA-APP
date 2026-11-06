@@ -110,18 +110,37 @@ jobs:
             -c "CREATE ROLE umnia_business NOSUPERUSER NOBYPASSRLS LOGIN PASSWORD 'ci-runtime-only';" \
             -c "CREATE DATABASE umnia_test OWNER umnia_business;" \
             -c "CREATE DATABASE umnia_empty;" \
-            -c "CREATE DATABASE umnia_partial OWNER umnia_business;"
+            -c "CREATE DATABASE umnia_partial OWNER umnia_business;" \
+            -c "CREATE DATABASE umnia_003only OWNER umnia_business;" \
+            -c "CREATE DATABASE umnia_extra OWNER umnia_business;"
           PGPASSWORD=ci-bootstrap-only psql -h localhost -U postgres -d umnia_test \
             -v ON_ERROR_STOP=1 -1 \
             -f services/business-api/migrations/001_init.sql \
             -f services/business-api/migrations/002_identity.sql \
-            -f services/business-api/migrations/003_modules.sql
+            -f services/business-api/migrations/003_modules.sql \
+            -f services/business-api/migrations/004_module_installations.sql
           # Fixture negatif readiness: database yang berhenti di 002
           # (tanpa registry 003) harus dilaporkan belum siap.
           PGPASSWORD=ci-bootstrap-only psql -h localhost -U postgres -d umnia_partial \
             -v ON_ERROR_STOP=1 -1 \
             -f services/business-api/migrations/001_init.sql \
             -f services/business-api/migrations/002_identity.sql
+          # Fixture negatif readiness (F1-04B-B1): database yang berhenti
+          # di 003 (tanpa penyimpanan instalasi 004) belum siap.
+          PGPASSWORD=ci-bootstrap-only psql -h localhost -U postgres -d umnia_003only \
+            -v ON_ERROR_STOP=1 -1 \
+            -f services/business-api/migrations/001_init.sql \
+            -f services/business-api/migrations/002_identity.sql \
+            -f services/business-api/migrations/003_modules.sql
+          # Fixture positif readiness (F1-04B-B1): keempat marker + satu
+          # marker tambahan yang tidak dikenal harus tetap siap.
+          PGPASSWORD=ci-bootstrap-only psql -h localhost -U postgres -d umnia_extra \
+            -v ON_ERROR_STOP=1 -1 \
+            -f services/business-api/migrations/001_init.sql \
+            -f services/business-api/migrations/002_identity.sql \
+            -f services/business-api/migrations/003_modules.sql \
+            -f services/business-api/migrations/004_module_installations.sql \
+            -c "INSERT INTO schema_migrations (version) VALUES ('999_future') ON CONFLICT (version) DO NOTHING;"
       - name: Test (integration gate)
         run: |
           test -n "$BUSINESS_DATABASE_URL" || { echo "BUSINESS_DATABASE_URL wajib di gate integrasi"; exit 1; }

@@ -1,0 +1,5 @@
+# Shell scripts must check out with LF line endings on every platform.
+# On Windows with core.autocrlf=true, Git would otherwise convert them to
+# CRLF, which breaks scripts executed inside Linux containers
+# (e.g. deploy/windows/initdb/01-runtime-roles.sh: /usr/bin/env 'bash\r').
+*.sh text eol=lf

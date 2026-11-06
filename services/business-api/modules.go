@@ -231,11 +231,30 @@ func hasEntitlement(tx *sql.Tx, wsID, moduleID, version string) (bool, error) {
 	return ok, err
 }
 
+// coreCapabilityQueries memetakan kapabilitas yang disediakan trusted
+// core ke bacaan nyata atas kolom yang dibutuhkan. Hanya dua kapabilitas
+// ini yang dikenali sebagai penyedia core; kapabilitas lain tetap harus
+// dipenuhi modul aktif yang berhak. Bacaan memakai LIMIT 1 (bukan
+// COUNT(*)): tabel kosong tetap valid, tanpa fake row, tanpa scan penuh
+// pada tiap aktivasi. Sukses bacaan (termasuk hasil kosong) membuktikan
+// hanya bahwa jalur baca backend ini bisa dieksekusi dalam konteks saat
+// ini — BUKAN bukti RLS/membership/izin efektif, kesehatan provider,
+// keberadaan data rujukan, atau enforcement consumer masa depan.
+// Otorisasi divalidasi terpisah (hasPermission + beginTenant) dan RLS
+// diuji terpisah.
+var coreCapabilityQueries = map[string]string{
+	"customer.profile.read": `SELECT id, display_name FROM parties WHERE workspace_id = $1 AND type = 'customer' LIMIT 1`,
+	"catalog.item.read":     `SELECT id, sku FROM catalog_items WHERE workspace_id = $1 LIMIT 1`,
+}
+
 // missingRequirement mengembalikan kapabilitas non-optional pertama yang
-// tidak dipenuhi penyedia eligible (aktif + entitled), atau "" bila
-// semua terpenuhi. Requires optional tidak pernah memblokir. Urutan
-// mengikuti array requires di manifest (deterministik).
-func missingRequirement(candidate moduleManifest, providers []activeModule) string {
+// tidak dipenuhi penyedia eligible (aktif + entitled) atau penyedia core,
+// atau "" bila semua terpenuhi. Requires optional tidak pernah memblokir.
+// Urutan mengikuti array requires di manifest (deterministik). Galat
+// query core dikembalikan (pemanggil membalas 500): tidak pernah diam-
+// diam dianggap "tersedia", dan tidak pernah menjadi 409 seolah tidak
+// ada implementasi.
+func missingRequirement(tx *sql.Tx, wsID string, candidate moduleManifest, providers []activeModule) (string, error) {
 	for _, req := range candidate.Requires {
 		if req.Optional {
 			continue
@@ -255,11 +274,20 @@ func missingRequirement(candidate moduleManifest, providers []activeModule) stri
 				break
 			}
 		}
-		if !found {
-			return req.Capability
+		if found {
+			continue
 		}
+		if q, isCore := coreCapabilityQueries[req.Capability]; isCore {
+			var a, b string
+			err := tx.QueryRow(q, wsID).Scan(&a, &b)
+			if err != nil && err != sql.ErrNoRows {
+				return "", err
+			}
+			continue
+		}
+		return req.Capability, nil
 	}
-	return ""
+	return "", nil
 }
 
 // conflictingModule mengembalikan modul aktif yang bentrok dengan
@@ -459,7 +487,12 @@ func (s *server) handleActivateModule(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "transaksi gagal")
 		return
 	}
-	if missing := missingRequirement(manifest, active); missing != "" {
+	missing, err := missingRequirement(tx, wsID, manifest, active)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "transaksi gagal")
+		return
+	}
+	if missing != "" {
 		writeError(w, http.StatusConflict, "kapabilitas "+missing+" belum tersedia di workspace ini")
 		return
 	}

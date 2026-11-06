@@ -150,8 +150,8 @@ hak saat ini (tanpa baris di-seed — tidak ada yang bisa diaktifkan
 sebelum operator memberi grant lewat prosedur yang dibekukan di luar
 B1). Anggota workspace boleh membaca state workspace-nya sendiri;
 hanya owner yang punya izin baru `manage_modules` dan boleh menulis
-instalasi. Readiness `/readyz` kini mewajibkan keempat marker
-001–004.
+instalasi. Readiness `/readyz` kini mewajibkan kelima marker 001–005
+(F2-01-A menambah `005_core_master_data`).
 
 **Yang belum ada:** grant entitlement nyata, resolver dependensi, dan
 capability guard (F2-01). Penyimpanan ini saja tidak memberi kemampuan
@@ -194,9 +194,69 @@ audit; riwayat tidak pernah dihapus.
 (entitlement hanya dibaca dari snapshot `module_entitlements`), tidak
 ada guard capability, dan tidak ada endpoint bisnis — handler bisnis
 masa depan (F2) tetap wajib memeriksa hak, instalasi aktif, kesiapan
-penyedia nyata, dan kebijakan pengguna/sumber daya. Rental/Spa kanonis
-tetap tidak bisa diaktifkan karena kapabilitas wajibnya tidak punya
-penyedia.
+penyedia nyata, dan kebijakan pengguna/sumber daya. Sejak F2-01-A,
+`rental.basic` berhak bisa aktif lewat penyedia core nyata (baca
+`parties`/`catalog_items`); `spa.standard` tetap tidak bisa karena
+`booking.resource.hold` tidak punya penyedia.
+
+## F2-01-A — master data core (customers + catalog items)
+
+Migrasi `005_core_master_data` menambah dua tabel core milik bootstrap
+dengan RLS (FORCE): `parties` (satu baris per pelanggan; `type` dikunci
+`customer` untuk slice ini — tanpa supplier dan tanpa kolom kontak,
+jadi tidak ada PII yang tidak dibutuhkan) dan `catalog_items` (sku
+unik per workspace, `name`, `unit` label bisnis, `status`
+active/archived, `revision` mulai 0). Runtime hanya SELECT + INSERT;
+tanpa UPDATE/DELETE/TRUNCATE. Izin baru `manage_business_data` hanya
+untuk owner + manager.
+
+Empat rute terautentikasi, semua di bawah `authMiddleware` +
+`beginTenant` dengan envelope error Bahasa Indonesia yang datar:
+
+- `POST /workspaces/{id}/customers` — body `{"display_name":"..."}`;
+  type dikunci server-side `customer`. 201 mengembalikan baris yang
+  tersimpan (`id`, `workspace_id`, `type`, `display_name`,
+  `created_at`, `updated_at`, timestamp UTC).
+- `GET /workspaces/{id}/customers` — baca memakai `view_workspace`.
+- `POST /workspaces/{id}/catalog/items` — body `{"sku":"...","name":
+  "...","unit":"pcs"}`; unit label wajib, bukan aturan konversi.
+  201 mengembalikan baris tersimpan (`status` `active`, `revision`
+  0). Duplikat SKU di workspace yang sama → 409 (case-sensitive,
+  sesudah trim); SKU sama di workspace lain boleh.
+- `GET /workspaces/{id}/catalog/items` — baca memakai `view_workspace`.
+
+Validasi: trim whitespace luar; display_name/name maks 200 karakter,
+sku maks 64, unit maks 32; field tak dikenal, tipe salah, dokumen JSON
+tambahan, nilai kosong/terlalu panjang, dan body di atas 16 KiB → 400
+terkendali. Invarian nonblank/panjang juga ditegakkan CHECK di database
+supaya INSERT langsung lewat runtime pun ditolak. List memakai
+`{"items":[...]}` terurut `(created_at, id)` dengan pagination
+`limit` default 50 (1–100) dan `offset` default 0 (nonnegatif);
+query tidak valid → 400. Offset pagination bukan snapshot: baris yang
+disisipkan bersamaan dapat menggeser halaman. Keunikan SKU bukan
+idempotensi HTTP penuh; create customer tidak idempotent.
+
+Setiap create menulis baris + audit append-only (`customer_created` /
+`catalog_item_created`, `entity_id` UUID baris baru, details minimal
+`{"type":...}` tanpa nama/body/kontak) dalam satu transaksi dan baru
+membalas 201 sesudah commit; gagal audit → rollback penuh (500).
+
+**Penyedia core nyata.** Hanya `customer.profile.read` dan
+`catalog.item.read` yang dikenali sebagai kapabilitas core, didukung
+bacaan `parties`/`catalog_items` yang diimplementasikan. Resolver
+aktivasi menjalankan bacaan nyata (`SELECT ... LIMIT 1`, tanpa
+`COUNT(*)`) di dalam transaksi aktivasi sesudah otorisasi — tabel
+kosong tetap valid, tanpa fake row. Galat query core → 500, bukan 409
+dan bukan "tersedia". Sukses bacaan itu sendiri bukan bukti RLS,
+membership, izin efektif, kesehatan provider, atau enforcement
+consumer: otorisasi divalidasi terpisah dan RLS diuji terpisah.
+Aktivasi tetap entitled intent; consumer rental masa depan wajib
+memeriksa ulang entitlement/state aktif dan memilih tiap customer/item
+yang dirujuk di dalam transaksinya sendiri. Tidak ada guard helper
+atau endpoint kontrak di slice ini.
+
+**Yang belum ada:** stok/harga/finance, lifecycle dan endpoint kontrak
+rental, UI, supplier, dan pemberian entitlement nyata/billing.
 
 ## Yang sengaja TIDAK ada di F1-03
 
@@ -205,6 +265,7 @@ undangan dikembalikan sekali ke pengundang — di produksi harus lewat
 email), logout/refresh token, grant entitlement nyata, serta capability
 guard (F1-04B ke atas; F1-04A baru menyediakan katalog read-only,
 F1-04B-B1 menyediakan penyimpanan instalasi/entitlement, F1-04B-B3
-menyediakan handler state instalasi metadata-only). Linter khusus web
+menyediakan handler state instalasi metadata-only, F2-01-A menyediakan
+master data core customers + catalog items). Linter khusus web
 (ESLint) belum dipasang; lint = gofmt + go vet (API) + build Nuxt
 (web).

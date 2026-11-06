@@ -627,14 +627,16 @@ func TestModuleActivationDependenciesAndConflicts(t *testing.T) {
 			t.Fatalf("activate %s tanpa entitlement: want 403, got %d (%v)", m, code, body)
 		}
 	}
-	// Dengan entitlement: 409 karena kapabilitas wajib tak ada penyedia.
+	// Dengan entitlement: rental kini 200 lewat penyedia core nyata
+	// (F2-01-A: probe parties/catalog_items; tabel kosong pun valid),
+	// spa tetap 409 karena booking.resource.hold tak ada penyedia.
 	grantEntitlement(t, env.boot, env.wsA, "rental.basic", "0.1.0")
 	grantEntitlement(t, env.boot, env.wsA, "spa.standard", "0.1.0")
 	code, body := activateModule(t, env.srv, env.wsA, "rental.basic", env.ownerToken, "0.1.0")
-	if code != http.StatusConflict {
-		t.Fatalf("rental: want 409, got %d (%v)", code, body)
+	if code != http.StatusOK {
+		t.Fatalf("rental: want 200, got %d (%v)", code, body)
 	}
-	assertFlatError(t, body, "catalog.item.read")
+	assertState(t, body, "rental.basic", "0.1.0", "active")
 	code, body = activateModule(t, env.srv, env.wsA, "spa.standard", env.ownerToken, "0.1.0")
 	if code != http.StatusConflict {
 		t.Fatalf("spa: want 409, got %d (%v)", code, body)

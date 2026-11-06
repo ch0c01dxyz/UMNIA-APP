@@ -80,10 +80,19 @@ services:
       - ../../services/business-api/migrations:/migrations:ro
     # -1 = satu transaksi untuk keseluruhan pemanggilan psql ini (semua
     # file -f), supaya migrasi gagal tidak meninggalkan keadaan setengah
-    # terapan yang tercatat sebagai selesai.
-    command: >
-      sh -c "psql -v ON_ERROR_STOP=1 -1 -f /migrations/001_init.sql
-             -f /migrations/002_identity.sql"
+    # terapan yang tercatat sebagai selesai. Daftar argumen eksplisit
+    # (tanpa sh -c): skalar YAML terlipat sebelumnya mempertahankan
+    # newline pada baris -f kedua, sehingga sh menjalankannya sebagai
+    # perintah tersendiri ("sh: 2: -f: not found", 001 ter-commit sendiri).
+    command:
+      - psql
+      - -v
+      - ON_ERROR_STOP=1
+      - '-1'
+      - -f
+      - /migrations/001_init.sql
+      - -f
+      - /migrations/002_identity.sql
     depends_on:
       postgres-business:
         condition: service_healthy

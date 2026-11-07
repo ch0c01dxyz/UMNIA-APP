@@ -1,10 +1,13 @@
 package main
 
 import (
+	"errors"
 	"net/http"
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // Handler master data core F2-01-A (catalog items). Trusted core: selalu
@@ -83,7 +86,14 @@ func (s *server) handleCreateCatalogItem(w http.ResponseWriter, r *http.Request)
 		`INSERT INTO catalog_items (id, workspace_id, sku, name, unit, status) VALUES ($1, $2, $3, $4, $5, 'active') RETURNING created_at, updated_at`,
 		id, wsID, sku, name, unit).Scan(&created, &updated)
 	if err != nil {
-		if strings.Contains(err.Error(), "duplicate key") || strings.Contains(err.Error(), "unique") {
+		// 409 HANYA untuk pelanggaran unik nyata pada constraint
+		// (workspace_id, sku): kenali lewat SQLSTATE 23505 + nama
+		// constraint, bukan lewat teks pesan galat. Pesan backend lain
+		// — termasuk yang kebetulan mengandung kata "unique" atau
+		// "duplicate key" (mis. P0001 dari trigger) — tetap 500
+		// terkendali tanpa bocor detail SQL.
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == "catalog_items_workspace_id_sku_key" {
 			writeError(w, http.StatusConflict, "sku sudah dipakai di workspace ini")
 			return
 		}

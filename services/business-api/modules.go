@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -247,6 +248,13 @@ var coreCapabilityQueries = map[string]string{
 	"catalog.item.read":     `SELECT id, sku FROM catalog_items WHERE workspace_id = $1 LIMIT 1`,
 }
 
+// errCoreReadDenied menandai penolakan izin baca data core di resolver:
+// pemanggil boleh mengelola modul (manage_modules) tapi tidak punya izin
+// baca (view_workspace) atas data core yang dibutuhkan kapabilitas.
+// Handler memetakan ini ke 403, bukan 409 ("kapabilitas tak tersedia")
+// dan bukan 500. Pesan ini adalah isi envelope error 403-nya.
+var errCoreReadDenied = errors.New("tidak punya izin membaca data core")
+
 // missingRequirement mengembalikan kapabilitas non-optional pertama yang
 // tidak dipenuhi penyedia eligible (aktif + entitled) atau penyedia core,
 // atau "" bila semua terpenuhi. Requires optional tidak pernah memblokir.
@@ -254,7 +262,17 @@ var coreCapabilityQueries = map[string]string{
 // query core dikembalikan (pemanggil membalas 500): tidak pernah diam-
 // diam dianggap "tersedia", dan tidak pernah menjadi 409 seolah tidak
 // ada implementasi.
-func missingRequirement(tx *sql.Tx, wsID string, candidate moduleManifest, providers []activeModule) (string, error) {
+//
+// Untuk kapabilitas core, sukses bacaan saja BUKAN bukti otorisasi:
+// RLS menyaring baris tanpa melempar galat, jadi tanpa cek eksplisit,
+// subjek tanpa view_workspace bisa mengaktifkan modul yang membutuhkan
+// data core. Karena itu, sebelum bacaan core dijalankan, resolver
+// memeriksa izin baca (view_workspace) subjek yang sama di dalam
+// transaksi tenant yang sama: ditolak → errCoreReadDenied (403),
+// galat query → error (500). Cek ini hanya berjalan saat kapabilitas
+// core yang relevan memang sedang di-resolve (tidak ada penyedia modul
+// yang memenuhinya); bukan cek selimut sebelum semua aktivasi.
+func (s *server) missingRequirement(tx *sql.Tx, wsID, subject string, candidate moduleManifest, providers []activeModule) (string, error) {
 	for _, req := range candidate.Requires {
 		if req.Optional {
 			continue
@@ -278,8 +296,15 @@ func missingRequirement(tx *sql.Tx, wsID string, candidate moduleManifest, provi
 			continue
 		}
 		if q, isCore := coreCapabilityQueries[req.Capability]; isCore {
+			allowed, err := s.hasPermission(tx, wsID, subject, "view_workspace")
+			if err != nil {
+				return "", err
+			}
+			if !allowed {
+				return "", errCoreReadDenied
+			}
 			var a, b string
-			err := tx.QueryRow(q, wsID).Scan(&a, &b)
+			err = tx.QueryRow(q, wsID).Scan(&a, &b)
 			if err != nil && err != sql.ErrNoRows {
 				return "", err
 			}
@@ -487,8 +512,12 @@ func (s *server) handleActivateModule(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "transaksi gagal")
 		return
 	}
-	missing, err := missingRequirement(tx, wsID, manifest, active)
+	missing, err := s.missingRequirement(tx, wsID, subject, manifest, active)
 	if err != nil {
+		if errors.Is(err, errCoreReadDenied) {
+			writeError(w, http.StatusForbidden, errCoreReadDenied.Error())
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "transaksi gagal")
 		return
 	}

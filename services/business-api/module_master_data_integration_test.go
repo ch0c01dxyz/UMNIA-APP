@@ -936,3 +936,224 @@ func TestMasterDataRentalActivationViaCore(t *testing.T) {
 	}
 	assertState(t, body, "rental.basic", "0.1.0", "active")
 }
+
+// installPermissionFault mengganti app.has_permission dengan wrapper yang
+// melempar galat hanya untuk perm='view_workspace' (cek izin baca data
+// core di resolver aktivasi); izin lain didelegasikan ke logika asli.
+// Mengembalikan definisi asli (pg_get_functiondef) untuk dipulihkan.
+// Fixture sintetis terisolasi; pemulihan wajib di finally/cleanup.
+func installPermissionFault(t *testing.T, boot *sql.DB) string {
+	t.Helper()
+	var def string
+	if err := boot.QueryRow(`SELECT pg_get_functiondef('app.has_permission(UUID,UUID,TEXT)'::regprocedure)`).Scan(&def); err != nil {
+		t.Fatalf("baca definisi has_permission: %v", err)
+	}
+	if _, err := boot.Exec(`CREATE OR REPLACE FUNCTION app.has_permission(ws UUID, subj UUID, perm TEXT)
+		RETURNS BOOLEAN LANGUAGE plpgsql STABLE SECURITY DEFINER AS $$
+		BEGIN
+			IF perm = 'view_workspace' THEN
+				RAISE EXCEPTION 'synthetic permission fault';
+			END IF;
+			RETURN app.is_member(ws, subj) AND EXISTS (
+				SELECT 1 FROM membership_roles mr
+				JOIN role_permissions rp ON rp.role = mr.role
+				WHERE mr.workspace_id = ws AND mr.subject_id = subj
+					AND rp.permission = perm
+			);
+		END;
+		$$`); err != nil {
+		t.Fatalf("pasang permission fault: %v", err)
+	}
+	return def
+}
+
+// restorePermissionFault memulihkan definisi asli app.has_permission.
+// No-op bila def kosong (fault tidak pernah terpasang); memutar ulang
+// definisi yang sama dua kali tidak berbahaya (CREATE OR REPLACE).
+func restorePermissionFault(t *testing.T, boot *sql.DB, def string) {
+	t.Helper()
+	if def == "" {
+		return
+	}
+	if _, err := boot.Exec(def); err != nil {
+		t.Fatalf("pulihkan has_permission: %v", err)
+	}
+}
+
+// TestCoreReadRequiresViewPermission: subjek anggota dengan manage_modules
+// saja (tanpa view_workspace) TIDAK boleh mengaktifkan modul yang
+// membutuhkan kapabilitas core. Bacaan core yang sukses — termasuk hasil
+// kosong yang disaring RLS — bukan bukti otorisasi baca. Aktivasi pertama
+// harus 403 tanpa mutasi/audit; sesudah izin baca dipulihkan, aktivasi
+// yang sama 200 pada tabel core kosong yang valid. Fault pada query izin
+// baca → 500 tanpa mutasi; sesudah fault dipulihkan, aktivasi 200.
+func TestCoreReadRequiresViewPermission(t *testing.T) {
+	env := setupMasterData(t)
+	boot := env.boot
+
+	// Role sintetis: manage_modules saja, tanpa view_workspace. Reset
+	// dulu supaya sisa run sebelumnya tidak membawa izin baca.
+	if _, err := boot.Exec(`INSERT INTO roles (name, description) VALUES ('qa-manage-only', 'fixture: manage_modules saja') ON CONFLICT (name) DO NOTHING`); err != nil {
+		t.Fatalf("buat role sintetis: %v", err)
+	}
+	if _, err := boot.Exec(`DELETE FROM role_permissions WHERE role = 'qa-manage-only'`); err != nil {
+		t.Fatalf("reset izin role sintetis: %v", err)
+	}
+	if _, err := boot.Exec(`INSERT INTO role_permissions (role, permission) VALUES ('qa-manage-only', 'manage_modules')`); err != nil {
+		t.Fatalf("beri manage_modules ke role sintetis: %v", err)
+	}
+	// Ganti role manager di wsA dengan role sintetis (membership tetap aktif).
+	if _, err := boot.Exec(`DELETE FROM membership_roles WHERE workspace_id = $1 AND subject_id = $2`, env.wsA, env.mgrID); err != nil {
+		t.Fatalf("hapus role manager: %v", err)
+	}
+	if _, err := boot.Exec(`INSERT INTO membership_roles (workspace_id, subject_id, role) VALUES ($1, $2, 'qa-manage-only')`, env.wsA, env.mgrID); err != nil {
+		t.Fatalf("pasang role sintetis: %v", err)
+	}
+	t.Cleanup(func() {
+		// Kembalikan role manager, lalu hapus fixture sintetis (FK:
+		// membership dulu, baru role_permissions dan roles).
+		_, _ = boot.Exec(`DELETE FROM membership_roles WHERE workspace_id = $1 AND subject_id = $2 AND role = 'qa-manage-only'`, env.wsA, env.mgrID)
+		_, _ = boot.Exec(`INSERT INTO membership_roles (workspace_id, subject_id, role) VALUES ($1, $2, 'manager') ON CONFLICT (workspace_id, subject_id, role) DO NOTHING`, env.wsA, env.mgrID)
+		_, _ = boot.Exec(`DELETE FROM role_permissions WHERE role = 'qa-manage-only'`)
+		_, _ = boot.Exec(`DELETE FROM roles WHERE name = 'qa-manage-only'`)
+	})
+
+	// (a) Tanpa view_workspace: baca core 403 — izin baca memang tidak
+	// ada, jadi aktivasi tidak boleh "membaca lewat belakang".
+	code, _ := listCustomers(t, env.srv, env.wsA, env.mgrToken, "")
+	if code != http.StatusForbidden {
+		t.Fatalf("GET customers tanpa view: want 403, got %d", code)
+	}
+	code, _ = listCatalogItems(t, env.srv, env.wsA, env.mgrToken, "")
+	if code != http.StatusForbidden {
+		t.Fatalf("GET items tanpa view: want 403, got %d", code)
+	}
+
+	// (b) Entitlement sintetis terisolasi untuk rental.basic; belum ada
+	// instalasi (bukan no-op aktif — itu punya semantik lain).
+	grantEntitlement(t, boot, env.wsA, "rental.basic", "0.1.0")
+	if _, ok := readInstallation(t, boot, env.wsA, "rental.basic"); ok {
+		t.Fatalf("prasyarat: rental sudah terinstal")
+	}
+	auditsBefore := readModuleAudits(t, boot, env.wsA)
+
+	// (c) Aktivasi pertama → 403, tanpa mutasi/audit.
+	code, body := activateModule(t, env.srv, env.wsA, "rental.basic", env.mgrToken, "0.1.0")
+	if code != http.StatusForbidden {
+		t.Fatalf("aktivasi tanpa izin baca core: want 403, got %d (%v)", code, body)
+	}
+	assertFlatError(t, body, "tidak punya izin membaca data core")
+	if _, ok := readInstallation(t, boot, env.wsA, "rental.basic"); ok {
+		t.Fatalf("aktivasi ditolak tapi baris instalasi terbentuk")
+	}
+	if auditsAfter := readModuleAudits(t, boot, env.wsA); len(auditsAfter) != len(auditsBefore) {
+		t.Fatalf("aktivasi ditolak tapi audit bertambah (%d -> %d)", len(auditsBefore), len(auditsAfter))
+	}
+
+	// (d) Pulihkan izin baca (tambah view_workspace ke role sintetis);
+	// aktivasi yang sama → 200 pada tabel core kosong yang valid.
+	if _, err := boot.Exec(`INSERT INTO role_permissions (role, permission) VALUES ('qa-manage-only', 'view_workspace') ON CONFLICT (role, permission) DO NOTHING`); err != nil {
+		t.Fatalf("pulihkan view_workspace: %v", err)
+	}
+	code, body = activateModule(t, env.srv, env.wsA, "rental.basic", env.mgrToken, "0.1.0")
+	if code != http.StatusOK {
+		t.Fatalf("aktivasi sesudah izin baca dipulihkan: want 200, got %d (%v)", code, body)
+	}
+	assertState(t, body, "rental.basic", "0.1.0", "active")
+
+	// (e) Fault query izin baca → 500 tanpa mutasi. Nonaktifkan dulu
+	// (dengan owner) supaya aktivasi berikut adalah transisi nyata,
+	// bukan no-op 200 dari state aktif.
+	code, _ = deactivateModule(t, env.srv, env.wsA, "rental.basic", env.ownerToken)
+	if code != http.StatusOK {
+		t.Fatalf("deaktivasi sebelum fault: want 200, got %d", code)
+	}
+	auditsBeforeFault := readModuleAudits(t, boot, env.wsA)
+	def := installPermissionFault(t, boot)
+	defer restorePermissionFault(t, boot, def)
+	t.Cleanup(func() { restorePermissionFault(t, boot, def) })
+	code, body = activateModule(t, env.srv, env.wsA, "rental.basic", env.mgrToken, "0.1.0")
+	if code != http.StatusInternalServerError {
+		t.Fatalf("aktivasi dengan fault izin baca: want 500, got %d (%v)", code, body)
+	}
+	msg, _ := body["error"].(string)
+	if msg != "transaksi gagal" {
+		t.Fatalf("500 fault izin baca: want %q, got %q", "transaksi gagal", msg)
+	}
+	if inst, ok := readInstallation(t, boot, env.wsA, "rental.basic"); !ok {
+		t.Fatalf("prasyarat fault: baris instalasi hilang")
+	} else if inst.Status != "inactive" {
+		t.Fatalf("fault izin baca mengubah state: %q", inst.Status)
+	}
+	if auditsAfter := readModuleAudits(t, boot, env.wsA); len(auditsAfter) != len(auditsBeforeFault) {
+		t.Fatalf("fault izin baca menambah audit (%d -> %d)", len(auditsBeforeFault), len(auditsAfter))
+	}
+
+	// (f) Pulihkan fault; aktivasi → 200 (bukti pemulihan).
+	restorePermissionFault(t, boot, def)
+	code, body = activateModule(t, env.srv, env.wsA, "rental.basic", env.mgrToken, "0.1.0")
+	if code != http.StatusOK {
+		t.Fatalf("aktivasi sesudah fault dipulihkan: want 200, got %d (%v)", code, body)
+	}
+	assertState(t, body, "rental.basic", "0.1.0", "active")
+}
+
+// TestCatalogItemBackendErrorIsNotConflict: galat backend P0001 yang
+// pesannya mengandung kata "unique" (tanpa duplikat SKU nyata) TIDAK
+// boleh dipetakan ke 409 — hanya pelanggaran unik 23505 pada constraint
+// (workspace_id, sku) yang berarti "sku sudah dipakai". Sesudah fault
+// dipulihkan, create yang sama 201 (SKU memang tidak pernah duplikat).
+func TestCatalogItemBackendErrorIsNotConflict(t *testing.T) {
+	env := setupMasterData(t)
+	boot := env.boot
+
+	// Trigger sintetis: gagalkan INSERT sku SKU-FAULT di wsA dengan
+	// P0001 yang pesannya mengandung "unique" (meniru temuan reviewer).
+	if _, err := boot.Exec(fmt.Sprintf(`CREATE OR REPLACE FUNCTION app.qa_fail_catalog_insert() RETURNS trigger LANGUAGE plpgsql AS $$
+		BEGIN
+			IF NEW.workspace_id = '%s'::uuid AND NEW.sku = 'SKU-FAULT' THEN
+				RAISE EXCEPTION 'synthetic unique backend failure';
+			END IF;
+			RETURN NEW;
+		END;
+		$$`, env.wsA)); err != nil {
+		t.Fatalf("create fault function: %v", err)
+	}
+	if _, err := boot.Exec(`CREATE TRIGGER qa_fault_catalog_insert BEFORE INSERT ON catalog_items FOR EACH ROW EXECUTE FUNCTION app.qa_fail_catalog_insert()`); err != nil {
+		t.Fatalf("create fault trigger: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = boot.Exec(`DROP TRIGGER IF EXISTS qa_fault_catalog_insert ON catalog_items`)
+		_, _ = boot.Exec(`DROP FUNCTION IF EXISTS app.qa_fail_catalog_insert()`)
+	})
+
+	code, body := createCatalogItem(t, env.srv, env.wsA, env.ownerToken, map[string]string{"sku": "SKU-FAULT", "name": "Barang Fault", "unit": "pcs"})
+	if code != http.StatusInternalServerError {
+		t.Fatalf("create dengan backend fault: want 500, got %d (%v)", code, body)
+	}
+	msg, _ := body["error"].(string)
+	if msg != "barang gagal dibuat" {
+		t.Fatalf("500 backend fault: want %q, got %q", "barang gagal dibuat", msg)
+	}
+	if strings.Contains(msg, "unique") || strings.Contains(msg, "synthetic") {
+		t.Fatalf("500 backend fault membocorkan detail: %q", msg)
+	}
+	if countRows(t, boot, "catalog_items", env.wsA) != 0 {
+		t.Fatalf("backend fault: baris barang lolos")
+	}
+	if countBusinessAudits(t, boot, env.wsA, "catalog_item_created") != 0 {
+		t.Fatalf("backend fault: audit lolos")
+	}
+
+	// Pulihkan fault; create yang sama → 201.
+	if _, err := boot.Exec(`DROP TRIGGER IF EXISTS qa_fault_catalog_insert ON catalog_items`); err != nil {
+		t.Fatalf("drop fault trigger: %v", err)
+	}
+	if _, err := boot.Exec(`DROP FUNCTION IF EXISTS app.qa_fail_catalog_insert()`); err != nil {
+		t.Fatalf("drop fault function: %v", err)
+	}
+	code, body = createCatalogItem(t, env.srv, env.wsA, env.ownerToken, map[string]string{"sku": "SKU-FAULT", "name": "Barang Fault", "unit": "pcs"})
+	if code != http.StatusCreated {
+		t.Fatalf("create sesudah fault dipulihkan: want 201, got %d (%v)", code, body)
+	}
+}

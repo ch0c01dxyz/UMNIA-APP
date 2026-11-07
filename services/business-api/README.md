@@ -222,7 +222,9 @@ Empat rute terautentikasi, semua di bawah `authMiddleware` +
   "...","unit":"pcs"}`; unit label wajib, bukan aturan konversi.
   201 mengembalikan baris tersimpan (`status` `active`, `revision`
   0). Duplikat SKU di workspace yang sama → 409 (case-sensitive,
-  sesudah trim); SKU sama di workspace lain boleh.
+  sesudah trim); SKU sama di workspace lain boleh. 409 hanya untuk
+  pelanggaran unik nyata (SQLSTATE 23505 pada constraint SKU);
+  galat backend lain → 500.
 - `GET /workspaces/{id}/catalog/items` — baca memakai `view_workspace`.
 
 Validasi: trim whitespace luar; display_name/name maks 200 karakter,
@@ -247,7 +249,9 @@ bacaan `parties`/`catalog_items` yang diimplementasikan. Resolver
 aktivasi menjalankan bacaan nyata (`SELECT ... LIMIT 1`, tanpa
 `COUNT(*)`) di dalam transaksi aktivasi sesudah otorisasi — tabel
 kosong tetap valid, tanpa fake row. Galat query core → 500, bukan 409
-dan bukan "tersedia". Sukses bacaan itu sendiri bukan bukti RLS,
+dan bukan "tersedia". Sebelum bacaan core, resolver memeriksa izin baca
+(`view_workspace`) subjek di transaksi yang sama: tanpa izin baca → 403
+tanpa mutasi/audit; galat query izin → 500. Sukses bacaan itu sendiri bukan bukti RLS,
 membership, izin efektif, kesehatan provider, atau enforcement
 consumer: otorisasi divalidasi terpisah dan RLS diuji terpisah.
 Aktivasi tetap entitled intent; consumer rental masa depan wajib

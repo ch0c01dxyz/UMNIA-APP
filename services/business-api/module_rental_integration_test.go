@@ -1267,3 +1267,178 @@ func TestRentalActivationNoOpAfterRevoke(t *testing.T) {
 		t.Fatalf("draft sesudah revoke: want 403, got %d (%v)", code, resp)
 	}
 }
+
+// TestRentalIdempotencyUppercaseUUIDs: UUID referensi huruf besar adalah
+// identitas yang sama dengan ejaan huruf kecilnya (PostgreSQL menyimpan
+// UUID dalam bentuk kanonis huruf kecil). Create pertama huruf besar →
+// 201; retry body/kunci yang sama persis → 200 dengan respons, baris,
+// timestamp, dan satu audit yang sama; ejaan campuran huruf besar/kecil
+// dari UUID yang sama ikut replay 200; identitas UUID yang benar-benar
+// berbeda dengan kunci sama tetap 409 tanpa tulis/audit. Kunci
+// idempotency sendiri tetap case-sensitive: kunci yang hanya berbeda
+// huruf besar/kecil adalah permintaan baru (201).
+func TestRentalIdempotencyUppercaseUUIDs(t *testing.T) {
+	env := setupRental(t)
+	cust, item := seedDraftRefs(t, env, "SKU-UUID-CASE")
+	activateRental(t, env)
+	upperCust, upperItem := strings.ToUpper(cust), strings.ToUpper(item)
+	body := draftBody(upperCust, upperItem, "2026-11-10T09:00:00+07:00", "2026-11-12T09:00:00+07:00")
+
+	// Create pertama huruf besar → 201.
+	code, first := createDraft(t, env.srv, env.wsA, env.ownerToken, "uuid-case-1", body)
+	if code != http.StatusCreated {
+		t.Fatalf("create huruf besar: want 201, got %d (%v)", code, first)
+	}
+	id, _ := first["id"].(string)
+	if countRows(t, env.boot, "rental_contracts", env.wsA) != 1 ||
+		countBusinessAudits(t, env.boot, env.wsA, "rental_contract_created") != 1 {
+		t.Fatalf("sesudah create pertama: want 1 baris + 1 audit")
+	}
+	before, ok := readDraft(t, env.boot, env.wsA, id)
+	if !ok {
+		t.Fatalf("draft %s tidak terbaca", id)
+	}
+
+	// Retry body/kunci yang sama persis → 200, respons identik,
+	// tanpa baris/audit baru.
+	code, replay := createDraft(t, env.srv, env.wsA, env.ownerToken, "uuid-case-1", body)
+	if code != http.StatusOK {
+		t.Fatalf("replay huruf besar: want 200, got %d (%v)", code, replay)
+	}
+	if !reflect.DeepEqual(first, replay) {
+		t.Fatalf("replay huruf besar: body berbeda:\npertama: %v\nreplay: %v", first, replay)
+	}
+	if countRows(t, env.boot, "rental_contracts", env.wsA) != 1 ||
+		countBusinessAudits(t, env.boot, env.wsA, "rental_contract_created") != 1 {
+		t.Fatalf("sesudah replay: want tetap 1 baris + 1 audit")
+	}
+	after, _ := readDraft(t, env.boot, env.wsA, id)
+	if before != after {
+		t.Fatalf("replay mengubah baris:\nsebelum: %+v\nsesudah: %+v", before, after)
+	}
+	// Identitas tersimpan/respons memakai bentuk kanonis huruf kecil.
+	if first["customer_id"] != cust || first["catalog_item_id"] != item {
+		t.Fatalf("respons kanonis: want customer_id %s item %s, got %v", cust, item, first)
+	}
+
+	// Ejaan campuran: create huruf kecil, retry huruf besar → 200.
+	code, _ = createDraft(t, env.srv, env.wsA, env.ownerToken, "uuid-case-2",
+		draftBody(cust, item, "2026-11-20T09:00:00+07:00", "2026-11-22T09:00:00+07:00"))
+	if code != http.StatusCreated {
+		t.Fatalf("create huruf kecil: want 201, got %d", code)
+	}
+	code, resp := createDraft(t, env.srv, env.wsA, env.ownerToken, "uuid-case-2",
+		draftBody(upperCust, upperItem, "2026-11-20T09:00:00+07:00", "2026-11-22T09:00:00+07:00"))
+	if code != http.StatusOK {
+		t.Fatalf("replay campuran: want 200, got %d (%v)", code, resp)
+	}
+
+	// Identitas UUID yang benar-benar berbeda, kunci sama → 409,
+	// tanpa baris/audit baru.
+	cust2, item2 := seedDraftRefs(t, env, "SKU-UUID-DIFF")
+	code, resp = createDraft(t, env.srv, env.wsA, env.ownerToken, "uuid-case-1",
+		draftBody(cust2, item2, "2026-11-10T09:00:00+07:00", "2026-11-12T09:00:00+07:00"))
+	if code != http.StatusConflict {
+		t.Fatalf("replay identitas beda: want 409, got %d (%v)", code, resp)
+	}
+	if countRows(t, env.boot, "rental_contracts", env.wsA) != 2 ||
+		countBusinessAudits(t, env.boot, env.wsA, "rental_contract_created") != 2 {
+		t.Fatalf("sesudah replay beda: want tetap 2 baris + 2 audit")
+	}
+
+	// Kunci tetap case-sensitive: kunci yang hanya berbeda huruf
+	// besar/kecil adalah permintaan baru → 201.
+	code, _ = createDraft(t, env.srv, env.wsA, env.ownerToken, "UUID-CASE-1", body)
+	if code != http.StatusCreated {
+		t.Fatalf("kunci beda huruf: want 201, got %d", code)
+	}
+	if countRows(t, env.boot, "rental_contracts", env.wsA) != 3 {
+		t.Fatalf("sesudah kunci beda huruf: want 3 baris")
+	}
+}
+
+// TestRentalNormalizedYearRange: tahun dicek SEBELUM normalisasi saja
+// tidak cukup — konversi ke UTC bisa menggeser tahun di tepi 0001/9999
+// (mis. 9999-12-31T23:30:00-02:00 menjadi 10000-01-01T01:30:00Z, tahun
+// yang parser RFC3339 handler tidak bisa terima saat replay). Lintasan
+// ke atas maupun ke bawah, di satu maupun kedua ujung, → 400 tanpa
+// baris/audit; tanggal batas tahun yang tetap valid sesudah normalisasi
+// tetap 201 dan replay 200 memakai tanggal yang dikembalikan.
+func TestRentalNormalizedYearRange(t *testing.T) {
+	env := setupRental(t)
+	cust, item := seedDraftRefs(t, env, "SKU-YEAR-RANGE")
+	activateRental(t, env)
+	noRows := func(step string) {
+		t.Helper()
+		if countRows(t, env.boot, "rental_contracts", env.wsA) != 0 ||
+			countBusinessAudits(t, env.boot, env.wsA, "rental_contract_created") != 0 {
+			t.Fatalf("%s: want 0 baris + 0 audit", step)
+		}
+	}
+
+	// Lintasan ke atas di kedua ujung (contoh reviewer) → 400.
+	code, resp := createDraft(t, env.srv, env.wsA, env.ownerToken, "year-up",
+		draftBody(cust, item, "9999-12-31T23:30:00-02:00", "9999-12-31T23:45:00-02:00"))
+	if code != http.StatusBadRequest {
+		t.Fatalf("lintasan atas: want 400, got %d (%v)", code, resp)
+	}
+	assertFlatError(t, resp, "starts_at tidak valid")
+	noRows("lintasan atas")
+
+	// Lintasan ke bawah di kedua ujung → 400.
+	code, resp = createDraft(t, env.srv, env.wsA, env.ownerToken, "year-down",
+		draftBody(cust, item, "0001-01-01T00:15:00+02:00", "0001-01-01T00:30:00+02:00"))
+	if code != http.StatusBadRequest {
+		t.Fatalf("lintasan bawah: want 400, got %d (%v)", code, resp)
+	}
+	assertFlatError(t, resp, "starts_at tidak valid")
+	noRows("lintasan bawah")
+
+	// Hanya ujung akhir yang keluar rentang → 400 ends_at.
+	code, resp = createDraft(t, env.srv, env.wsA, env.ownerToken, "year-ends",
+		draftBody(cust, item, "9999-12-30T23:30:00Z", "9999-12-31T23:45:00-02:00"))
+	if code != http.StatusBadRequest {
+		t.Fatalf("lintasan ends saja: want 400, got %d (%v)", code, resp)
+	}
+	assertFlatError(t, resp, "ends_at tidak valid")
+	noRows("lintasan ends saja")
+
+	// Hanya ujung awal yang keluar rentang → 400 starts_at.
+	code, resp = createDraft(t, env.srv, env.wsA, env.ownerToken, "year-starts",
+		draftBody(cust, item, "0001-01-01T00:15:00+02:00", "0001-01-02T00:30:00+02:00"))
+	if code != http.StatusBadRequest {
+		t.Fatalf("lintasan starts saja: want 400, got %d (%v)", code, resp)
+	}
+	assertFlatError(t, resp, "starts_at tidak valid")
+	noRows("lintasan starts saja")
+
+	// Batas tahun atas yang tetap valid sesudah normalisasi → 201,
+	// replay 200 memakai tanggal yang dikembalikan.
+	code, first := createDraft(t, env.srv, env.wsA, env.ownerToken, "year-ok-top",
+		draftBody(cust, item, "9999-12-31T23:30:00Z", "9999-12-31T23:45:00Z"))
+	if code != http.StatusCreated {
+		t.Fatalf("batas atas valid: want 201, got %d (%v)", code, first)
+	}
+	code, resp = createDraft(t, env.srv, env.wsA, env.ownerToken, "year-ok-top",
+		draftBody(cust, item, first["starts_at"].(string), first["ends_at"].(string)))
+	if code != http.StatusOK {
+		t.Fatalf("replay batas atas: want 200, got %d (%v)", code, resp)
+	}
+
+	// Batas tahun bawah yang tetap valid sesudah normalisasi → 201,
+	// replay 200 memakai tanggal yang dikembalikan.
+	code, first = createDraft(t, env.srv, env.wsA, env.ownerToken, "year-ok-bottom",
+		draftBody(cust, item, "0001-01-01T00:15:00Z", "0001-01-01T00:30:00Z"))
+	if code != http.StatusCreated {
+		t.Fatalf("batas bawah valid: want 201, got %d (%v)", code, first)
+	}
+	code, resp = createDraft(t, env.srv, env.wsA, env.ownerToken, "year-ok-bottom",
+		draftBody(cust, item, first["starts_at"].(string), first["ends_at"].(string)))
+	if code != http.StatusOK {
+		t.Fatalf("replay batas bawah: want 200, got %d (%v)", code, resp)
+	}
+	if countRows(t, env.boot, "rental_contracts", env.wsA) != 2 ||
+		countBusinessAudits(t, env.boot, env.wsA, "rental_contract_created") != 2 {
+		t.Fatalf("sesudah batas valid: want 2 baris + 2 audit")
+	}
+}

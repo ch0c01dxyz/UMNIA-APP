@@ -114,9 +114,19 @@ func (s *server) handleCreateRentalContract(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusBadRequest, "catalog_item_id tidak valid")
 		return
 	}
+	// UUID divalidasi dengan sintaks hyphenated kanonis; PostgreSQL
+	// mengembalikan UUID dalam huruf kecil, jadi kanonikalisasi ke
+	// huruf kecil SEBELUM dipakai di mana pun (perbandingan replay,
+	// query, insert, audit) — kalau tidak, UUID huruf besar tidak
+	// pernah sama dengan nilai tersimpan dan retry yang sama persis
+	// ditolak 409. Idempotency-Key sengaja TIDAK diubah: kunci tetap
+	// case-sensitive.
+	customerID = strings.ToLower(customerID)
+	catalogItemID = strings.ToLower(catalogItemID)
 	// Tanggal wajib RFC3339 dengan zona waktu eksplisit (tanpa offset
-	// → 400) dan tahun 1-9999 (dicek SEBELUM normalisasi UTC, karena
-	// konversi zona bisa menggeser tahun di tepi 0001/9999).
+	// → 400) dan tahun input 1-9999. Cek tahun input saja tidak cukup:
+	// konversi ke UTC bisa menggeser tahun di tepi 0001/9999, jadi
+	// instant ternormalisasi dicek lagi di bawah sebelum dipakai.
 	starts, err := time.Parse(time.RFC3339, strings.TrimSpace(body.StartsAt))
 	if err != nil || starts.Year() < 1 || starts.Year() > 9999 {
 		writeError(w, http.StatusBadRequest, "starts_at tidak valid")
@@ -129,6 +139,19 @@ func (s *server) handleCreateRentalContract(w http.ResponseWriter, r *http.Reque
 	}
 	starts = normalizeInstant(starts)
 	ends = normalizeInstant(ends)
+	// Validasi JUGA tahun instant ternormalisasi: mis.
+	// 9999-12-31T23:30:00-02:00 menjadi 10000-01-01T01:30:00Z — tahun
+	// yang parser RFC3339 handler tidak bisa terima saat replay.
+	// Dicek sebelum perbandingan periode/replay/SQL; tanpa clamp,
+	// tanpa pembungkusan tahun, tanpa perubahan zona.
+	if starts.Year() < 1 || starts.Year() > 9999 {
+		writeError(w, http.StatusBadRequest, "starts_at tidak valid")
+		return
+	}
+	if ends.Year() < 1 || ends.Year() > 9999 {
+		writeError(w, http.StatusBadRequest, "ends_at tidak valid")
+		return
+	}
 	if !ends.After(starts) {
 		writeError(w, http.StatusBadRequest, "ends_at harus sesudah starts_at")
 		return

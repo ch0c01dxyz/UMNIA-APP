@@ -269,16 +269,28 @@ func TestPriceFreshSchema(t *testing.T) {
 			t.Fatalf("policy %s: want 1, got %d", want.policy, m)
 		}
 	}
-	// CHECK 5 (price_list_id, client_request_id, valid_to>valid_from,
-	// amount_minor>=0, currency) + UNIQUE 1 + FK 2 + EXCLUDE 1.
+	// CHECK 6 (price_list_id, client_request_id, valid_to>valid_from,
+	// amount_minor>=0, currency, finite bounds) + UNIQUE 1 + FK 2 +
+	// EXCLUDE 1.
 	var c, u, f, x int
 	if err := boot.QueryRow(
 		`SELECT count(*) FILTER (WHERE contype = 'c'), count(*) FILTER (WHERE contype = 'u'), count(*) FILTER (WHERE contype = 'f'), count(*) FILTER (WHERE contype = 'x')
 		 FROM pg_constraint WHERE conrelid = 'price_versions'::regclass`).Scan(&c, &u, &f, &x); err != nil {
 		t.Fatalf("constraints price_versions: %v", err)
 	}
-	if c != 5 || u != 1 || f != 2 || x != 1 {
-		t.Fatalf("constraints price_versions: want CHECK 5 + UNIQUE 1 + FK 2 + EXCLUDE 1, got CHECK %d + UNIQUE %d + FK %d + EXCLUDE %d", c, u, f, x)
+	if c != 6 || u != 1 || f != 2 || x != 1 {
+		t.Fatalf("constraints price_versions: want CHECK 6 + UNIQUE 1 + FK 2 + EXCLUDE 1, got CHECK %d + UNIQUE %d + FK %d + EXCLUDE %d", c, u, f, x)
+	}
+	// CHECK finite bernama: kedua batas harus finite (isfinite).
+	// Tanpa ini, 'infinity' lolos sebagai valid_to/valid_from meski
+	// interval diklaim finite — temuan reviewer F2-01-D.
+	var finiteDef string
+	if err := boot.QueryRow(
+		`SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = 'price_versions_finite_bounds' AND contype = 'c'`).Scan(&finiteDef); err != nil {
+		t.Fatalf("cek CHECK finite bernama: %v", err)
+	}
+	if !strings.Contains(finiteDef, "isfinite(valid_from)") || !strings.Contains(finiteDef, "isfinite(valid_to)") {
+		t.Fatalf("price_versions_finite_bounds: want isfinite(valid_from) AND isfinite(valid_to), got %s", finiteDef)
 	}
 	if err := boot.QueryRow(
 		`SELECT count(*) FROM pg_constraint WHERE conname = 'price_versions_no_overlap' AND contype = 'x'`).Scan(&n); err != nil {
@@ -436,9 +448,11 @@ func TestPriceRLSAndPermissions(t *testing.T) {
 		t.Fatalf("INSERT harga FK lintas tenant: want 23503, got code %q err %v", code, err)
 	}
 	// CHECK: amount negatif, currency bukan [A-Z]{3}, price_list
-	// bukan 'standard', kunci berkoma/spasi, valid_to <= valid_from
-	// → 23514. (CHECK dievaluasi sebelum UNIQUE/EXCLUDE, jadi
-	// interval boleh apa saja di sini.)
+	// bukan 'standard', kunci berkoma/spasi, valid_to <= valid_from,
+	// batas infinity → 23514. (CHECK dievaluasi sebelum
+	// UNIQUE/EXCLUDE, jadi interval boleh apa saja di sini; interval
+	// infinity sengaja tidak overlap fixture supaya hanya CHECK
+	// finite yang bisa menolak.)
 	type checkCase struct {
 		name      string
 		list, key string
@@ -456,6 +470,8 @@ func TestPriceRLSAndPermissions(t *testing.T) {
 		{"kunci berspasi", "standard", "chk key", "2027-01-01T00:00:00Z", "2027-02-01T00:00:00Z", 150000, "IDR"},
 		{"valid_to sama dengan valid_from", "standard", "chk-eq", "2027-01-01T00:00:00Z", "2027-01-01T00:00:00Z", 150000, "IDR"},
 		{"valid_to sebelum valid_from", "standard", "chk-rev", "2027-02-01T00:00:00Z", "2027-01-01T00:00:00Z", 150000, "IDR"},
+		{"valid_to infinity", "standard", "chk-inf-to", "2030-01-01T00:00:00Z", "infinity", 150000, "IDR"},
+		{"valid_from -infinity", "standard", "chk-inf-from", "-infinity", "2026-11-01T00:00:00Z", 150000, "IDR"},
 	} {
 		q := `INSERT INTO price_versions (workspace_id, catalog_item_id, price_list_id, client_request_id, valid_from, valid_to, amount_minor, currency)
 			VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`
@@ -1419,4 +1435,210 @@ func TestPriceQuoteFaults(t *testing.T) {
 	assertFlatError(t, body, "quote gagal dihitung")
 	// Perilaku 422 tetap berbeda dari 500: total overflow pada draft
 	// yang sah (bukan fault) sudah dibuktikan TestPriceQuoteArithmetic.
+}
+
+// TestPriceFiniteBoundsRerunInstallsOnOld008: tabel 008 LAMA (tanpa
+// CHECK finite — keadaan reviewer: 008 sudah diterapkan sebelum CHECK
+// ini ada) + baris finite nyata: rerun file 008 BARU lewat psql ASLI
+// tanpa -1 (jalur autocommit Linux native) exit 0, memasang constraint
+// bernama, dan mempertahankan baris/recorded_at/keamanan/constraint
+// lain/marker. Yang diverifikasi definisi hasil, bukan hanya jumlah
+// marker — marker 008 lama tidak membuktikan validasi baru ini ada.
+func TestPriceFiniteBoundsRerunInstallsOnOld008(t *testing.T) {
+	boot := bootstrapDB(t)
+	bootURL := os.Getenv("BUSINESS_BOOTSTRAP_DATABASE_URL")
+	if bootURL == "" {
+		t.Skip("BUSINESS_BOOTSTRAP_DATABASE_URL tidak disetel")
+	}
+
+	// Cleanup didaftarkan SEBELUM fixture disisipkan.
+	cust := "33333333-4444-5555-6666-777777777778"
+	item := "33333333-4444-5555-6666-777777777779"
+	price1 := "33333333-4444-5555-6666-77777777777a"
+	price2 := "33333333-4444-5555-6666-77777777777b"
+	t.Cleanup(func() {
+		_, _ = boot.Exec(`DELETE FROM price_versions WHERE id IN ($1, $2)`, price1, price2)
+		_, _ = boot.Exec(`DELETE FROM catalog_items WHERE id = $1`, item)
+		_, _ = boot.Exec(`DELETE FROM parties WHERE id = $1`, cust)
+		// Jaring pengaman: pastikan CHECK finite ada lagi sesudah tes,
+		// apa pun hasil langkah di tengah (abaikan galat).
+		_, _ = boot.Exec(`ALTER TABLE price_versions DROP CONSTRAINT IF EXISTS price_versions_finite_bounds, ADD CONSTRAINT price_versions_finite_bounds CHECK (isfinite(valid_from) AND isfinite(valid_to))`)
+	})
+
+	env := setupPrice(t)
+	ws := env.wsA
+	// Keadaan 008 LAMA: tanpa CHECK finite. Satu-satunya perbedaan
+	// dari 008 lama yang sesungguhnya adalah riwayat file, bukan
+	// definisi tabel — definisi tanpa constraint INILAH keadaan lama.
+	if _, err := boot.Exec(`ALTER TABLE price_versions DROP CONSTRAINT IF EXISTS price_versions_finite_bounds`); err != nil {
+		t.Fatalf("bangun keadaan 008 lama: %v", err)
+	}
+	var n int
+	if err := boot.QueryRow(`SELECT count(*) FROM pg_constraint WHERE conname = 'price_versions_finite_bounds'`).Scan(&n); err != nil || n != 0 {
+		t.Fatalf("keadaan 008 lama: want 0 CHECK finite, got %d (%v)", n, err)
+	}
+	if _, err := boot.Exec(`INSERT INTO parties (id, workspace_id, type, display_name) VALUES ($1, $2, 'customer', 'Pelanggan Finite Rerun')`, cust, ws); err != nil {
+		t.Fatalf("fixture party: %v", err)
+	}
+	if _, err := boot.Exec(`INSERT INTO catalog_items (id, workspace_id, sku, name, unit, status) VALUES ($1, $2, 'SKU-FINITE-RERUN', 'Barang Finite Rerun', 'pcs', 'active')`, item, ws); err != nil {
+		t.Fatalf("fixture item: %v", err)
+	}
+	if _, err := boot.Exec(`INSERT INTO price_versions (id, workspace_id, catalog_item_id, price_list_id, client_request_id, valid_from, valid_to, recorded_at, amount_minor, currency)
+		VALUES ($1, $2, $3, 'standard', 'fb-rerun-1', '2026-11-10T02:00:00Z', '2026-12-10T02:00:00Z', '2026-11-07T02:00:00Z', 150000, 'IDR')`, price1, ws, item); err != nil {
+		t.Fatalf("fixture price 1: %v", err)
+	}
+	if _, err := boot.Exec(`INSERT INTO price_versions (id, workspace_id, catalog_item_id, price_list_id, client_request_id, valid_from, valid_to, recorded_at, amount_minor, currency)
+		VALUES ($1, $2, $3, 'standard', 'fb-rerun-2', '2026-12-10T02:00:00Z', '2027-01-10T02:00:00Z', '2026-11-07T02:00:00Z', 175000, 'IDR')`, price2, ws, item); err != nil {
+		t.Fatalf("fixture price 2: %v", err)
+	}
+	before := priceSnapshot(t, boot)
+	if !strings.Contains(before["prices"], "fb-rerun-1") || !strings.Contains(before["prices"], "fb-rerun-2") {
+		t.Fatalf("snapshot sebelum rerun tidak memuat fixture harga: %q", before["prices"])
+	}
+	if strings.Contains(before["constraints"], "price_versions_finite_bounds") {
+		t.Fatalf("snapshot sebelum rerun seharusnya tanpa CHECK finite: %q", before["constraints"])
+	}
+
+	code, out := runPsqlFile(t, bootURL, "migrations/008_price_versions.sql")
+	if code != 0 {
+		t.Fatalf("rerun 008: want exit 0, got %d (%s)", code, out)
+	}
+	// Definisi hasil: CHECK bernama ada dan memakai isfinite pada
+	// kedua batas — bukan hanya jumlah marker.
+	var def string
+	if err := boot.QueryRow(`SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = 'price_versions_finite_bounds' AND contype = 'c'`).Scan(&def); err != nil {
+		t.Fatalf("cek CHECK finite sesudah rerun: %v", err)
+	}
+	if !strings.Contains(def, "isfinite(valid_from)") || !strings.Contains(def, "isfinite(valid_to)") {
+		t.Fatalf("price_versions_finite_bounds: want isfinite(valid_from) AND isfinite(valid_to), got %s", def)
+	}
+	after := priceSnapshot(t, boot)
+	// Baris (termasuk recorded_at), kebijakan, ACL, marker tidak
+	// berubah; semua constraint lama tetap ada — hanya CHECK finite
+	// yang bertambah.
+	if before["prices"] != after["prices"] || before["policies"] != after["policies"] || before["acl"] != after["acl"] || before["markers"] != after["markers"] {
+		t.Fatalf("rerun mengubah data/keamanan/marker:\nsebelum: %v\nsesudah: %v", before, after)
+	}
+	beforeSet := map[string]bool{}
+	for _, c := range strings.Split(before["constraints"], "\n") {
+		beforeSet[c] = true
+	}
+	afterSet := map[string]bool{}
+	for _, c := range strings.Split(after["constraints"], "\n") {
+		afterSet[c] = true
+	}
+	for c := range beforeSet {
+		if !afterSet[c] {
+			t.Fatalf("rerun menghilangkan constraint %q:\nsebelum: %q\nsesudah: %q", c, before["constraints"], after["constraints"])
+		}
+	}
+	if !afterSet["price_versions:price_versions_finite_bounds:c"] {
+		t.Fatalf("rerun tidak memasang CHECK finite: %q", after["constraints"])
+	}
+	// has_permission tetap berfungsi sesudah rerun.
+	var ok bool
+	if err := boot.QueryRow(`SELECT app.has_permission($1, $2, 'manage_business_data')`, ws, env.ownerID).Scan(&ok); err != nil || !ok {
+		t.Fatalf("has_permission sesudah rerun: want true, got %v (%v)", ok, err)
+	}
+}
+
+// TestPriceFiniteBoundsRerunRejectsInvalid: tabel 008 LAMA + satu
+// baris nonfinite yang sudah COMMITTED (fixture sintetis terisolasi
+// milik tes ini saja): rerun file 008 BARU lewat psql ASLI tanpa -1
+// HARUS gagal nonzero dan TIDAK mengubah baris apa pun atau
+// menghilangkan constraint yang sudah ada — satu ALTER DROP...ADD
+// atomik: ADD gagal validasi, DROP ikut batal. Sesudah baris fixture
+// invalid dihapus, rerun valid berhasil dan memasang CHECK finite.
+// Transaksi implisit satu Exec driver bukan bukti jalur autocommit
+// CLI — tes ini memakai psql asli.
+func TestPriceFiniteBoundsRerunRejectsInvalid(t *testing.T) {
+	boot := bootstrapDB(t)
+	bootURL := os.Getenv("BUSINESS_BOOTSTRAP_DATABASE_URL")
+	if bootURL == "" {
+		t.Skip("BUSINESS_BOOTSTRAP_DATABASE_URL tidak disetel")
+	}
+
+	// Cleanup didaftarkan SEBELUM fixture disisipkan.
+	cust := "44444444-5555-6666-7777-888888888889"
+	item := "44444444-5555-6666-7777-88888888888a"
+	priceOK := "44444444-5555-6666-7777-88888888888b"
+	priceBad := "44444444-5555-6666-7777-88888888888c"
+	t.Cleanup(func() {
+		_, _ = boot.Exec(`DELETE FROM price_versions WHERE id IN ($1, $2)`, priceOK, priceBad)
+		_, _ = boot.Exec(`DELETE FROM catalog_items WHERE id = $1`, item)
+		_, _ = boot.Exec(`DELETE FROM parties WHERE id = $1`, cust)
+		// Jaring pengaman: pulihkan CHECK finite bila baris invalid
+		// sudah tidak ada (abaikan galat bila masih ada).
+		_, _ = boot.Exec(`ALTER TABLE price_versions DROP CONSTRAINT IF EXISTS price_versions_finite_bounds, ADD CONSTRAINT price_versions_finite_bounds CHECK (isfinite(valid_from) AND isfinite(valid_to))`)
+	})
+
+	env := setupPrice(t)
+	ws := env.wsA
+	// Keadaan 008 LAMA: tanpa CHECK finite.
+	if _, err := boot.Exec(`ALTER TABLE price_versions DROP CONSTRAINT IF EXISTS price_versions_finite_bounds`); err != nil {
+		t.Fatalf("bangun keadaan 008 lama: %v", err)
+	}
+	if _, err := boot.Exec(`INSERT INTO parties (id, workspace_id, type, display_name) VALUES ($1, $2, 'customer', 'Pelanggan Finite Invalid')`, cust, ws); err != nil {
+		t.Fatalf("fixture party: %v", err)
+	}
+	if _, err := boot.Exec(`INSERT INTO catalog_items (id, workspace_id, sku, name, unit, status) VALUES ($1, $2, 'SKU-FINITE-INVALID', 'Barang Finite Invalid', 'pcs', 'active')`, item, ws); err != nil {
+		t.Fatalf("fixture item: %v", err)
+	}
+	if _, err := boot.Exec(`INSERT INTO price_versions (id, workspace_id, catalog_item_id, price_list_id, client_request_id, valid_from, valid_to, recorded_at, amount_minor, currency)
+		VALUES ($1, $2, $3, 'standard', 'fb-ok', '2026-11-10T02:00:00Z', '2026-12-10T02:00:00Z', '2026-11-07T02:00:00Z', 150000, 'IDR')`, priceOK, ws, item); err != nil {
+		t.Fatalf("fixture price finite: %v", err)
+	}
+	// Baris nonfinite yang sudah COMMITTED (Exec bootstrap autocommit):
+	// valid_to infinity. Hanya fixture tes ini; bukan data reviewer.
+	if _, err := boot.Exec(`INSERT INTO price_versions (id, workspace_id, catalog_item_id, price_list_id, client_request_id, valid_from, valid_to, recorded_at, amount_minor, currency)
+		VALUES ($1, $2, $3, 'standard', 'fb-invalid', '2027-01-01T00:00:00Z', 'infinity', '2026-11-07T02:00:00Z', 150000, 'IDR')`, priceBad, ws, item); err != nil {
+		t.Fatalf("fixture price nonfinite: %v", err)
+	}
+	before := priceSnapshot(t, boot)
+	if !strings.Contains(before["prices"], "fb-ok") || !strings.Contains(before["prices"], "fb-invalid") {
+		t.Fatalf("snapshot sebelum rerun tidak memuat fixture harga: %q", before["prices"])
+	}
+	beforeOK, ok := readPrice(t, boot, ws, priceOK)
+	if !ok {
+		t.Fatalf("baca baris finite sebelum rerun: tidak ditemukan")
+	}
+
+	// Rerun HARUS gagal nonzero — gagal eksplisit untuk review, bukan
+	// penghapusan/perbaikan diam-diam atas baris invalid.
+	code, out := runPsqlFile(t, bootURL, "migrations/008_price_versions.sql")
+	if code == 0 {
+		t.Fatalf("rerun 008 dengan baris nonfinite: want exit bukan 0, got 0 (%s)", out)
+	}
+	t.Logf("rerun 008 dengan baris nonfinite: psql exit %d (diharapkan bukan 0)", code)
+	after := priceSnapshot(t, boot)
+	if !reflect.DeepEqual(before, after) {
+		t.Fatalf("rerun gagal mengubah snapshot:\nsebelum: %v\nsesudah: %v", before, after)
+	}
+	// CHECK finite tetap tidak ada (ADD gagal → DROP ikut batal);
+	// constraint lain + baris utuh (sudah dibuktikan DeepEqual).
+	if strings.Contains(after["constraints"], "price_versions_finite_bounds") {
+		t.Fatalf("rerun gagal seharusnya tidak memasang CHECK finite: %q", after["constraints"])
+	}
+
+	// Hapus HANYA baris fixture invalid milik tes ini, lalu rerun
+	// valid harus berhasil dan memasang CHECK finite.
+	if _, err := boot.Exec(`DELETE FROM price_versions WHERE id = $1`, priceBad); err != nil {
+		t.Fatalf("hapus baris fixture invalid: %v", err)
+	}
+	code, out = runPsqlFile(t, bootURL, "migrations/008_price_versions.sql")
+	if code != 0 {
+		t.Fatalf("rerun valid sesudah hapus fixture: want exit 0, got %d (%s)", code, out)
+	}
+	var def string
+	if err := boot.QueryRow(`SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = 'price_versions_finite_bounds' AND contype = 'c'`).Scan(&def); err != nil {
+		t.Fatalf("cek CHECK finite sesudah rerun valid: %v", err)
+	}
+	if !strings.Contains(def, "isfinite(valid_from)") || !strings.Contains(def, "isfinite(valid_to)") {
+		t.Fatalf("price_versions_finite_bounds: want isfinite(valid_from) AND isfinite(valid_to), got %s", def)
+	}
+	// Baris finite tetap ada dengan recorded_at utuh.
+	afterOK, ok := readPrice(t, boot, ws, priceOK)
+	if !ok || !reflect.DeepEqual(beforeOK, afterOK) {
+		t.Fatalf("baris finite sesudah rerun valid: want tidak berubah %v, got %v (ok=%v)", beforeOK, afterOK, ok)
+	}
 }

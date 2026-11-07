@@ -10,6 +10,11 @@
 -- dan tidak ada harga open-ended di slice ini — v1 yang valid_to-nya
 -- NULL tidak bisa digantikan (interval tak berbatas selalu overlap
 -- dengan versi berikutnya), jadi R0 yang mengizinkan NULL dicabut.
+-- Batas finite ditegakkan di database oleh CHECK bernama
+-- price_versions_finite_bounds (isfinite kedua batas), bukan hanya
+-- oleh validasi HTTP: INSERT langsung lewat role runtime dengan
+-- valid_to/valid_from infinity ditolak 23514. Rerun file ini memasang
+-- CHECK tersebut juga pada tabel 008 lama (lihat ALTER di bawah).
 -- Koreksi umum tidak ada: interval baru yang overlap dengan interval
 -- yang sudah ada ditolak; yang diizinkan hanya interval baru yang
 -- berdekatan (valid_from == valid_to interval sebelumnya) atau tidak
@@ -67,10 +72,26 @@ CREATE TABLE IF NOT EXISTS price_versions (
   amount_minor      BIGINT NOT NULL CHECK (amount_minor >= 0),
   currency          TEXT NOT NULL CHECK (currency ~ '\A[A-Z]{3}\Z'),
   CHECK (valid_to > valid_from),
+  CONSTRAINT price_versions_finite_bounds CHECK (isfinite(valid_from) AND isfinite(valid_to)),
   UNIQUE (workspace_id, client_request_id),
   FOREIGN KEY (workspace_id, catalog_item_id) REFERENCES catalog_items (workspace_id, id),
   CONSTRAINT price_versions_no_overlap EXCLUDE USING gist (workspace_id WITH =, catalog_item_id WITH =, price_list_id WITH =, tstzrange(valid_from, valid_to, '[)') WITH &&)
 );
+
+-- Batas finite pada tabel 008 LAMA: CREATE TABLE IF NOT EXISTS di
+-- atas tidak mengubah tabel yang sudah dibuat sebelum CHECK ini ada,
+-- jadi rerun file ini memasangnya lewat SATU ALTER DROP...ADD berikut
+-- (pola penggantian CHECK atomik F1-04A). Satu statement: bila ada
+-- baris nonfinite yang sudah ter-commit, ADD gagal validasi dan DROP
+-- ikut batal, sehingga tidak ada data/constraint yang hilang dan
+-- rerun gagal eksplisit (bukan perbaikan diam-diam). Jangan pecah
+-- menjadi DROP dan ADD terpisah: pada jalur autocommit psql tanpa
+-- -1, DROP yang sudah ter-commit tidak bisa dibatalkan bila ADD
+-- sesudahnya gagal.
+ALTER TABLE price_versions
+    DROP CONSTRAINT IF EXISTS price_versions_finite_bounds,
+    ADD CONSTRAINT price_versions_finite_bounds
+        CHECK (isfinite(valid_from) AND isfinite(valid_to));
 
 -- RLS: semua akses data tenant harus lewat workspace aktif + membership
 -- (pola 002_identity/004/005/006/007). FORCE penting karena tabel

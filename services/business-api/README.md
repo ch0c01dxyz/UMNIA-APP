@@ -507,7 +507,11 @@ server, tanpa klaim ISO tervalidasi, tanpa konversi. `recorded_at`
 adalah SATU-SATUNYA fakta temporal baris ini (tidak ada kolom
 `created_at`/`updated_at`); API mengikatnya ke cutoff
 `clock_timestamp()` yang ditangkap sesudah workspace lock.
-`valid_from` DAN `valid_to` keduanya NOT NULL dan finite: tidak ada
+`valid_from` DAN `valid_to` keduanya NOT NULL dan finite
+(ditegakkan CHECK bernama `price_versions_finite_bounds`:
+`isfinite(valid_from) AND isfinite(valid_to)`; rerun 008 memasang
+CHECK ini pada tabel 008 lama — bila ada baris nonfinite yang sudah
+ter-commit, rerun gagal eksplisit dan tidak mengubah data): tidak ada
 harga open-ended di slice ini (v1 dengan `valid_to` NULL tidak bisa
 digantikan karena interval tak berbatas selalu overlap dengan versi
 berikutnya). Koreksi umum tidak ada: yang diizinkan hanya interval

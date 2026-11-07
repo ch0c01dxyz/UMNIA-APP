@@ -80,15 +80,15 @@ func checkDatabase(db *sql.DB) string {
 		return "error"
 	}
 	var count int
-	// Ketujuh versi wajib ada: database yang berhenti di 006 (tanpa
-	// aset/hold 007) belum siap, sama seperti database kosong atau
-	// yang berhenti di 002/003/004/005. Marker tambahan di luar
-	// ketujuh nama ini (mis. migrasi masa depan) tidak menggagalkan
-	// readiness — hitungan hanya menyaring ketujuh nama tersebut, dan
+	// Kedelapan versi wajib ada: database yang berhenti di 007 (tanpa
+	// versi harga 008) belum siap, sama seperti database kosong atau
+	// yang berhenti di 002/003/004/005/006. Marker tambahan di luar
+	// kedelapan nama ini (mis. migrasi masa depan) tidak menggagalkan
+	// readiness — hitungan hanya menyaring kedelapan nama tersebut, dan
 	// version adalah primary key sehingga hitungan itu cukup.
 	err := db.QueryRowContext(ctx,
-		`SELECT count(*) FROM schema_migrations WHERE version IN ('001_init', '002_identity', '003_modules', '004_module_installations', '005_core_master_data', '006_rental_contracts', '007_asset_availability')`).Scan(&count)
-	if err != nil || count != 7 {
+		`SELECT count(*) FROM schema_migrations WHERE version IN ('001_init', '002_identity', '003_modules', '004_module_installations', '005_core_master_data', '006_rental_contracts', '007_asset_availability', '008_price_versions')`).Scan(&count)
+	if err != nil || count != 8 {
 		return "error"
 	}
 	return "ok"
@@ -144,6 +144,9 @@ func newMux(db *sql.DB) *http.ServeMux {
 	mux.HandleFunc("POST /workspaces/{id}/rental/contracts/{draft_id}/holds", srv.authMiddleware(srv.handleCreateHold))
 	mux.HandleFunc("POST /workspaces/{id}/rental/holds/{hold_id}/release", srv.authMiddleware(srv.handleReleaseHold))
 	mux.HandleFunc("GET /workspaces/{id}/rental/holds", srv.authMiddleware(srv.handleListHolds))
+	mux.HandleFunc("POST /workspaces/{id}/catalog/items/{item_id}/prices", srv.authMiddleware(srv.handleCreatePrice))
+	mux.HandleFunc("GET /workspaces/{id}/catalog/items/{item_id}/prices", srv.authMiddleware(srv.handleListPrices))
+	mux.HandleFunc("GET /workspaces/{id}/rental/contracts/{draft_id}/quote", srv.authMiddleware(srv.handleGetRentalQuote))
 	mux.HandleFunc("POST /workspaces/{id}/invites", srv.authMiddleware(srv.handleCreateInvite))
 	mux.HandleFunc("POST /invites/accept", srv.authMiddleware(srv.handleAcceptInvite))
 	mux.HandleFunc("GET /workspaces/{id}/audit", srv.authMiddleware(srv.handleListAudit))

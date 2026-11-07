@@ -344,8 +344,10 @@ bersamaan → satu 201 + satu 200, tepat satu baris + satu audit. Kunci
 berbeda dengan item+periode yang sama boleh keduanya 201: TIDAK ada
 perlindungan overlap/reservasi pada slice ini.
 
-**Yang belum ada:** harga (`price_versions` + snapshot agreed amount),
-stok kuantitas/ledger (F2-01-C baru menambah aset fisik + hold
+**Yang belum ada:** snapshot agreed amount yang mengikat (slice harga
+F2-01-D baru menambah penjadwalan `price_versions` + quote tak
+mengikat — lihat F2-01-D — bukan harga yang disepakati), stok
+kuantitas/ledger (F2-01-C baru menambah aset fisik + hold
 eksklusif + bacaan ketersediaan, bukan stok kuantitas), retur/rusak/
 hilang, finance, lifecycle kontrak, UI, dan pemberian entitlement
 nyata/billing. Gate F1 penuh tetap belum lengkap; gate double-booking
@@ -484,12 +486,144 @@ dengan lock wait membuktikan TTL dijangkar SESUDAH lock: permintaan
 yang dimulai sebelum deadline, menunggu lock, dan mendapat lock
 sesudah deadline → hold lama tidak lagi memblokir (201, bukan 409).
 
-**Yang belum ada:** harga (`price_versions` + snapshot agreed
-amount), perjanjian mengikat, handover, retur/rusak/hilang, finance,
+**Yang belum ada:** snapshot agreed amount yang mengikat + transisi
+draft (slice harga F2-01-D baru menambah penjadwalan `price_versions`
++ quote tak mengikat — lihat F2-01-D — bukan harga yang disepakati),
+perjanjian mengikat, handover, retur/rusak/hilang, finance,
 stock ledger / stok kuantitas / stok fraksional, status maintenance/
 retired + condition history, lokasi/cabang, UI, dan pemberian
 entitlement nyata/billing. "Rental bekerja" operasional masih
-membutuhkan slice harga, handover, dan retur.
+membutuhkan slice agreed amount, handover, dan retur.
+
+## F2-01-D — penjadwalan tarif finite + quote tak mengikat (migrasi 008)
+
+Migrasi `008_price_versions` menambah tabel `price_versions` milik
+bootstrap dengan RLS (FORCE). Satu baris `price_versions` adalah
+satu interval tarif finite `[valid_from, valid_to)` untuk satu
+`catalog_items` pada `price_list_id` = `'standard'`, dengan
+`amount_minor` BIGINT (integer minor, tanpa float) dan `currency`
+kode 3 huruf ASCII `[A-Z]{3}` yang wajib diisi — tanpa default
+server, tanpa klaim ISO tervalidasi, tanpa konversi. `recorded_at`
+adalah SATU-SATUNYA fakta temporal baris ini (tidak ada kolom
+`created_at`/`updated_at`); API mengikatnya ke cutoff
+`clock_timestamp()` yang ditangkap sesudah workspace lock.
+`valid_from` DAN `valid_to` keduanya NOT NULL dan finite: tidak ada
+harga open-ended di slice ini (v1 dengan `valid_to` NULL tidak bisa
+digantikan karena interval tak berbatas selalu overlap dengan versi
+berikutnya). Koreksi umum tidak ada: yang diizinkan hanya interval
+baru yang berdekatan (`valid_from` == `valid_to` interval
+sebelumnya — "schedule a new tariff interval") atau tidak
+bersinggungan; interval yang overlap → 409. Versi harga BUKAN harga
+yang disepakati (agreed amount), BUKAN snapshot yang disimpan, BUKAN
+pengikat harga, dan BUKAN transisi status draft. Quote dihitung dari
+versi ini pada saat dibaca dan tidak disimpan; byte respons quote
+bukan fakta yang disepakati. FK komposit tenant (`workspace_id,
+catalog_item_id` → `catalog_items`) menolak tautan lintas-tenant.
+Non-overlap dijaga constraint `price_versions_no_overlap`:
+`EXCLUDE USING gist (workspace_id WITH =, catalog_item_id WITH =,
+price_list_id WITH =, tstzrange(valid_from, valid_to, '[)') WITH &&)`
+(butuh ekstensi `btree_gist`, dibuat oleh migrasi lewat akun
+bootstrap). Runtime hanya SELECT + INSERT; baris/tarif/batas versi
+lama tidak berubah lewat operasi runtime apa pun. Tanpa UPDATE,
+DELETE, TRUNCATE.
+
+Tiga rute terautentikasi, semua di bawah `authMiddleware` +
+`beginTenant` dengan envelope error Bahasa Indonesia yang datar:
+
+- `POST /workspaces/{id}/catalog/items/{item_id}/prices` — body
+  strict JSON 16 KiB `{"valid_from":"...","valid_to":"...",
+  "amount_minor":"150000","currency":"IDR"}` + header
+  `Idempotency-Key` wajib (tepat satu nilai, case-sensitive).
+  `amount_minor` WAJIB string desimal kanonis (`"0"` atau
+  `[1-9][0-9]*`, maks `"9223372036854775807"`, tanpa leading zero,
+  tanda, whitespace, fraksi, eksponen, null, atau JSON number —
+  angka JSON gagal di decode); `currency` tepat 3 huruf A-Z, tanpa
+  trim/default. Tanggal wajib RFC3339 zona eksplisit, tahun input
+  DAN tahun ternormalisasi UTC 1–9999, `valid_to > valid_from`.
+  Administrasi harga adalah master data core: `manage_business_data`
+  (owner + manager, disetujui tiket ini untuk administrasi harga
+  ini) + cek `view_workspace` eksplisit; TANPA syarat aktivasi/
+  entitlement modul. Item hilang/lintas-tenant → 404, item own
+  archived → 409 (hanya untuk jadwal BARU; replay kunci lama tetap
+  200). 201 mengembalikan baris versi.
+- `GET /workspaces/{id}/catalog/items/{item_id}/prices` — list
+  `view_workspace`, pagination seperti F2-01-A, urutan
+  `(valid_from, id)`. Item hilang/lintas-tenant → 404; item own
+  yang diarsipkan tetap bisa di-list (histori harga terbaca).
+- `GET /workspaces/{id}/rental/contracts/{draft_id}/quote` —
+  `view_workspace` saja (owner/manager/kasir), tanpa lock, tanpa
+  tulis/audit, tanpa syarat instalasi/entitlement Rental. Versi
+  efektif dipilih pada `starts_at` draft tersimpan (`valid_from <=
+  starts_at < valid_to`, daftar `'standard'`); draft hilang/
+  lintas-tenant → 404, tanpa versi efektif → 404 `harga efektif
+  tidak ditemukan`. Respons: `{draft_id, catalog_item_id,
+  price_version_id, valid_from, valid_to, recorded_at,
+  amount_minor, currency, unit:"24h", units, total_minor,
+  starts_at, ends_at}` — uang string, `units` JSON number,
+  tanggal UTC RFC3339Nano. Quote tetap tersedia untuk item yang
+  diarsipkan dan sesudah revoke/deactivate. Quote TIDAK
+  mengotorisasi penyewaan.
+
+**Guard create (di dalam handler, bukan helper terpisah).** Satu
+transaksi READ COMMITTED: otorisasi `manage_business_data` → lock
+baris workspace yang sama dengan B3 (`FOR UPDATE`, sesudah
+otorisasi, dipegang sampai commit/rollback) → tangkap SATU
+`clock_timestamp()` dalam pernyataan terpisah SESUDAH lock →
+cek `view_workspace` eksplisit → lookup kunci idempotency di bawah
+lock → cek referensi item → cek no-backdate → cek overlap → INSERT
++ audit → commit. Galat query guard → 500 terkendali.
+
+**Tanpa backdating.** `valid_from` yang sudah lewat pada cutoff
+(jam DB sesudah lock) → 400, tanpa baris/audit. Tidak ada grace
+period, clamping, atau pengisian historis; alur backdate/retroaktif
+khusus tetap pekerjaan masa depan yang dibekukan terpisah. Replay
+didahulukan SEBELUM cek no-backdate: kunci sama + payload
+ternormalisasi sama → 200 baris asli yang tak berubah SEKALIPUN
+`valid_from` kini sudah lewat; kunci sama + payload beda → 409.
+Tes lock-wait cutoff membuktikan cutoff dijangkar SESUDAH lock:
+permintaan yang dimulai saat `valid_from` masih di masa depan,
+menunggu lock, dan mendapat lock sesudah `valid_from` lewat → 400.
+
+**Aritmetika eksak.** Tarif = `amount_minor` per unit 24 jam waktu
+berlalu dari instant UTC ternormalisasi draft; unit = ceil exact
+integer dari selisih UnixMicro (`diff_us / 86400000000` + 1 bila
+ada sisa), minimum 1 unit; total = rate × unit dengan pemeriksaan
+overflow SEBELUM perkalian. `time.Duration`/`Sub` dan float
+Hours/Ceil dilarang (Sub jenuh ~292 tahun; selisih UnixMicro
+maksimum 315537897599999999 < MaxInt64; units maksimum 3652059).
+Total di luar batas int64 → 422 `total di luar batas yang dapat
+diwakili` (bukan 500). Rate 0 → total `"0"`. Tanpa prorata per jam,
+tanpa pembulatan kalender, tanpa zona waktu workspace, tanpa
+pembagian 100. Contoh sintetis: rate `"150000"`, 72 jam → 3 unit →
+total `"450000"`; 49 jam → 3 unit; 24 jam + 1 mikrodetik → 2 unit.
+
+**Replay & overlap.** Lookup kunci terjadi SEBELUM cek arsip,
+no-backdate, dan overlap. Kunci sama + item/tanggal/amount/currency
+ternormalisasi yang sama → 200 baris asli (tanpa tulis/audit/
+perubahan timestamp); kunci sama + payload beda → 409. Overlap
+dicek di bawah lock; pelanggaran EXCLUDE (SQLSTATE 23P01 pada
+`price_versions_no_overlap`) → 409 `interval harga bertabrakan`;
+galat lain → 500 tanpa detail SQL.
+
+**Audit.** `price_version_created` (entity_type `price_version`,
+details hanya `catalog_item_id`) ditulis dalam transaksi yang sama
+dengan INSERT; gagal audit → rollback penuh (500). Quote dan list
+tidak menulis audit.
+
+**Konkurensi.** Workspace lock menyerikan semua create versi harga
+dalam satu workspace: dua create yang overlap → satu 201 + satu
+409, satu audit. Kunci sama paralel → satu 201 + satu 200.
+EXCLUDE adalah backstop independen untuk penulis yang melewati
+lock (termasuk SQL langsung).
+
+**Yang belum ada:** snapshot agreed amount yang mengikat + transisi
+draft (gate berikutnya, tiket terpisah), handover, retur/rusak/
+hilang, finance/invoice/pembayaran, stock ledger/kuantitas,
+perhitungan pajak/biaya/deposit, administrasi multi `price_list`,
+konversi mata uang, harga open-ended, koreksi harga umum, alur
+backdate/retroaktif, framework billing/bitemporal luas, kondisi/
+maintenance/lokasi, UI, otoritas grant nyata/entitlement. Tidak ada
+yang dibangun di sini.
 
 ## Yang sengaja TIDAK ada di F1-03
 

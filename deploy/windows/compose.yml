@@ -103,6 +103,8 @@ services:
       - /migrations/006_rental_contracts.sql
       - -f
       - /migrations/007_asset_availability.sql
+      - -f
+      - /migrations/008_price_versions.sql
     depends_on:
       postgres-business:
         condition: service_healthy

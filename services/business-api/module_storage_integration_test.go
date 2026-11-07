@@ -63,8 +63,9 @@ func tenantTx(t *testing.T, db *sql.DB, ws, subject string) *sql.Tx {
 }
 
 // TestModuleStorageFreshSchema: migrasi 004 pada database segar —
-// empat marker, dua tabel kosong, pemilik bootstrap (bukan runtime),
-// RLS ENABLE+FORCE, hak efektif runtime, kebijakan, dan seed izin.
+// enam marker (001-006), dua tabel kosong, pemilik bootstrap (bukan
+// runtime), RLS ENABLE+FORCE, hak efektif runtime, kebijakan, dan seed
+// izin.
 func TestModuleStorageFreshSchema(t *testing.T) {
 	boot := bootstrapDB(t)
 
@@ -74,8 +75,8 @@ func TestModuleStorageFreshSchema(t *testing.T) {
 	).Scan(&markers); err != nil {
 		t.Fatalf("baca markers: %v", err)
 	}
-	if markers != "001_init,002_identity,003_modules,004_module_installations,005_core_master_data" {
-		t.Fatalf("markers: want 001_init,002_identity,003_modules,004_module_installations,005_core_master_data, got %s", markers)
+	if markers != "001_init,002_identity,003_modules,004_module_installations,005_core_master_data,006_rental_contracts" {
+		t.Fatalf("markers: want 001_init,002_identity,003_modules,004_module_installations,005_core_master_data,006_rental_contracts, got %s", markers)
 	}
 	for _, table := range []string{"module_installations", "module_entitlements"} {
 		var n int

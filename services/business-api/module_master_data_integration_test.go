@@ -94,7 +94,7 @@ func countRows(t *testing.T, boot *sql.DB, table, ws string) int {
 	return n
 }
 
-// TestMasterDataFreshSchema: migrasi 005 pada database segar — lima
+// TestMasterDataFreshSchema: migrasi 005+006 pada database segar — enam
 // marker, dua tabel kosong, pemilik bootstrap (bukan runtime), RLS
 // ENABLE+FORCE, hak efektif runtime (SELECT/INSERT saja), kebijakan,
 // CHECK, dan seed izin manage_business_data.
@@ -107,8 +107,8 @@ func TestMasterDataFreshSchema(t *testing.T) {
 	).Scan(&markers); err != nil {
 		t.Fatalf("baca markers: %v", err)
 	}
-	if markers != "001_init,002_identity,003_modules,004_module_installations,005_core_master_data" {
-		t.Fatalf("markers: want 001_init,002_identity,003_modules,004_module_installations,005_core_master_data, got %s", markers)
+	if markers != "001_init,002_identity,003_modules,004_module_installations,005_core_master_data,006_rental_contracts" {
+		t.Fatalf("markers: want 001_init,002_identity,003_modules,004_module_installations,005_core_master_data,006_rental_contracts, got %s", markers)
 	}
 	for _, table := range []string{"parties", "catalog_items"} {
 		var n int
@@ -188,14 +188,16 @@ func TestMasterDataFreshSchema(t *testing.T) {
 		t.Fatalf("policies master data: want 4, got %d", n)
 	}
 	// CHECK: parties 2 (type, display_name), catalog_items 4 (sku,
-	// name, unit, status) + 1 UNIQUE (workspace_id, sku).
+	// name, unit, status) + 1 UNIQUE (workspace_id, sku). Migrasi 006
+	// menambah UNIQUE (workspace_id, id) pada kedua tabel sebagai
+	// target FK komposit rental_contracts, jadi UNIQUE menjadi 1 dan 2.
 	for _, want := range []struct {
 		table  string
 		checks int
 		unique int
 	}{
-		{"parties", 2, 0},
-		{"catalog_items", 4, 1},
+		{"parties", 2, 1},
+		{"catalog_items", 4, 2},
 	} {
 		var c, u int
 		if err := boot.QueryRow(

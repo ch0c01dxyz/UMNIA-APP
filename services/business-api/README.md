@@ -262,6 +262,93 @@ atau endpoint kontrak di slice ini.
 **Yang belum ada:** stok/harga/finance, lifecycle dan endpoint kontrak
 rental, UI, supplier, dan pemberian entitlement nyata/billing.
 
+## F2-01-B — kontrak rental DRAFT + guard (migrasi 006)
+
+Migrasi `006_rental_contracts` menambah tabel `rental_contracts`
+milik bootstrap dengan RLS (FORCE): satu baris mencatat pelanggan,
+barang, dan periode yang dimaksud — status `draft` saja (CHECK),
+tanpa stok, harga, uang, handover, pembayaran, ketersediaan fisik,
+atau lifecycle. Satu baris `catalog_items` BUKAN unit fisik
+(`physical_asset` belum ada); draft tidak mereservasi apa pun dan
+tidak membuktikan overlap aman. Runtime hanya SELECT + INSERT; tanpa
+UPDATE/DELETE/TRUNCATE. Draft immutable pada slice ini; tidak ada
+penghapusan history pada operasi modul. FK komposit tenant
+(`workspace_id, customer_id` → `parties`, `workspace_id,
+catalog_item_id` → `catalog_items`) menolak tautan lintas-tenant;
+keduanya memakai `UNIQUE (workspace_id, id)` baru pada tabel core
+sebagai target. `client_request_id` (1–128 karakter ASCII
+[huruf, digit, `-`, `_`, `.`, `:`]) ditegakkan juga oleh CHECK.
+
+Dua rute terautentikasi, semua di bawah `authMiddleware` +
+`beginTenant` dengan envelope error Bahasa Indonesia yang datar:
+
+- `POST /workspaces/{id}/rental/contracts` — body strict JSON 16 KiB
+  `{"customer_id":"...","catalog_item_id":"...","starts_at":"...",
+  "ends_at":"..."}` (tanggal RFC3339 dengan zona waktu eksplisit,
+  tahun 1–9999) + header `Idempotency-Key` wajib (tepat satu nilai).
+  201 mengembalikan baris tersimpan (`id`, `workspace_id`,
+  `customer_id`, `catalog_item_id`, `client_request_id`, `status`
+  `draft`, `starts_at`, `ends_at`, `created_at`, `updated_at`).
+  Timestamp dikembalikan dalam UTC dengan presisi mikrodetik bila ada
+  (RFC3339Nano): `Format(RFC3339)` menghilangkan fraksi detik,
+  sehingga respons akan tidak konsisten dengan nilai ternormalisasi
+  yang dipakai perbandingan replay.
+- `GET /workspaces/{id}/rental/contracts` — list histori terurut
+  `(created_at, id)`, pagination seperti F2-01-A. Hanya membership +
+  `view_workspace`; TIDAK mensyaratkan instalasi/entitlement Rental
+  aktif, supaya draft tetap terbaca sesudah deaktivasi/pencabutan.
+
+**Guard (di dalam handler create, bukan helper terpisah).** Satu
+transaksi READ COMMITTED: otorisasi `manage_business_data` (owner +
+manager) → lock baris workspace yang sama dengan B3 (`FOR UPDATE`,
+sesudah otorisasi, dipegang sampai commit/rollback) → instalasi
+`rental.basic` harus aktif → entitlement versi aktif yang tepat dicek
+ulang tiap request (revoke memblokir create baru walau baris instalasi
+masih aktif) → cek `view_workspace` eksplisit sebelum payload draft
+maupun referensi core diakses (sukses bacaan bukan bukti otorisasi)
+→ lookup kunci idempotency → cek referensi → INSERT + audit →
+commit. Galat query guard → 500 terkendali, bukan 403 dan bukan
+"diizinkan". Tidak ada grant nyata; entitlement di tes hanya fixture
+sintetis terisolasi.
+
+**Idempotensi.** Kunci yang sama + keempat field ternormalisasi yang
+sama (customer, item, starts, ends) → 200 baris asli, tanpa tulis /
+audit / perubahan timestamp. Kunci yang sama + body berbeda → 409.
+Instant dinormalisasi ke UTC presisi mikrodetik SEBELUM perbandingan
+periode dan replay (presisi penyimpanan TIMESTAMPTZ): representasi
+zona waktu yang setara dan nanodetik yang terpotong ikut replay 200.
+Replay TIDAK memvalidasi ulang status referensi: barang yang
+belakangan diarsipkan tidak menghalangi replay selama otorisasi/guard
+masih berlaku. Otorisasi, instalasi aktif, entitlement, dan izin baca
+selalu diperiksa SEBELUM replay: caller yang dicabut/dinonaktifkan
+mendapat 403 bahkan untuk kunci lama. `ends_at <= starts_at` sesudah
+normalisasi → 400. Kunci duplikat di DB (`UNIQUE (workspace_id,
+client_request_id)`) hanya backstop; galat insert tak terduga → 500
+tanpa menebak jenis galat dari teks pesan.
+
+**Rujukan.** Pelanggan dibaca `workspace_id + id + type='customer'`;
+hilang/lintas-tenant → 404 dengan pesan yang sama. Barang dibaca
+`workspace_id + id` TANPA filter status di WHERE supaya arsip bisa
+dibedakan dari hilang: hilang/lintas-tenant → 404, milik sendiri tapi
+`archived` → 409. Audit `rental_contract_created` (entity_id UUID
+draft, details hanya `customer_id` + `catalog_item_id`) ditulis dalam
+transaksi yang sama; gagal audit → rollback penuh (500).
+
+**Perilaku B3 dipertahankan.** Aktivasi ulang versi sama yang sudah
+aktif sesudah revoke tetap 200 snapshot intent (tanpa audit baru);
+aktivasi dari inactive sesudah revoke 403; draft baru sesudah revoke
+403. Create vs deactivate dan create vs revoke (kooperatif) diserialkan
+lock baris workspace: create commit dulu → draft tercatat sebagai
+histori; mutasi commit dulu → create 403. Kunci sama yang dibuat
+bersamaan → satu 201 + satu 200, tepat satu baris + satu audit. Kunci
+berbeda dengan item+periode yang sama boleh keduanya 201: TIDAK ada
+perlindungan overlap/reservasi pada slice ini.
+
+**Yang belum ada:** harga (`price_versions` + snapshot agreed amount),
+stok/ketersediaan/reservasi, retur/rusak/hilang, finance, lifecycle
+kontrak, UI, dan pemberian entitlement nyata/billing. Gate F1 penuh
+dan gate double-booking tetap belum lengkap.
+
 ## Yang sengaja TIDAK ada di F1-03
 
 UI login/workspace (web masih skeleton F1-01), mailer undangan (token

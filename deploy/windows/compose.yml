@@ -99,6 +99,8 @@ services:
       - /migrations/004_module_installations.sql
       - -f
       - /migrations/005_core_master_data.sql
+      - -f
+      - /migrations/006_rental_contracts.sql
     depends_on:
       postgres-business:
         condition: service_healthy

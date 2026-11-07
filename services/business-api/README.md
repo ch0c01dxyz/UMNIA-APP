@@ -345,9 +345,151 @@ berbeda dengan item+periode yang sama boleh keduanya 201: TIDAK ada
 perlindungan overlap/reservasi pada slice ini.
 
 **Yang belum ada:** harga (`price_versions` + snapshot agreed amount),
-stok/ketersediaan/reservasi, retur/rusak/hilang, finance, lifecycle
-kontrak, UI, dan pemberian entitlement nyata/billing. Gate F1 penuh
-dan gate double-booking tetap belum lengkap.
+stok kuantitas/ledger (F2-01-C baru menambah aset fisik + hold
+eksklusif + bacaan ketersediaan, bukan stok kuantitas), retur/rusak/
+hilang, finance, lifecycle kontrak, UI, dan pemberian entitlement
+nyata/billing. Gate F1 penuh tetap belum lengkap; gate double-booking
+kini tertutup untuk hold HIDUP pada unit teridentifikasi (lihat
+F2-01-C), bukan untuk booking sumber daya umum.
+
+## F2-01-C — aset fisik + hold eksklusif + ketersediaan (migrasi 007)
+
+Migrasi `007_asset_availability` menambah tabel `physical_assets`
+dan `rental_holds` milik bootstrap dengan RLS (FORCE). Satu baris
+`physical_assets` adalah satu unit fisik yang teridentifikasi
+(serial, unik per workspace, case-sensitive seperti SKU) dari satu
+`catalog_items` — tanpa kolom status dan tanpa kolom kuantitas:
+ketersediaan diturunkan dari hold yang aktif. Satu baris
+`rental_holds` menahan satu unit untuk periode satu draft yang sudah
+ada (periode disalin dari draft, bukan input): status `held` /
+`released` / `expired`, `expires_at` = cutoff pembuatan + 24 jam
+(server-side, immutable). Hold BUKAN harga, perjanjian, handover,
+pembayaran, atau rental operasional; tidak ada stok kuantitas/ledger,
+status maintenance/retired, atau condition history di slice ini.
+FK komposit tenant (`workspace_id, draft_id` → `rental_contracts`,
+`workspace_id, asset_id` → `physical_assets`, `workspace_id,
+catalog_item_id` → `catalog_items`) menolak tautan lintas-tenant;
+`rental_contracts` dan `physical_assets` mendapat `UNIQUE
+(workspace_id, id)` baru sebagai target FK. `client_request_id`
+(aturan `Idempotency-Key` yang sama dengan draft) dan `serial`
+(nonblank, maks 64 karakter) ditegakkan juga oleh CHECK. Overlap
+dijaga constraint `rental_holds_no_overlap`: `EXCLUDE USING gist
+(workspace_id WITH =, asset_id WITH =, period WITH &&) WHERE
+(status = 'held')` pada kolom `period tstzrange` generated half-open
+`[)` (butuh ekstensi `btree_gist`, dibuat oleh migrasi lewat akun
+bootstrap). TIDAK ADA predikat berubah-waktu di dalam constraint:
+baris `held` yang kedaluwarsa tetap `held` sampai sebuah tulis
+membaliknya. Aset runtime hanya SELECT + INSERT; hold runtime SELECT
++ INSERT + UPDATE kolom (`status`, `updated_at`) saja — kebijakan
+UPDATE membatasi baris yang boleh diubah pada yang sedang `held`
+(USING) dan hasil pada `released`/`expired` (WITH CHECK), jadi
+workspace/draft/aset/periode/kunci/`expires_at`/waktu pembuatan
+tidak bisa diubah runtime. Tanpa UPDATE tabel, DELETE, TRUNCATE.
+
+Enam rute terautentikasi, semua di bawah `authMiddleware` +
+`beginTenant` dengan envelope error Bahasa Indonesia yang datar:
+
+- `POST /workspaces/{id}/assets` — body strict JSON 16 KiB
+  `{"catalog_item_id":"...","serial":"SN-001"}`. Registrasi aset
+  adalah master data core: `manage_business_data` (owner + manager)
+  + cek `view_workspace` eksplisit sebelum bacaan item; TANPA syarat
+  aktivasi/entitlement modul. Item hilang/lintas-tenant → 404,
+  item own archived → 409, serial duplikat → 409 (hanya SQLSTATE
+  23505 pada constraint serial). 201 mengembalikan baris aset.
+  Serial unik BUKAN idempotensi HTTP penuh.
+- `GET /workspaces/{id}/assets` — list `view_workspace`,
+  pagination seperti F2-01-A, urutan `(created_at, id)`.
+- `GET /workspaces/{id}/assets/{asset_id}/availability?starts_at=...
+  &ends_at=...` — `view_workspace` saja (tanpa aktivasi/entitlement).
+  Validasi tanggal sama dengan draft (RFC3339 zona eksplisit, tahun
+  input DAN tahun ternormalisasi UTC 1–9999, `ends>starts` sesudah
+  normalisasi). `available` = tidak ada hold `held` yang belum
+  kedaluwarsa (cutoff jam database) dengan periode tumpang tindih
+  `[)`. Advisory (TOCTOU): hanya create hold yang menjamin.
+- `POST /workspaces/{id}/rental/contracts/{draft_id}/holds` — body
+  strict JSON 16 KiB `{"asset_id":"..."}` + header `Idempotency-Key`
+  wajib (tepat satu nilai, case-sensitive). 201 hold / 200 replay
+  kunci sama. Lihat guard di bawah.
+- `POST /workspaces/{id}/rental/holds/{hold_id}/release` — release
+  `held` → `released` + audit → 200. Release ulang (sudah released
+  atau efektif expired) → 200 catatan saat ini, tanpa audit kedua
+  dan tanpa perpanjangan TTL. Release TIDAK mensyaratkan instalasi/
+  entitlement Rental aktif, supaya owner/manager yang sah tetap bisa
+  membebaskan hold sesudah revoke/deactivate. Hold hilang/
+  lintas-tenant → 404.
+- `GET /workspaces/{id}/rental/holds` — list histori
+  `view_workspace`, tanpa syarat aktivasi/entitlement; pagination
+  seperti F2-01-A.
+
+**Guard hold create (di dalam handler, bukan helper terpisah).**
+Satu transaksi READ COMMITTED: otorisasi `manage_business_data` →
+lock baris workspace yang sama dengan B3 (`FOR UPDATE`, sesudah
+otorisasi, dipegang sampai commit/rollback) → instalasi
+`rental.basic` harus aktif → entitlement versi aktif yang tepat
+dicek ulang tiap request → cek `view_workspace` eksplisit → lookup
+kunci idempotency di bawah lock → cek referensi → lazy expiry →
+INSERT + audit → commit. Galat query guard → 500 terkendali.
+
+**Jam (cutoff).** Satu nilai `clock_timestamp()` database diambil
+dalam pernyataan TERPISAH sesudah lock didapat, lalu dipakai ulang
+untuk expiry, `created_at`/`updated_at`, dan perhitungan TTL
+(`expires_at` = cutoff + 24 jam). `now()`/`CURRENT_TIMESTAMP`
+adalah `transaction_timestamp` (awal transaksi) dan TIDAK boleh
+dipakai: permintaan yang menunggu lock melewati deadline harus
+melihat hold lama sebagai kedaluwarsa. `expires_at` immutable
+sesudah dibuat; tidak ada renewal — hold kedaluwarsa diganti hold
+baru.
+
+**Replay & status efektif.** Lookup kunci terjadi SEBELUM cek
+kelayakan referensi dan SEBELUM mutasi lazy-expiry. Kunci sama +
+`draft_id`/`asset_id` ternormalisasi yang sama → 200 hold EFEKTIF
+saat ini (tanpa tulis/audit/perpanjangan TTL); kunci sama + payload
+beda → 409. Status yang dibaca adalah status efektif: baris `held`
+yang `expires_at`-nya sudah lewat pada cutoff diekspos sebagai
+`expired` walau persistensi malasnya belum berjalan; pembacaan
+(GET/list/replay) tidak memutasi baris dan `updated_at` tidak ikut
+berubah oleh expiry turunan waktu. Replay adalah bacaan histori:
+replay tetap 200 sesudah item diarsipkan, selama otorisasi/guard
+masih berlaku (revoke/deactivate → 403 bahkan untuk kunci lama);
+kunci yang sudah released/expired tetap terikat pada hold aslinya.
+
+**Hold baru vs replay.** Hold BARU membaca ulang status item saat
+ini: item yang diarsipkan sesudah draft dibuat → 409 (berbeda dengan
+replay). Hold baru untuk periode draft yang sudah berakhir
+(`ends_at <= cutoff`) → 409; `starts_at` TIDAK wajib di masa depan
+— periode yang sedang berjalan boleh ditahan. Item aset harus sama
+dengan item draft (beda → 409). Lazy expiry di bawah lock membalik
+hold basi milik workspace itu (`held` + `expires_at <= cutoff` →
+`expired`, `updated_at` = cutoff) sebelum INSERT; bila insert/audit
+gagal, cleanup ikut rollback. Pelanggaran EXCLUDE (SQLSTATE 23P01
+pada `rental_holds_no_overlap`) → 409 `unit tidak tersedia pada
+periode itu`; galat lain → 500 tanpa detail SQL.
+
+**Audit.** `asset_registered` (entity_type `physical_asset`),
+`hold_created` dan `hold_released` (entity_type `rental_hold`,
+details hanya id draft/aset) ditulis dalam transaksi yang sama
+dengan mutasi; gagal audit → rollback penuh (500). Lazy expiry
+TIDAK menulis audit: itu transisi waktu turunan, bukan aksi aktor;
+status + `updated_at` baris adalah catatannya. Release yang
+menemukan hold efektif kedaluwarsa boleh mem-persist expiry-nya
+dalam transaksi yang sama, tanpa audit release.
+
+**Konkurensi.** Workspace lock menyerikan semua mutasi hold dalam
+satu workspace: dua staf, aset + periode sama, kunci berbeda → satu
+201 + satu 409, satu audit. Kunci sama paralel → satu 201 + satu
+200. EXCLUDE adalah backstop independen untuk penulis yang melewati
+lock (termasuk SQL langsung). Create vs deactivate/revoke
+diserialkan urutan lock seperti draft. Tes expiry dekat cutoff
+dengan lock wait membuktikan TTL dijangkar SESUDAH lock: permintaan
+yang dimulai sebelum deadline, menunggu lock, dan mendapat lock
+sesudah deadline → hold lama tidak lagi memblokir (201, bukan 409).
+
+**Yang belum ada:** harga (`price_versions` + snapshot agreed
+amount), perjanjian mengikat, handover, retur/rusak/hilang, finance,
+stock ledger / stok kuantitas / stok fraksional, status maintenance/
+retired + condition history, lokasi/cabang, UI, dan pemberian
+entitlement nyata/billing. "Rental bekerja" operasional masih
+membutuhkan slice harga, handover, dan retur.
 
 ## Yang sengaja TIDAK ada di F1-03
 

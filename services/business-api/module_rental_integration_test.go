@@ -279,8 +279,8 @@ func TestRentalFreshSchema(t *testing.T) {
 	).Scan(&markers); err != nil {
 		t.Fatalf("baca markers: %v", err)
 	}
-	if markers != "001_init,002_identity,003_modules,004_module_installations,005_core_master_data,006_rental_contracts" {
-		t.Fatalf("markers: want 001_init,002_identity,003_modules,004_module_installations,005_core_master_data,006_rental_contracts, got %s", markers)
+	if markers != "001_init,002_identity,003_modules,004_module_installations,005_core_master_data,006_rental_contracts,007_asset_availability" {
+		t.Fatalf("markers: want 001_init,002_identity,003_modules,004_module_installations,005_core_master_data,006_rental_contracts,007_asset_availability, got %s", markers)
 	}
 	var n int
 	if err := boot.QueryRow(`SELECT count(*) FROM rental_contracts`).Scan(&n); err != nil {
@@ -344,17 +344,17 @@ func TestRentalFreshSchema(t *testing.T) {
 	if n != 2 {
 		t.Fatalf("policies rental_contracts: want 2, got %d", n)
 	}
-	// CHECK 3 (status, client_request_id, ends_at>starts_at) + UNIQUE 1
-	// (workspace_id, client_request_id) + FK 3 (workspace, komposit
-	// customer, komposit item).
+	// CHECK 3 (status, client_request_id, ends_at>starts_at) + UNIQUE 2
+	// (workspace_id, client_request_id; workspace_id, id dari 007) +
+	// FK 3 (workspace, komposit customer, komposit item).
 	var c, u, f int
 	if err := boot.QueryRow(
 		`SELECT count(*) FILTER (WHERE contype = 'c'), count(*) FILTER (WHERE contype = 'u'), count(*) FILTER (WHERE contype = 'f')
 		 FROM pg_constraint WHERE conrelid = 'rental_contracts'::regclass`).Scan(&c, &u, &f); err != nil {
 		t.Fatalf("constraints rental_contracts: %v", err)
 	}
-	if c != 3 || u != 1 || f != 3 {
-		t.Fatalf("constraints rental_contracts: want CHECK 3 + UNIQUE 1 + FK 3, got CHECK %d + UNIQUE %d + FK %d", c, u, f)
+	if c != 3 || u != 2 || f != 3 {
+		t.Fatalf("constraints rental_contracts: want CHECK 3 + UNIQUE 2 + FK 3, got CHECK %d + UNIQUE %d + FK %d", c, u, f)
 	}
 	// UNIQUE (workspace_id, id) pada kedua tabel core ada (target FK
 	// komposit).

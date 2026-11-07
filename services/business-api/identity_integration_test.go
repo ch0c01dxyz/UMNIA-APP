@@ -382,9 +382,24 @@ func TestReadyzRequiresMigratedSchema(t *testing.T) {
 	if got := checkDatabase(only005DB); got != "error" {
 		t.Fatalf("checkDatabase pada DB 005-saja: want error, got %q", got)
 	}
-	// Database dengan keenam marker + satu marker tambahan yang tidak
-	// dikenal tetap siap (F2-01-B). umnia_extra disediakan setup
-	// CI/lokal (001-006 + marker '999_future').
+	// Database yang berhenti di 006 (tanpa aset/hold 007) juga belum
+	// siap (F2-01-C). umnia_006only disediakan setup CI/lokal
+	// (001+002+003+004+005+006 saja).
+	u.Path = "/umnia_006only"
+	only006DB, err := sql.Open("pgx", u.String())
+	if err != nil {
+		t.Skipf("tidak bisa membuka umnia_006only: %v", err)
+	}
+	defer only006DB.Close()
+	if err := only006DB.Ping(); err != nil {
+		t.Skipf("umnia_006only tidak tersedia: %v", err)
+	}
+	if got := checkDatabase(only006DB); got != "error" {
+		t.Fatalf("checkDatabase pada DB 006-saja: want error, got %q", got)
+	}
+	// Database dengan ketujuh marker + satu marker tambahan yang tidak
+	// dikenal tetap siap (F2-01-C). umnia_extra disediakan setup
+	// CI/lokal (001-007 + marker '999_future').
 	u.Path = "/umnia_extra"
 	extraDB, err := sql.Open("pgx", u.String())
 	if err != nil {
@@ -395,7 +410,7 @@ func TestReadyzRequiresMigratedSchema(t *testing.T) {
 		t.Skipf("umnia_extra tidak tersedia: %v", err)
 	}
 	if got := checkDatabase(extraDB); got != "ok" {
-		t.Fatalf("checkDatabase pada DB 6 marker + ekstra: want ok, got %q", got)
+		t.Fatalf("checkDatabase pada DB 7 marker + ekstra: want ok, got %q", got)
 	}
 }
 

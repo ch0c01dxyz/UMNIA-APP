@@ -286,6 +286,23 @@ func (s *server) handleCreateHold(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "barang tidak aktif")
 		return
 	}
+	// Unit yang sedang keluar (custody out terbuka) tidak bisa
+	// ditahan lagi, untuk periode apa pun. Cek ini sesudah replay +
+	// referensi (404 didahulukan) dan sebelum cek akhir periode.
+	// Replay kunci yang sudah consumed tetap 200 di atas, bukan
+	// hold baru — cek ini hanya untuk hold BARU.
+	var assetOut bool
+	err = tx.QueryRow(
+		`SELECT EXISTS(SELECT 1 FROM rental_custody WHERE workspace_id = $1 AND asset_id = $2 AND status = 'out')`,
+		wsID, assetID).Scan(&assetOut)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "transaksi gagal")
+		return
+	}
+	if assetOut {
+		writeError(w, http.StatusConflict, "unit sedang dipinjam")
+		return
+	}
 	// Hold baru untuk periode draft yang sudah berakhir → 409.
 	// starts_at TIDAK wajib di masa depan: periode yang sedang
 	// berjalan (starts lalu, ends masih depan) tetap boleh ditahan.
@@ -420,6 +437,13 @@ func (s *server) handleReleaseHold(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "transaksi gagal")
+		return
+	}
+	// Hold yang sudah dipakai serah terima (consumed) TIDAK bisa
+	// dilepas: 409 eksplisit, SEBELUM no-op terminal generik di
+	// bawah (yang akan menjawab 200 untuk released/expired).
+	if existing.Status == "consumed" {
+		writeError(w, http.StatusConflict, "hold sudah dipakai serah terima")
 		return
 	}
 	eff := effectiveHoldStatus(existing.Status, existing.ExpiresAt, cutoff)

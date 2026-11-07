@@ -281,8 +281,8 @@ func TestAssetFreshSchema(t *testing.T) {
 	).Scan(&markers); err != nil {
 		t.Fatalf("baca markers: %v", err)
 	}
-	if markers != "001_init,002_identity,003_modules,004_module_installations,005_core_master_data,006_rental_contracts,007_asset_availability,008_price_versions,009_rental_agreed_prices" {
-		t.Fatalf("markers: want 001_init,002_identity,003_modules,004_module_installations,005_core_master_data,006_rental_contracts,007_asset_availability,008_price_versions,009_rental_agreed_prices, got %s", markers)
+	if markers != "001_init,002_identity,003_modules,004_module_installations,005_core_master_data,006_rental_contracts,007_asset_availability,008_price_versions,009_rental_agreed_prices,010_rental_custody" {
+		t.Fatalf("markers: want 001_init,002_identity,003_modules,004_module_installations,005_core_master_data,006_rental_contracts,007_asset_availability,008_price_versions,009_rental_agreed_prices,010_rental_custody, got %s", markers)
 	}
 	for _, table := range []string{"physical_assets", "rental_holds"} {
 		var n int
@@ -403,18 +403,17 @@ func TestAssetFreshSchema(t *testing.T) {
 		t.Fatalf("constraints physical_assets: want CHECK 1 + UNIQUE 2 + FK 2, got CHECK %d + UNIQUE %d + FK %d", c, u, f)
 	}
 	// CHECK 3 (status, client_request_id, ends_at>starts_at) +
-	// UNIQUE 1 (workspace_id, client_request_id) + FK 3 +
-	// EXCLUDE 1 pada rental_holds. (UNIQUE (workspace_id, id) hanya
-	// ditambahkan pada physical_assets + rental_contracts sebagai
-	// target FK komposit; tidak ada FK yang merujuk rental_holds.)
+	// UNIQUE 2 (workspace_id, client_request_id + workspace_id, id)
+	// + FK 3 + EXCLUDE 1 pada rental_holds. UNIQUE (workspace_id,
+	// id) ditambahkan 010 sebagai target FK komposit custody.hold_id.
 	var x int
 	if err := boot.QueryRow(
 		`SELECT count(*) FILTER (WHERE contype = 'c'), count(*) FILTER (WHERE contype = 'u'), count(*) FILTER (WHERE contype = 'f'), count(*) FILTER (WHERE contype = 'x')
 		 FROM pg_constraint WHERE conrelid = 'rental_holds'::regclass`).Scan(&c, &u, &f, &x); err != nil {
 		t.Fatalf("constraints rental_holds: %v", err)
 	}
-	if c != 3 || u != 1 || f != 3 || x != 1 {
-		t.Fatalf("constraints rental_holds: want CHECK 3 + UNIQUE 1 + FK 3 + EXCLUDE 1, got CHECK %d + UNIQUE %d + FK %d + EXCLUDE %d", c, u, f, x)
+	if c != 3 || u != 2 || f != 3 || x != 1 {
+		t.Fatalf("constraints rental_holds: want CHECK 3 + UNIQUE 2 + FK 3 + EXCLUDE 1, got CHECK %d + UNIQUE %d + FK %d + EXCLUDE %d", c, u, f, x)
 	}
 	if err := boot.QueryRow(
 		`SELECT count(*) FROM pg_constraint WHERE conname = 'rental_holds_no_overlap' AND contype = 'x'`).Scan(&n); err != nil {
@@ -495,6 +494,16 @@ func TestAssetRerunPreservesData(t *testing.T) {
 	code, out := runPsqlFile(t, bootURL, "migrations/007_asset_availability.sql")
 	if code != 0 {
 		t.Fatalf("rerun 007: want exit 0, got %d (%s)", code, out)
+	}
+	// Pulihkan keadaan akhir rantai: 010 memiliki perluasan 'consumed'
+	// pada CHECK + kebijakan UPDATE hold — rerun 007 saja
+	// mengembalikan versi 007 (tanpa 'consumed'), jadi 010 harus
+	// berjalan lagi sebelum snapshot sesudah diambil. Hanya rerun
+	// kumulatif 001-010 yang menjamin keadaan akhir; tes ini
+	// membuktikan rerun 007 + pemulihan 010 tidak mengubah state.
+	code, out = runPsqlFile(t, bootURL, "migrations/010_rental_custody.sql")
+	if code != 0 {
+		t.Fatalf("pulihkan 010 sesudah rerun 007: want exit 0, got %d (%s)", code, out)
 	}
 	after := assetSnapshot(t, boot)
 	if !reflect.DeepEqual(before, after) {

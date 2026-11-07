@@ -117,6 +117,7 @@ jobs:
             -c "CREATE DATABASE umnia_006only OWNER umnia_business;" \
             -c "CREATE DATABASE umnia_007only OWNER umnia_business;" \
             -c "CREATE DATABASE umnia_008only OWNER umnia_business;" \
+            -c "CREATE DATABASE umnia_009only OWNER umnia_business;" \
             -c "CREATE DATABASE umnia_extra OWNER umnia_business;"
           PGPASSWORD=ci-bootstrap-only psql -h localhost -U postgres -d umnia_test \
             -v ON_ERROR_STOP=1 -1 \
@@ -128,7 +129,8 @@ jobs:
             -f services/business-api/migrations/006_rental_contracts.sql \
             -f services/business-api/migrations/007_asset_availability.sql \
             -f services/business-api/migrations/008_price_versions.sql \
-            -f services/business-api/migrations/009_rental_agreed_prices.sql
+            -f services/business-api/migrations/009_rental_agreed_prices.sql \
+            -f services/business-api/migrations/010_rental_custody.sql
           # Fixture negatif readiness: database yang berhenti di 002
           # (tanpa registry 003) harus dilaporkan belum siap.
           PGPASSWORD=ci-bootstrap-only psql -h localhost -U postgres -d umnia_partial \
@@ -192,7 +194,20 @@ jobs:
             -f services/business-api/migrations/006_rental_contracts.sql \
             -f services/business-api/migrations/007_asset_availability.sql \
             -f services/business-api/migrations/008_price_versions.sql
-          # Fixture positif readiness (F2-01-E): kesembilan marker + satu
+          # Fixture negatif readiness (F2-01-F): database yang berhenti
+          # di 009 (tanpa custody serah terima 010) belum siap.
+          PGPASSWORD=ci-bootstrap-only psql -h localhost -U postgres -d umnia_009only \
+            -v ON_ERROR_STOP=1 -1 \
+            -f services/business-api/migrations/001_init.sql \
+            -f services/business-api/migrations/002_identity.sql \
+            -f services/business-api/migrations/003_modules.sql \
+            -f services/business-api/migrations/004_module_installations.sql \
+            -f services/business-api/migrations/005_core_master_data.sql \
+            -f services/business-api/migrations/006_rental_contracts.sql \
+            -f services/business-api/migrations/007_asset_availability.sql \
+            -f services/business-api/migrations/008_price_versions.sql \
+            -f services/business-api/migrations/009_rental_agreed_prices.sql
+          # Fixture positif readiness (F2-01-F): kesepuluh marker + satu
           # marker tambahan yang tidak dikenal harus tetap siap.
           PGPASSWORD=ci-bootstrap-only psql -h localhost -U postgres -d umnia_extra \
             -v ON_ERROR_STOP=1 -1 \
@@ -205,6 +220,7 @@ jobs:
             -f services/business-api/migrations/007_asset_availability.sql \
             -f services/business-api/migrations/008_price_versions.sql \
             -f services/business-api/migrations/009_rental_agreed_prices.sql \
+            -f services/business-api/migrations/010_rental_custody.sql \
             -c "INSERT INTO schema_migrations (version) VALUES ('999_future') ON CONFLICT (version) DO NOTHING;"
       - name: Test (integration gate)
         run: |

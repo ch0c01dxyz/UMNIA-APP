@@ -488,10 +488,12 @@ sesudah deadline → hold lama tidak lagi memblokir (201, bukan 409).
 
 **Yang belum ada:** transisi draft (fakta harga disepakati sudah ada —
 lihat F2-01-E — draft tetap tidak dimutasi), perjanjian mengikat,
-handover, retur/rusak/hilang, finance, stock ledger / stok kuantitas /
-stok fraksional, status maintenance/retired + condition history,
-lokasi/cabang, UI, dan pemberian entitlement nyata/billing. "Rental
-bekerja" operasional masih membutuhkan handover dan retur.
+rusak/hilang, finance, stock ledger / stok kuantitas / stok
+fraksional, status maintenance/retired + condition history,
+lokasi/cabang, UI, dan pemberian entitlement nyata/billing. Serah
+terima + pengembalian utuh sudah ada — lihat F2-01-F. "Rental
+bekerja" operasional masih membutuhkan transisi draft dan alur
+rusak/hilang.
 
 ## F2-01-D — penjadwalan tarif finite + quote tak mengikat (migrasi 008)
 
@@ -619,13 +621,14 @@ EXCLUDE adalah backstop independen untuk penulis yang melewati
 lock (termasuk SQL langsung).
 
 **Yang belum ada:** transisi draft (fakta harga disepakati sudah ada —
-lihat F2-01-E — draft tetap tidak dimutasi), handover, retur/rusak/
-hilang, finance/invoice/pembayaran, stock ledger/kuantitas,
-perhitungan pajak/biaya/deposit, administrasi multi `price_list`,
-konversi mata uang, harga open-ended, koreksi harga umum, alur
-backdate/retroaktif, framework billing/bitemporal luas, kondisi/
-maintenance/lokasi, UI, otoritas grant nyata/entitlement. Tidak ada
-yang dibangun di sini.
+lihat F2-01-E — draft tetap tidak dimutasi), rusak/hilang,
+finance/invoice/pembayaran, stock ledger/kuantitas, perhitungan
+pajak/biaya/deposit, administrasi multi `price_list`, konversi mata
+uang, harga open-ended, koreksi harga umum, alur backdate/retroaktif,
+framework billing/bitemporal luas, kondisi/maintenance/lokasi, UI,
+otoritas grant nyata/entitlement. Serah terima + pengembalian utuh
+sudah ada — lihat F2-01-F. Tidak ada yang dibangun di sini selain
+yang dijelaskan di bagian itu.
 
 ## F2-01-E — fakta harga disepakati (migrasi 009)
 
@@ -710,6 +713,108 @@ mulai di v2 memakai v2. Tes memakai versi lain yang terdaftar /
 total diubah / versi dari draft lain sebagai expected yang salah
 (→ 409), bukan sekuens quote v1-menjadi-v2 yang tidak didukung
 model beku ini.
+
+## F2-01-F — custody serah terima + pengembalian utuh (migrasi 010)
+
+Migrasi `010_rental_custody` menambah tabel `rental_custody` milik
+bootstrap dengan RLS (FORCE). Satu baris adalah SATU custody untuk
+satu draft Rental dan satu unit serial: status `out` saat diserahkan
+staf, `returned` saat dikembalikan utuh. Draft, fakta harga, versi
+harga, dan hold TIDAK dimutasi oleh custody — kecuali hold yang
+dipakai serah terima berubah menjadi `consumed` (status baru di
+010). Custody adalah catatan in-app oleh staf workspace
+(owner/manager), BUKAN consent/tanda tangan pelanggan, BUKAN
+perjanjian hukum, BUKAN invoice/pembayaran, BUKAN posting ledger,
+dan BUKAN jumlah yang disepakati baru. Satu custody per draft
+selamanya pada slice ini (UNIQUE workspace + draft); satu unit
+hanya boleh keluar sekali dalam satu waktu (partial UNIQUE INDEX
+workspace + aset WHERE status = 'out'). Koreksi/revisi/supersesi di
+luar slice — custody yang salah catat butuh alur koreksi
+terotorisasi di masa depan, bukan UPDATE runtime sembarangan.
+
+CHECK bernama mengikat status dengan kolom return: `out` berarti
+`returned_at`/`returned_by`/kunci return ketiganya NULL;
+`returned` berarti ketiganya terisi dan
+`returned_at >= handed_out_at`; kedua timestamp finite (CHECK
+bernama). FK komposit tenant ke draft, fakta harga, aset, dan hold;
+010 juga memasang UNIQUE(workspace_id, id) pada
+`rental_agreed_prices` dan `rental_holds` (pola 006/007/009) dan
+memperluas CHECK status hold menjadi
+`held`/`released`/`expired`/`consumed` plus WITH CHECK kebijakan
+UPDATE hold (satu ALTER + satu DO atomik, jadi rerun 010 pada
+tabel 007 lama mempertahankan data/ACL/histori). Runtime SELECT +
+INSERT + UPDATE kolom-terbatas (`status`, `returned_at`,
+`returned_by`, `return_client_request_id`) untuk transisi return;
+tanpa UPDATE tabel penuh, DELETE, TRUNCATE.
+
+Tiga rute terautentikasi, semua di bawah `authMiddleware` +
+`beginTenant` dengan envelope error Bahasa Indonesia yang datar:
+
+- `POST /workspaces/{id}/rental/contracts/{draft_id}/handover`
+  — body strict JSON 16 KiB `{"asset_id":"...", "hold_id":"..."}` +
+  header `Idempotency-Key` wajib (tepat satu nilai, case-sensitive).
+  Guard aksi Rental penuh: `manage_business_data` (owner + manager)
+  → lock baris workspace → SATU `clock_timestamp()` sesudah lock
+  (cutoff untuk `handed_out_at`) → instalasi `rental.basic` aktif
+  versi eksak + entitlement → cek `view_workspace` eksplisit →
+  lookup kunci replay → cek custody draft → baca draft + fakta
+  harga + hold + aset/item → INSERT custody + konsumsi hold
+  (UPDATE kondisional held → consumed) + audit → commit. Hak
+  Rental saat ini diperiksa SEBELUM replay, jadi replay sesudah
+  revoke/deactivate → 403. Handover baru mensyaratkan fakta harga
+  untuk draft yang sama (hilang → 409), rantai fakta cocok dengan
+  draft (pelanggan/item/periode), hold milik draft DAN aset yang
+  diminta, item saat ini aktif (diarsipkan → 409), hold hidup
+  (status mentah `held` dan `expires_at` sesudah cutoff), jendela
+  ketat `starts_at <= cutoff < ends_at` (dini/telat → 409, tanpa
+  grace window), dan unit belum keluar (→ 409). 201 mengembalikan
+  custody `out`.
+- `POST /workspaces/{id}/rental/contracts/{draft_id}/return`
+  — body kosong atau strict `{}` saja (tanpa timestamp/aktor/status/
+  biaya dari klien) + header `Idempotency-Key` wajib. SATU jalur
+  menyempit SELALU: `manage_business_data` + `view_workspace` +
+  lock baris workspace, TANPA gate instalasi/entitlement Rental —
+  owner/manager yang sah tetap bisa menerima unit sesudah
+  revoke/deactivate. Lookup kunci return (workspace-scoped)
+  SEBELUM transisi: kunci milik draft path yang sama → 200 catatan
+  itu tanpa tulis/audit; milik draft lain → 409. Return hanya
+  menutup custody `out` yang ada (UPDATE kondisional out →
+  returned + aktor/waktu/kunci return, tanpa SELECT FOR UPDATE) +
+  audit → commit. 200 mengembalikan custody `returned`. Return
+  keyspace TERPISAH dari keyspace handover (kolom berbeda).
+- `GET /workspaces/{id}/rental/contracts/{draft_id}/custody`
+  — `view_workspace` saja (owner/manager/kasir), tanpa lock,
+  tanpa tulis/audit, tanpa syarat instalasi/entitlement Rental.
+  Draft hilang/lintas-tenant → 404, draft own tanpa custody → 404
+  `custody tidak ditemukan`. Custody tetap terbaca sesudah
+  revoke/deactivate.
+
+**Replay.** Handover: kunci sama + draft + aset + hold yang sama →
+200 catatan SAAT INI (tanpa tulis/audit, bahkan bila custody sudah
+dikembalikan sesudahnya; hold consumed tidak divalidasi ulang).
+Perbedaan identitas apa pun → 409, termasuk kunci dipakai untuk
+draft lain. Kunci lain untuk draft yang sudah punya custody → 409.
+Return: kunci return sama + draft yang sama → 200 tanpa tulis/
+audit; kunci return milik draft lain → 409; draft sudah
+dikembalikan dengan kunci lain → 409.
+
+**Custody terbuka memblokir.** Selama custody `out` ada untuk
+sebuah aset, unit itu keluar secara fisik apa pun periode yang
+direncanakan atau TTL hold: bacaan ketersediaan mengembalikan
+`available: false` untuk periode apa pun, hold BARU → 409
+`unit sedang dipinjam`, handover draft lain untuk unit yang sama
+→ 409. Replay kunci hold yang sudah consumed tetap 200 (bukan
+hold baru). Hold `consumed` adalah terminal seperti
+released/expired: release hold consumed → 409 eksplisit, histori
+hold menampilkan `consumed` (tidak pernah diubah menjadi expired
+oleh cleanup), dan return TIDAK membuka lagi hold tersebut.
+Sesudah pengembalian nyata, unit bisa dipakai lagi tergantung hold
+lain yang masih hidup.
+
+**Yang belum ada:** transisi draft, perjanjian mengikat,
+rusak/hilang, finance/invoice/pembayaran, stock ledger/kuantitas,
+denda keterlambatan/deposit/pajak, koreksi/supersesi custody,
+maintenance/kondisi/lokasi, UI, otoritas grant nyata/entitlement.
 
 ## Yang sengaja TIDAK ada di F1-03
 

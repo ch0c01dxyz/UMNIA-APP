@@ -290,13 +290,18 @@ func (s *server) handleGetAssetAvailability(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	// Advisory: hanya hold HIDUP yang belum kedaluwarsa pada cutoff
-	// yang memblokir. Hasil ini bukan jaminan reservasi (TOCTOU) —
-	// hanya create hold yang menjamin.
+	// yang memblokir, ATAU custody out yang masih terbuka untuk aset
+	// yang sama (unit keluar secara fisik apa pun periode yang
+	// diminta — tidak ada asumsi pengembalian di masa depan). Hasil
+	// ini bukan jaminan reservasi (TOCTOU) — hanya create hold yang
+	// menjamin.
 	var blocked bool
 	err = tx.QueryRow(
 		`SELECT EXISTS(SELECT 1 FROM rental_holds
 		 WHERE workspace_id = $1 AND asset_id = $2 AND status = 'held' AND expires_at > $3
-		   AND period && tstzrange($4, $5, '[)'))`,
+		   AND period && tstzrange($4, $5, '[)'))
+		    OR EXISTS(SELECT 1 FROM rental_custody
+		 WHERE workspace_id = $1 AND asset_id = $2 AND status = 'out')`,
 		wsID, assetID, cutoff, starts, ends).Scan(&blocked)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "ketersediaan gagal dibaca")

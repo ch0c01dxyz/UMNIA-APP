@@ -107,6 +107,8 @@ services:
       - /migrations/008_price_versions.sql
       - -f
       - /migrations/009_rental_agreed_prices.sql
+      - -f
+      - /migrations/010_rental_custody.sql
     depends_on:
       postgres-business:
         condition: service_healthy

@@ -486,14 +486,12 @@ dengan lock wait membuktikan TTL dijangkar SESUDAH lock: permintaan
 yang dimulai sebelum deadline, menunggu lock, dan mendapat lock
 sesudah deadline → hold lama tidak lagi memblokir (201, bukan 409).
 
-**Yang belum ada:** snapshot agreed amount yang mengikat + transisi
-draft (slice harga F2-01-D baru menambah penjadwalan `price_versions`
-+ quote tak mengikat — lihat F2-01-D — bukan harga yang disepakati),
-perjanjian mengikat, handover, retur/rusak/hilang, finance,
-stock ledger / stok kuantitas / stok fraksional, status maintenance/
-retired + condition history, lokasi/cabang, UI, dan pemberian
-entitlement nyata/billing. "Rental bekerja" operasional masih
-membutuhkan slice agreed amount, handover, dan retur.
+**Yang belum ada:** transisi draft (fakta harga disepakati sudah ada —
+lihat F2-01-E — draft tetap tidak dimutasi), perjanjian mengikat,
+handover, retur/rusak/hilang, finance, stock ledger / stok kuantitas /
+stok fraksional, status maintenance/retired + condition history,
+lokasi/cabang, UI, dan pemberian entitlement nyata/billing. "Rental
+bekerja" operasional masih membutuhkan handover dan retur.
 
 ## F2-01-D — penjadwalan tarif finite + quote tak mengikat (migrasi 008)
 
@@ -620,14 +618,98 @@ dalam satu workspace: dua create yang overlap → satu 201 + satu
 EXCLUDE adalah backstop independen untuk penulis yang melewati
 lock (termasuk SQL langsung).
 
-**Yang belum ada:** snapshot agreed amount yang mengikat + transisi
-draft (gate berikutnya, tiket terpisah), handover, retur/rusak/
+**Yang belum ada:** transisi draft (fakta harga disepakati sudah ada —
+lihat F2-01-E — draft tetap tidak dimutasi), handover, retur/rusak/
 hilang, finance/invoice/pembayaran, stock ledger/kuantitas,
 perhitungan pajak/biaya/deposit, administrasi multi `price_list`,
 konversi mata uang, harga open-ended, koreksi harga umum, alur
 backdate/retroaktif, framework billing/bitemporal luas, kondisi/
 maintenance/lokasi, UI, otoritas grant nyata/entitlement. Tidak ada
 yang dibangun di sini.
+
+## F2-01-E — fakta harga disepakati (migrasi 009)
+
+Migrasi `009_rental_agreed_prices` menambah tabel
+`rental_agreed_prices` milik bootstrap dengan RLS (FORCE). Satu
+baris adalah SATU fakta harga disepakati untuk satu draft Rental
+yang tidak berubah: versi harga efektif, tarif, mata uang, unit,
+total, periode draft, identitas aturan, aktor staf, dan waktu
+pencatatan. Draft, hold, dan versi harga TIDAK dimutasi oleh
+penerimaan ini; tidak ada transisi status draft. Fakta ini adalah
+catatan in-app oleh staf workspace (owner/manager), BUKAN consent/
+tanda tangan pelanggan, BUKAN perjanjian hukum, BUKAN invoice/
+pembayaran, BUKAN posting ledger, BUKAN reservasi aset, dan BUKAN
+otorisasi handover. Kata "accept" di API tidak menambah otoritas
+keuangan apa pun. Satu fakta per draft selamanya pada slice ini
+(UNIQUE workspace + draft); koreksi/revisi/supersesi di luar slice —
+jalan yang didefinisikan hanyalah draft baru + penerimaan baru,
+tanpa membatalkan/mengubah fakta lama secara otomatis.
+
+`pricing_rule_version_id` adalah identifier aturan milik kode yang
+diperkenalkan tiket ini untuk algoritma elapsed-24h/ceil F2-01-D
+(durasi elapsed mikrodetik UTC, ceil 24 jam, minimum 1 unit, total
+int64 terperiksa); nilainya TEPAT `'elapsed_24h_ceil_v1'` (CHECK
+bernama) — bukan baris `business_rule_versions`, bukan UUID, bukan
+rule engine generik. `price_version_id` mengidentifikasi interval
+tarif/mata uang, bukan pengganti identitas aturan (docs/02:24).
+Invarian total lintas-kolom memakai cast numerik eksak
+(`total_minor::numeric = amount_minor::numeric * units::numeric`,
+CHECK bernama) supaya perkalian BIGINT besar tidak overflow di
+tengah; tanpa float. `starts_at`/`ends_at`/`accepted_at` ketiganya
+NOT NULL dan finite (CHECK bernama `isfinite` ketiganya);
+`units` dibatasi 1–3652059. FK komposit tenant ke draft, versi
+harga, item, dan pelanggan; 009 juga memasang
+UNIQUE(workspace_id, id) pada `price_versions` (pola 006/007)
+karena 008 hanya punya UNIQUE(workspace_id, client_request_id).
+Runtime hanya SELECT + INSERT; tanpa UPDATE, DELETE, TRUNCATE.
+
+Dua rute terautentikasi, semua di bawah `authMiddleware` +
+`beginTenant` dengan envelope error Bahasa Indonesia yang datar:
+
+- `POST /workspaces/{id}/rental/contracts/{draft_id}/accept-price`
+  — body strict JSON 16 KiB `{"expected_price_version_id":"...",
+  "expected_total_minor":"300000"}` + header `Idempotency-Key`
+  wajib (tepat satu nilai, case-sensitive). `expected_total_minor`
+  WAJIB string desimal kanonis (pola yang sama dengan
+  `amount_minor` harga; tanpa trim). Server menyelesaikan ulang
+  versi efektif pada `starts_at` draft + aritmetika quote di dalam
+  transaksi dan MEMBANDINGKAN versi aktual + total hitungan server
+  dengan expected klien; beda → 409 tanpa tulis/audit. Total
+  expected hanya pembanding, bukan jumlah otoritatif. Guard aksi
+  Rental: `manage_business_data` (owner + manager) → lock baris
+  workspace → SATU `clock_timestamp()` sesudah lock (cutoff untuk
+  `accepted_at`) → instalasi `rental.basic` aktif versi eksak +
+  entitlement → cek `view_workspace` eksplisit → lookup kunci →
+  cek fakta draft → baca draft → resolve harga → INSERT + audit →
+  commit. Hak Rental saat ini diperiksa SEBELUM replay, jadi replay
+  sesudah revoke/deactivate → 403. Hold live TIDAK disyaratkan;
+  arsip item / status hold saat ini tidak divalidasi ulang.
+  201 mengembalikan fakta.
+- `GET /workspaces/{id}/rental/contracts/{draft_id}/agreed-price`
+  — `view_workspace` saja (owner/manager/kasir), tanpa lock,
+  tanpa tulis/audit, tanpa syarat instalasi/entitlement Rental.
+  Draft hilang/lintas-tenant → 404, draft own tanpa fakta → 404
+  `harga yang disepakati tidak ditemukan`. Fakta tetap terbaca
+  sesudah revoke/deactivate.
+
+**Replay tiga-field.** Identitas replay mencakup draft_id
+ternormalisasi di path, `expected_price_version_id`
+ternormalisasi, DAN `expected_total_minor` terurai kanonis.
+Kunci sama + ketiganya cocok dengan fakta tersimpan → 200 fakta
+asli (tanpa tulis/audit/perubahan timestamp). Perbedaan APA PUN →
+409, termasuk kunci dipakai untuk draft LAIN dengan versi + total
+yang sama. Kunci lain untuk draft yang sudah punya fakta → 409
+terkendali (bukan 500 dari UNIQUE); UNIQUE draft + kunci adalah
+backstop di bawah lock.
+
+**Immutabilitas historis.** Harga finite yang tidak berubah +
+`starts_at` draft yang tidak berubah berarti tarif adjacent baru
+TIDAK bisa menggantikan versi efektif draft yang sama: jadwalkan
+v2 untuk starts nanti, fakta lama tetap v1, dan draft baru yang
+mulai di v2 memakai v2. Tes memakai versi lain yang terdaftar /
+total diubah / versi dari draft lain sebagai expected yang salah
+(→ 409), bukan sekuens quote v1-menjadi-v2 yang tidak didukung
+model beku ini.
 
 ## Yang sengaja TIDAK ada di F1-03
 

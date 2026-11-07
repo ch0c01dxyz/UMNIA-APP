@@ -199,8 +199,8 @@ func TestPriceFreshSchema(t *testing.T) {
 	).Scan(&markers); err != nil {
 		t.Fatalf("baca markers: %v", err)
 	}
-	if markers != "001_init,002_identity,003_modules,004_module_installations,005_core_master_data,006_rental_contracts,007_asset_availability,008_price_versions" {
-		t.Fatalf("markers: want 001_init,002_identity,003_modules,004_module_installations,005_core_master_data,006_rental_contracts,007_asset_availability,008_price_versions, got %s", markers)
+	if markers != "001_init,002_identity,003_modules,004_module_installations,005_core_master_data,006_rental_contracts,007_asset_availability,008_price_versions,009_rental_agreed_prices" {
+		t.Fatalf("markers: want 001_init,002_identity,003_modules,004_module_installations,005_core_master_data,006_rental_contracts,007_asset_availability,008_price_versions,009_rental_agreed_prices, got %s", markers)
 	}
 	var n int
 	if err := boot.QueryRow(`SELECT count(*) FROM price_versions`).Scan(&n); err != nil {
@@ -270,16 +270,17 @@ func TestPriceFreshSchema(t *testing.T) {
 		}
 	}
 	// CHECK 6 (price_list_id, client_request_id, valid_to>valid_from,
-	// amount_minor>=0, currency, finite bounds) + UNIQUE 1 + FK 2 +
-	// EXCLUDE 1.
+	// amount_minor>=0, currency, finite bounds) + UNIQUE 2
+	// (client_request_id + workspace_id/id dari 009, untuk FK komposit
+	// fakta harga disepakati) + FK 2 + EXCLUDE 1.
 	var c, u, f, x int
 	if err := boot.QueryRow(
 		`SELECT count(*) FILTER (WHERE contype = 'c'), count(*) FILTER (WHERE contype = 'u'), count(*) FILTER (WHERE contype = 'f'), count(*) FILTER (WHERE contype = 'x')
 		 FROM pg_constraint WHERE conrelid = 'price_versions'::regclass`).Scan(&c, &u, &f, &x); err != nil {
 		t.Fatalf("constraints price_versions: %v", err)
 	}
-	if c != 6 || u != 1 || f != 2 || x != 1 {
-		t.Fatalf("constraints price_versions: want CHECK 6 + UNIQUE 1 + FK 2 + EXCLUDE 1, got CHECK %d + UNIQUE %d + FK %d + EXCLUDE %d", c, u, f, x)
+	if c != 6 || u != 2 || f != 2 || x != 1 {
+		t.Fatalf("constraints price_versions: want CHECK 6 + UNIQUE 2 + FK 2 + EXCLUDE 1, got CHECK %d + UNIQUE %d + FK %d + EXCLUDE %d", c, u, f, x)
 	}
 	// CHECK finite bernama: kedua batas harus finite (isfinite).
 	// Tanpa ini, 'infinity' lolos sebagai valid_to/valid_from meski

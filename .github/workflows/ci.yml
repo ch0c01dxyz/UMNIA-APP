@@ -253,7 +253,7 @@ jobs:
         working-directory: apps/web
 
   owner-flow-e2e:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Alur pemilik di browser NYATA (Playwright + Chromium) melawan web
     # hasil build + business-api yang benar-benar berjalan + PG nyata.
     # Bukan stub request: langkah pengguna memakai UI + proxy same-origin.

@@ -193,6 +193,23 @@ belum di-commit — salinan staging transfer adalah sumber pemulihan.
 - **CI untuk koreksi ini: NOT RUN** — belum dipublikasikan; tidak ada
   otorisasi commit/push dalam tugas ini. Jangan klaim run hosted sukses.
 
+### Kegagalan hosted run #40 + pin runner (HARNESS + REVIEWER)
+
+Run #40, ID 42524082882, head `e3770ee` — **FAILED (4m 18s)**:
+business-api SUCCESS (Go 118/0/0, anti-skip lolos); web SUCCESS (build
+Nuxt); owner-flow-e2e FAILED 14 dtk pada langkah install — `E: Unable to
+locate package postgresql-16` (exit 100); Playwright tidak jalan (0/0/0).
+Log job independen mengonfirmasi runner Ubuntu 26.04.1 / image ubuntu-26.04
+(REVIEWER-REPORTED): repo default Ubuntu 26 tidak membawa `postgresql-16`,
+jadi `apt-get install` gagal sebelum pg_lsclusters/ALTER ROLE/TCP version
+sempat jalan. Echo script bukan bukti langkah itu tereksekusi.
+
+Koreksi (commit terpisah, CI-only): job `owner-flow-e2e` di-pin ke
+`ubuntu-24.04` — repo default-nya membawa postgresql-16. Job business-api
+dan web tetap `ubuntu-latest`. Tanpa PGDG, tanpa Docker Linux runtime, tanpa
+ubah versi PostgreSQL, autentikasi, bootstrap, kode, dependensi, migrasi,
+atau screenshot.
+
 Temuan saat verifikasi (semuanya bug tes, bukan bug aplikasi — diperbaiki, lalu
 suite hijau): (1) `page.goto()` full reload menghapus sesi memori by design,
 jadi helper `gotoAuthed` menunggu URL stabil lalu masuk lagi lewat alur

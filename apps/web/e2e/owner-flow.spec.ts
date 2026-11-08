@@ -233,7 +233,7 @@ test.describe.serial('alur pemilik', () => {
   test('401 menghapus sesi dan minta masuk', async ({ page }) => {
     await uiLogin(page, ownerEmail)
     await gotoAuthed(page, `/workspaces/${wsA}/members`, ownerEmail)
-    await expect(page.getByRole('heading', { name: 'Anggota' })).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'Anggota', exact: true })).toBeVisible()
     psql(`DELETE FROM sessions WHERE subject_id = (SELECT id FROM identity_subjects WHERE email = '${ownerEmail}')`)
     await page.getByRole('link', { name: 'Lihat fitur workspace' }).click()
     await expect(page).toHaveURL(/\/login\?next=/)
@@ -288,7 +288,7 @@ test.describe.serial('alur pemilik', () => {
     await gotoAuthed(page, `/workspaces/${wsA}/members`, ownerEmail)
     await expect(page.getByText('Memuat…')).toBeVisible()
     await page.unroute('**/api/workspaces/*/members')
-    await expect(page.getByRole('heading', { name: 'Anggota' })).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'Anggota', exact: true })).toBeVisible()
   })
 
   test('screenshot lima layar 360/768/1440', async ({ page }) => {
@@ -311,7 +311,7 @@ test.describe.serial('alur pemilik', () => {
       await expect(page.getByLabel('Nama workspace')).toBeVisible()
       await page.screenshot({ path: path.join(SHOTS, `02-workspace-new-${size.width}.png`) })
       await gotoAuthed(page, `/workspaces/${wsShot}/members`, owner2Email)
-      await expect(page.getByRole('heading', { name: 'Anggota' })).toBeVisible()
+      await expect(page.getByRole('heading', { name: 'Anggota', exact: true })).toBeVisible()
       await page.screenshot({ path: path.join(SHOTS, `03-members-${size.width}.png`) })
       await gotoAuthed(page, `/workspaces/${wsShot}/modules`, owner2Email)
       await expect(page.getByText('Belum aktif.')).toBeVisible()

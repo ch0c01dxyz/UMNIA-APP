@@ -251,3 +251,88 @@ jobs:
           npm ci --legacy-peer-deps
           npm run build
         working-directory: apps/web
+
+  owner-flow-e2e:
+    runs-on: ubuntu-latest
+    # Alur pemilik di browser NYATA (Playwright + Chromium) melawan web
+    # hasil build + business-api yang benar-benar berjalan + PG nyata.
+    # Bukan stub request: langkah pengguna memakai UI + proxy same-origin.
+    # Tanpa trace/video/HAR/screenshot otomatis supaya rahasia (token,
+    # kata sandi, kode undangan) tidak masuk artefak tersimpan.
+    env:
+      BUSINESS_DATABASE_URL: postgres://umnia_business:ci-runtime-only@localhost:5432/umnia_e2e?sslmode=disable
+      BUSINESS_BOOTSTRAP_DATABASE_URL: postgres://postgres:ci-bootstrap-only@localhost:5432/umnia_e2e?sslmode=disable
+      E2E_BOOTSTRAP_URL: postgres://postgres:ci-bootstrap-only@localhost:5432/umnia_e2e?sslmode=disable
+    services:
+      postgres:
+        image: postgres:16-bookworm
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: ci-bootstrap-only
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+      # Password di bawah HANYA fixture CI yang dibuang tiap run, bukan
+      # rahasia produksi. DB terisolasi umnia_e2e (bukan umnia_test) supaya
+      # fixture E2E tidak bercampur dengan gate integrasi Go.
+      - name: Prepare E2E database (001-010)
+        run: |
+          for i in $(seq 1 30); do
+            pg_isready -h localhost -p 5432 -U postgres && break || sleep 2
+          done
+          PGPASSWORD=ci-bootstrap-only psql -h localhost -U postgres -d postgres \
+            -v ON_ERROR_STOP=1 \
+            -c "CREATE ROLE umnia_business NOSUPERUSER NOBYPASSRLS LOGIN PASSWORD 'ci-runtime-only';" \
+            -c "CREATE DATABASE umnia_e2e OWNER umnia_business;"
+          PGPASSWORD=ci-bootstrap-only psql -h localhost -U postgres -d umnia_e2e \
+            -v ON_ERROR_STOP=1 -1 \
+            -f services/business-api/migrations/001_init.sql \
+            -f services/business-api/migrations/002_identity.sql \
+            -f services/business-api/migrations/003_modules.sql \
+            -f services/business-api/migrations/004_module_installations.sql \
+            -f services/business-api/migrations/005_core_master_data.sql \
+            -f services/business-api/migrations/006_rental_contracts.sql \
+            -f services/business-api/migrations/007_asset_availability.sql \
+            -f services/business-api/migrations/008_price_versions.sql \
+            -f services/business-api/migrations/009_rental_agreed_prices.sql \
+            -f services/business-api/migrations/010_rental_custody.sql
+      - name: Build + start business-api
+        run: |
+          go build -o /tmp/umnia-business-api .
+          BUSINESS_DATABASE_URL="$BUSINESS_DATABASE_URL" HTTP_LISTEN_ADDR=":8080" \
+            /tmp/umnia-business-api > /tmp/umnia-api.log 2>&1 &
+          for i in $(seq 1 30); do
+            if curl -fsS http://localhost:8080/readyz > /dev/null 2>&1; then break; fi
+            sleep 2
+          done
+          curl -fsS http://localhost:8080/readyz > /dev/null || { echo "business-api tidak siap"; cat /tmp/umnia-api.log; exit 1; }
+        working-directory: services/business-api
+      - name: Build web
+        run: |
+          npm ci --legacy-peer-deps
+          npm run build
+        working-directory: apps/web
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+        working-directory: apps/web
+      - name: Playwright owner-flow + proxy/session
+        # webServer di playwright.config.ts menjalankan dua preview
+        # (3000 upstream nyata, 3001 upstream mati); reuseExistingServer
+        # mati di CI sehingga keduanya dimulai di sini.
+        run: npm run test:e2e
+        working-directory: apps/web

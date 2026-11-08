@@ -1505,10 +1505,12 @@ func TestCustodyLockWaitRaces(t *testing.T) {
 	}
 
 	// (a) Deactivate selagi handover menunggu lock -> 403.
+	// Mutasi lewat lockTx yang sama (bukan koneksi lain): satu
+	// transaksi memegang workspace lock + menonaktifkan modul.
 	lockTx := holdLock()
 	ch := waitHandover(refsA.draftID, "cu-lw-a", refsA.assetID, refsA.holdID)
 	time.Sleep(500 * time.Millisecond)
-	if _, err := env.boot.Exec(`UPDATE module_installations SET status = 'inactive', updated_at = now() WHERE workspace_id = $1 AND module_id = 'rental.basic'`, env.wsA); err != nil {
+	if _, err := lockTx.Exec(`UPDATE module_installations SET status = 'inactive', updated_at = now() WHERE workspace_id = $1 AND module_id = 'rental.basic'`, env.wsA); err != nil {
 		lockTx.Rollback()
 		t.Fatalf("deactivate selagi menunggu: %v", err)
 	}
@@ -1529,15 +1531,17 @@ func TestCustodyLockWaitRaces(t *testing.T) {
 	}
 
 	// (b) Revoke entitlement selagi handover menunggu lock -> 403.
-	// Revoke HARUS DELETE langsung TANPA lock workspace:
-	// revokeEntitlement() sendiri mengambil lock baris workspace
-	// (FOR UPDATE) — memanggilnya selagi lockTx memegang lock akan
-	// deadlock (antrean lock + main menunggu revoke). DELETE pada
-	// tabel perujuk tidak mengunci baris workspaces yang dirujuk.
+	// Mutasi dan kepemilikan lock berada dalam SATU transaksi yang
+	// sama (lockTx): lockTx memegang workspace lock DAN menjalankan
+	// DELETE entitlement, lalu lockTx.Commit. Jangan panggil
+	// revokeEntitlement() di sini — helper itu membuka transaksi
+	// kedua dan mencoba mengambil lock yang sama, sehingga deadlock.
+	// DELETE pada tabel perujuk tidak mengunci baris workspaces yang
+	// dirujuk, jadi DELETE lewat lockTx aman.
 	lockTx = holdLock()
 	ch = waitHandover(refsB.draftID, "cu-lw-b", refsB.assetID, refsB.holdID)
 	time.Sleep(500 * time.Millisecond)
-	if _, err := env.boot.Exec(`DELETE FROM module_entitlements WHERE workspace_id = $1 AND module_id = 'rental.basic'`, env.wsA); err != nil {
+	if _, err := lockTx.Exec(`DELETE FROM module_entitlements WHERE workspace_id = $1 AND module_id = 'rental.basic'`, env.wsA); err != nil {
 		lockTx.Rollback()
 		t.Fatalf("revoke selagi menunggu: %v", err)
 	}

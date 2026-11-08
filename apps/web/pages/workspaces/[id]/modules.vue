@@ -130,7 +130,7 @@ async function activate() {
             <p>{{ rentalManifest.display.description_id }}</p>
             <p class="small muted">Versi katalog: {{ rentalManifest.version }}</p>
             <p v-if="rentalState.status === 'active'" class="ok" role="status">
-              Aktif (versi {{ rentalState.version }}). Tidak ada perubahan yang ditulis.
+              Aktif (versi {{ rentalState.version }}).
             </p>
             <template v-else>
               <p role="status">Belum aktif.</p>
@@ -171,7 +171,7 @@ async function activate() {
             <li v-for="m in catalog.filter(x => x.id !== 'rental.basic')" :key="m.id">
               <strong>{{ m.display.name_id }}</strong> (versi {{ m.version }}) — {{ m.display.description_id }}
               <br>
-              <span class="small muted">Aktivasi modul ini tidak termasuk dalam slice ini.</span>
+              <span class="small muted">Modul ini tidak dapat diaktifkan dari halaman ini.</span>
             </li>
           </ul>
           <p v-if="catalog.length === 0" class="muted">Katalog kosong.</p>

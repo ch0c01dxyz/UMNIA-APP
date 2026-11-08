@@ -121,8 +121,9 @@ async function uiInvite(page: Page, ws: string, email: string, role: 'manager' |
   const code = await codeInput.inputValue()
   if (!code) throw new Error('kode undangan kosong')
   // Kode tidak boleh muncul sebagai teks terlihat di markup.
+  // Boolean + pesan tetap: kegagalan assertion tidak boleh mencetak rahasia.
   const visible = await page.locator('body').innerText()
-  expect(visible).not.toContain(code)
+  expect(visible.includes(code), 'teks terlihat tidak boleh memuat kode undangan').toBe(false)
   return code
 }
 
@@ -212,6 +213,8 @@ test.describe.serial('alur pemilik', () => {
     await page.getByRole('button', { name: 'Aktifkan Persewaan Sederhana' }).click()
     await page.getByRole('button', { name: 'Ya, aktifkan' }).click()
     await expect(page.getByText('Aktif (versi 0.1.0).')).toBeVisible()
+    // Status aktif faktual: tanpa klaim tidak ada perubahan yang ditulis.
+    await expect(page.getByText('Tidak ada perubahan yang ditulis.')).toHaveCount(0)
   })
 
   test('reload kehilangan token; lanjut dengan URL dikenal', async ({ page }) => {

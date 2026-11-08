@@ -259,24 +259,12 @@ jobs:
     # Bukan stub request: langkah pengguna memakai UI + proxy same-origin.
     # Tanpa trace/video/HAR/screenshot otomatis supaya rahasia (token,
     # kata sandi, kode undangan) tidak masuk artefak tersimpan.
+    # PostgreSQL job ini NATIVE via APT (bukan Docker service): tiket beku
+    # mensyaratkan Linux native PG. Job business-api/web tidak diubah.
     env:
       BUSINESS_DATABASE_URL: postgres://umnia_business:ci-runtime-only@localhost:5432/umnia_e2e?sslmode=disable
       BUSINESS_BOOTSTRAP_DATABASE_URL: postgres://postgres:ci-bootstrap-only@localhost:5432/umnia_e2e?sslmode=disable
       E2E_BOOTSTRAP_URL: postgres://postgres:ci-bootstrap-only@localhost:5432/umnia_e2e?sslmode=disable
-    services:
-      postgres:
-        image: postgres:16-bookworm
-        env:
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: ci-bootstrap-only
-          POSTGRES_DB: postgres
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 5s
-          --health-timeout 3s
-          --health-retries 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -287,6 +275,28 @@ jobs:
           node-version: '22'
           cache: npm
           cache-dependency-path: apps/web/package-lock.json
+      # PostgreSQL 16 native: ubuntu-latest menyediakan postgresql-16 di
+      # repositori default; cluster 16/main dibuat saat instalasi dan
+      # dijalankan bila belum berjalan. Tanpa Docker Linux runtime.
+      # Password bootstrap HANYA fixture CI yang dibuang tiap run: peran
+      # postgres bawaan cluster baru TIDAK punya password — PGPASSWORD klien
+      # bukan pengganti inisialisasi server (yang dulu dilakukan
+      # POSTGRES_PASSWORD pada service Docker). Tetapkan lewat koneksi lokal
+      # istimewa (peer auth OS postgres), BUKAN via TCP, sebelum pemakaian TCP.
+      - name: Install + bootstrap native PostgreSQL 16 (APT)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y postgresql-16
+          if ! pg_isready -h localhost -p 5432 -U postgres > /dev/null 2>&1; then
+            sudo pg_ctlcluster 16 main start
+          fi
+          pg_lsclusters
+          pg_isready -h localhost -p 5432 -U postgres
+          sudo -u postgres psql -v ON_ERROR_STOP=1 \
+            -c "ALTER ROLE postgres WITH PASSWORD 'ci-bootstrap-only';"
+          # Bukti autentikasi TCP + versi server sebelum langkah Prepare.
+          PGPASSWORD=ci-bootstrap-only psql -h localhost -U postgres -d postgres \
+            -v ON_ERROR_STOP=1 -tAc "SELECT version();"
       # Password di bawah HANYA fixture CI yang dibuang tiap run, bukan
       # rahasia produksi. DB terisolasi umnia_e2e (bukan umnia_test) supaya
       # fixture E2E tidak bercampur dengan gate integrasi Go.

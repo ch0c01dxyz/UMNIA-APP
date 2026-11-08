@@ -2,8 +2,9 @@
 // Hanya pasangan method/path di ALLOWLIST yang diteruskan; sisanya gagal
 // lokal tanpa menghubungi upstream. Tanpa log body/kredensial, tanpa
 // redirect yang mengikuti, tanpa header Cookie/Host/forwarded.
-import { defineEventHandler, readRawBody, setResponseStatus } from 'h3'
+import { defineEventHandler, setResponseHeader, setResponseStatus } from 'h3'
 import type { H3Event } from 'h3'
+import type { IncomingMessage } from 'node:http'
 
 const MAX_BODY = 16384
 const UPSTREAM_TIMEOUT_MS = 10000
@@ -28,6 +29,56 @@ const ALLOWLIST: Route[] = [
 function fail(event: H3Event, status: number, message: string) {
   setResponseStatus(event, status)
   return { error: message }
+}
+
+type BodyRead = { body?: Buffer, tooLarge?: boolean, streamError?: boolean }
+
+// Baca body POST dengan batas BYTE sambil streaming: hitung byte (bukan
+// karakter JS), dan berhenti mengonsumsi begitu melewati batas — tanpa
+// menunggu EOF dan tanpa menampung body tak terbatas. Content-Length hanya
+// petunjuk awal; body chunked tanpa Content-Length tetap dibatasi.
+function readBodyBounded(req: IncomingMessage): Promise<BodyRead> {
+  const declared = Number(req.headers['content-length'] || 0)
+  if (Number.isFinite(declared) && declared > MAX_BODY) return Promise.resolve({ tooLarge: true })
+  if (req.readableEnded) return Promise.resolve({})
+  return new Promise((resolve) => {
+    const chunks: Buffer[] = []
+    let total = 0
+    let done = false
+    const cleanup = () => {
+      req.off('data', onData)
+      req.off('end', onEnd)
+      req.off('error', onError)
+      req.off('aborted', onAborted)
+      req.off('close', onClose)
+    }
+    const finish = (result: BodyRead) => {
+      if (done) return
+      done = true
+      cleanup()
+      resolve(result)
+    }
+    const onData = (chunk: Buffer) => {
+      total += chunk.length
+      if (total > MAX_BODY) {
+        // Berhenti mengonsumsi; respons 400 dikirim dengan Connection: close
+        // supaya soket ditutup sesudah respons dan sisa byte terbuang aman.
+        req.pause()
+        finish({ tooLarge: true })
+        return
+      }
+      chunks.push(chunk)
+    }
+    const onEnd = () => finish({ body: total === 0 ? undefined : Buffer.concat(chunks, total) })
+    const onError = () => finish({ streamError: true })
+    const onAborted = () => finish({ streamError: true })
+    const onClose = () => finish({ streamError: true })
+    req.on('data', onData)
+    req.on('end', onEnd)
+    req.on('error', onError)
+    req.on('aborted', onAborted)
+    req.on('close', onClose)
+  })
 }
 
 export default defineEventHandler(async (event) => {
@@ -60,15 +111,17 @@ export default defineEventHandler(async (event) => {
       : want === segments[i]))
   if (!matched) return fail(event, 404, 'tidak ditemukan')
 
-  let body: string | undefined
+  let body: Buffer | undefined
   if (method === 'POST') {
-    const len = Number(event.node.req.headers['content-length'] || 0)
-    if (Number.isFinite(len) && len > MAX_BODY) return fail(event, 400, 'permintaan tidak valid')
-    const rawBody = await readRawBody(event)
-    if (rawBody !== undefined && rawBody !== null && rawBody !== '') {
-      body = rawBody
-      if (body.length > MAX_BODY) return fail(event, 400, 'permintaan tidak valid')
+    const read = await readBodyBounded(event.node.req)
+    if (read.tooLarge) {
+      setResponseHeader(event, 'Connection', 'close')
+      return fail(event, 400, 'permintaan tidak valid')
     }
+    if (read.streamError) {
+      return fail(event, 400, 'permintaan tidak valid')
+    }
+    body = read.body
   }
 
   const base = String(useRuntimeConfig().businessApiBase || '').replace(/\/+$/, '')

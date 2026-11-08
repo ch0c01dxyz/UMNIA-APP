@@ -36,6 +36,48 @@ function rawGet(path: string, port = 3000): Promise<{ status: number, body: stri
   })
 }
 
+// POST mentah tanpa Content-Length (chunked): menguji jalur streaming proxy.
+function rawPost(path: string, body: string): Promise<{ status: number, body: string }> {
+  return new Promise((resolve, reject) => {
+    const req = http.request({ host: 'localhost', port: 3000, path, method: 'POST',
+      headers: { 'Content-Type': 'application/json' } }, (res) => {
+      let data = ''
+      res.on('data', (c: Buffer) => { data += c.toString() })
+      res.on('end', () => resolve({ status: res.statusCode ?? 0, body: data }))
+    })
+    req.on('error', reject)
+    req.write(body)
+    req.end()
+  })
+}
+
+// Aliran yang sengaja tidak pernah diakhiri: membuktikan proxy menolak
+// overflow SEBELUM EOF. Batas waktu eksplisit + cleanup; bukan stress test.
+function rawPostNeverEnding(path: string, body: string, timeoutMs = 5000): Promise<number> {
+  return new Promise((resolve, reject) => {
+    let settled = false
+    let status = 0
+    const req = http.request({ host: 'localhost', port: 3000, path, method: 'POST',
+      headers: { 'Content-Type': 'application/json' } }, (res) => {
+      status = res.statusCode ?? 0
+      res.resume()
+      res.on('end', () => {
+        clearTimeout(timer)
+        if (!settled) { settled = true; req.destroy(); resolve(status) }
+      })
+    })
+    const timer = setTimeout(() => {
+      if (!settled) { settled = true; req.destroy(); reject(new Error('proxy tidak menolak overflow sebelum EOF dalam batas waktu')) }
+    }, timeoutMs)
+    req.on('error', (err) => {
+      clearTimeout(timer)
+      if (!settled) { settled = true; req.destroy(); status !== 0 ? resolve(status) : reject(err) }
+    })
+    req.write(body)
+    // Sengaja tanpa req.end().
+  })
+}
+
 test.describe.serial('proxy + sesi', () => {
   test.beforeAll(async () => {
     const ctx = await pwRequest.newContext({ baseURL: 'http://localhost:3000' })
@@ -101,6 +143,26 @@ test.describe.serial('proxy + sesi', () => {
     expect(backslash.status).toBe(400)
   })
 
+  test('proxy: batas body dihitung per byte saat streaming', async () => {
+    // Chunked UTF-8: 18033 byte tapi 9033 karakter — harus 400, bukan 401.
+    const utf8Body = JSON.stringify({ email: 'é'.repeat(9000), password: 'invalid' })
+    expect(Buffer.byteLength(utf8Body)).toBeGreaterThan(16384)
+    expect(utf8Body.length).toBeLessThan(16384)
+    const over = await rawPost('/api/auth/login', utf8Body)
+    expect(over.status).toBe(400)
+    // Aliran yang tidak pernah berakhir: ditolak sebelum EOF.
+    const held = await rawPostNeverEnding('/api/auth/login', 'x'.repeat(20000))
+    expect(held).toBe(400)
+    // Batas tepat 16384 byte diteruskan (backend menjawab 401, bukan 400).
+    const exact = JSON.stringify({ email: 'x'.repeat(16384 - 33), password: 'invalid' })
+    expect(Buffer.byteLength(exact)).toBe(16384)
+    const atLimit = await rawPost('/api/auth/login', exact)
+    expect(atLimit.status).toBe(401)
+    // Body kecil chunked tetap diteruskan ke backend.
+    const small = await rawPost('/api/auth/login', JSON.stringify({ email: ownerEmail, password: PASSWORD }))
+    expect(small.status).toBe(200)
+  })
+
   test('proxy: upstream mati -> 502 bersih; deny tetap lokal', async () => {
     const bad = await pwRequest.newContext({ baseURL: BAD_UPSTREAM })
     const down = await bad.get('/api/healthz')
@@ -138,14 +200,15 @@ test.describe.serial('proxy + sesi', () => {
     const home = await request.get('/')
     expect(home.status()).toBe(200)
     const homeHtml = await home.text()
-    expect(homeHtml).not.toContain(inviteCode)
-    expect(homeHtml).not.toContain(ownerToken)
+    // Boolean + pesan tetap: kegagalan assertion tidak boleh mencetak rahasia.
+    expect(homeHtml.includes(inviteCode), 'HTML beranda tidak boleh memuat kode undangan').toBe(false)
+    expect(homeHtml.includes(ownerToken), 'HTML beranda tidak boleh memuat token').toBe(false)
     const members = await request.get(`/workspaces/${wsId}/members`)
     expect(members.status()).toBe(200)
     const membersHtml = await members.text()
-    expect(membersHtml).not.toContain(inviteCode)
-    expect(membersHtml).not.toContain(ownerToken)
-    expect(membersHtml).not.toContain(wsName)
+    expect(membersHtml.includes(inviteCode), 'HTML anggota tidak boleh memuat kode undangan').toBe(false)
+    expect(membersHtml.includes(ownerToken), 'HTML anggota tidak boleh memuat token').toBe(false)
+    expect(membersHtml.includes(wsName), 'HTML anggota tidak boleh memuat nama workspace').toBe(false)
     const cross = await request.get(`/api/workspaces/${wsId}/members`, {
       headers: { Authorization: `Bearer ${otherToken}` }
     })

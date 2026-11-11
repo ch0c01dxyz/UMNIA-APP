@@ -34,6 +34,12 @@ fi
 : "${UMNIA_RUNTIME_ROLE:?initdb: UMNIA_RUNTIME_ROLE is required}"
 : "${UMNIA_RUNTIME_DB_PASSWORD:?initdb: UMNIA_RUNTIME_DB_PASSWORD is required}"
 
+# Jalur roster operator: SATU override sempit untuk tes; default tetap
+# mount container (/docker-operator-roster.env) dan tidak berubah bila
+# variabel tidak diset. Hanya jalur file yang dioverride — format roster,
+# validasi, dan perilaku fail-closed tidak berubah.
+ROSTER_PATH="${UMNIA_OPERATOR_ROSTER_PATH:-/docker-operator-roster.env}"
+
 # sql_literal <nilai>: kembalikan literal SQL single-quote dengan
 # escaping '' untuk nilai mentah. Password hanya boleh diteruskan
 # lewat literal ini di dalam heredoc stdin — tidak pernah lewat
@@ -87,7 +93,7 @@ ROSTER_PASSWORDS=()
 read_roster() {
   ROSTER_ROLES=()
   ROSTER_PASSWORDS=()
-  if [ ! -f /docker-operator-roster.env ]; then
+  if [ ! -f "$ROSTER_PATH" ]; then
     return 0
   fi
   lineno=0
@@ -119,7 +125,7 @@ read_roster() {
     fi
     ROSTER_ROLES+=("umnia_op_$id")
     ROSTER_PASSWORDS+=("$value")
-  done < /docker-operator-roster.env
+  done < "$ROSTER_PATH"
 }
 
 preflight_sql() {
@@ -331,7 +337,7 @@ fi
 # dan tidak aman sudah ditolak di sana, jadi bagian ini HANYA membuat
 # peran yang belum ada dan merotasi password login sehat yang sudah
 # dikenal — tanpa ALTER atribut dan tanpa REVOKE adopsi.
-if [ -f /docker-operator-roster.env ]; then
+if [ -f "$ROSTER_PATH" ]; then
   ensure_op_nologin_role() {
     if role_exists "$1"; then
       return 0

@@ -765,7 +765,13 @@ func TestGrantEntitlementACLsAfterRerun(t *testing.T) {
 	boolCheck(fmt.Sprintf(`SELECT has_schema_privilege('umnia_grant_exec', 'app', 'CREATE')`), false, "owner CREATE app (harus dicabut)")
 	boolCheck(fmt.Sprintf(`SELECT has_function_privilege('umnia_operator', '%s', 'EXECUTE')`, fn), true, "grup EXECUTE")
 	boolCheck(fmt.Sprintf(`SELECT has_function_privilege('umnia_business', '%s', 'EXECUTE')`, fn), false, "runtime EXECUTE")
-	boolCheck(fmt.Sprintf(`SELECT has_function_privilege('umnia_admin', '%s', 'EXECUTE')`, fn), false, "admin EXECUTE")
+	// Admin yang tidak ada tidak punya hak apa pun — tetapi
+	// has_function_privilege(nama, ...) melempar 42704 bila role tidak
+	// ada (klaster business-only CI tidak membuat umnia_admin). Kueri
+	// ini absent-safe tanpa mengandalkan urutan evaluasi AND: fungsi
+	// hanya dipanggil dengan OID role yang benar-benar ada di pg_roles,
+	// jadi masukan nama yang tidak ada tidak pernah mencapai fungsi.
+	boolCheck(fmt.Sprintf(`SELECT EXISTS (SELECT 1 FROM pg_roles r WHERE r.rolname = 'umnia_admin' AND has_function_privilege(r.oid, '%s'::regprocedure, 'EXECUTE'))`, fn), false, "admin EXECUTE")
 	boolCheck(`SELECT has_column_privilege('umnia_grant_exec', 'public.workspaces', 'id', 'SELECT')`, true, "owner SELECT workspaces.id")
 	boolCheck(`SELECT has_column_privilege('umnia_grant_exec', 'public.workspaces', 'id', 'UPDATE')`, true, "owner UPDATE workspaces.id (kunci)")
 	boolCheck(`SELECT has_column_privilege('umnia_grant_exec', 'public.workspaces', 'name', 'SELECT')`, false, "owner TIDAK punya SELECT workspaces.name (terbatas)")
@@ -1846,9 +1852,12 @@ func TestConfigurePostgresPreflightRejectsUnsafeRoles(t *testing.T) {
 // TestInitdbPreflightRejectsUnsafeRoles membuktikan initdb Windows
 // (01-runtime-roles.sh) MENOLAK state operator yang tidak aman
 // sebelum membuat peran runtime apa pun. Skrip ASLI dijalankan via
-// bash dengan koneksi TCP ke klaster dev (PGHOST/PGPASSWORD) dan
-// roster fixture di /docker-operator-roster.env (dibuat tes ini,
-// ditolak bila sudah ada). Scratch DB terisolasi menampung objek
+// bash dengan koneksi TCP yang diturunkan dari
+// BUSINESS_BOOTSTRAP_DATABASE_URL yang sudah divalidasi (host/port/
+// user/password — bukan asumsi localhost/local-bootstrap-only) dan
+// roster fixture milik tes ini di file temp 0600 lewat override
+// UMNIA_OPERATOR_ROSTER_PATH (tidak pernah menulis roster deployment
+// atau path absolut root). Scratch DB terisolasi menampung objek
 // seed; snapshot membuktikan state asli tidak berubah.
 func TestInitdbPreflightRejectsUnsafeRoles(t *testing.T) {
 	_, boot, _ := grantTestEnv(t)
@@ -1856,8 +1865,27 @@ func TestInitdbPreflightRejectsUnsafeRoles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("path skrip: %v", err)
 	}
-	if _, err := os.Stat("/docker-operator-roster.env"); err == nil {
-		t.Fatalf("/docker-operator-roster.env sudah ada — tes tidak menimpa file yang sudah ada")
+	// Koneksi skrip diturunkan dari BUSINESS_BOOTSTRAP_DATABASE_URL
+	// yang sudah divalidasi: host/port/user/password harus cocok dengan
+	// klaster yang dipakai tes (termasuk port non-default). Password
+	// hanya hidup di env proses — tidak pernah dicetak.
+	bootURL := os.Getenv("BUSINESS_BOOTSTRAP_DATABASE_URL")
+	u, err := url.Parse(bootURL)
+	if err != nil || u.Scheme != "postgres" || u.Hostname() == "" || u.User == nil || u.User.Username() == "" {
+		t.Fatalf("BUSINESS_BOOTSTRAP_DATABASE_URL tidak valid untuk skrip initdb")
+	}
+	bootPW, ok := u.User.Password()
+	if !ok || bootPW == "" {
+		t.Fatalf("BUSINESS_BOOTSTRAP_DATABASE_URL tanpa password untuk skrip initdb")
+	}
+	bootPort := u.Port()
+	if bootPort == "" {
+		bootPort = "5432"
+	}
+	tmpDir := t.TempDir()
+	rosterFile := filepath.Join(tmpDir, "operator-roster.env")
+	if _, err := os.Stat(rosterFile); err == nil {
+		t.Fatalf("roster temp sudah ada — tes tidak menimpa file yang sudah ada")
 	}
 	scratchName, scratchBoot := createOwnedScratchDB(t, boot, "umnia_test_initdb_pf")
 	suffix := uniqueSuffix(t)
@@ -1871,21 +1899,23 @@ func TestInitdbPreflightRejectsUnsafeRoles(t *testing.T) {
 		_, _ = boot.Exec(`DROP ROLE IF EXISTS ` + login)
 	})
 	roster := "UMNIA_OP_INITDB_" + strings.ToUpper(suffix) + "=x-initdb-sentinel-123\n"
-	if err := os.WriteFile("/docker-operator-roster.env", []byte(roster), 0600); err != nil {
+	if err := os.WriteFile(rosterFile, []byte(roster), 0600); err != nil {
 		t.Fatalf("tulis roster initdb: %v", err)
 	}
-	t.Cleanup(func() { os.Remove("/docker-operator-roster.env") })
+	t.Cleanup(func() { os.Remove(rosterFile) })
 	run := func() (int, string) {
 		env := cleanEnvForScript(t,
-			"PGHOST=localhost",
-			"PGPASSWORD=local-bootstrap-only",
-			"POSTGRES_USER=postgres",
+			"PGHOST="+u.Hostname(),
+			"PGPORT="+bootPort,
+			"PGPASSWORD="+bootPW,
+			"POSTGRES_USER="+u.User.Username(),
 			"POSTGRES_DB="+scratchName,
 			"POSTGRES_PASSWORD=SENTINEL-postgres-initdb-987654321",
 			"UMNIA_RUNTIME_ROLE=umnia_business",
 			"UMNIA_RUNTIME_DB_PASSWORD=SENTINEL-runtime-initdb-987654321",
+			"UMNIA_OPERATOR_ROSTER_PATH="+rosterFile,
 		)
-		return runRealScript(t, script, t.TempDir(), env)
+		return runRealScript(t, script, tmpDir, env)
 	}
 	assertUnchanged := func(before string, verifiersBefore map[string]string) {
 		t.Helper()

@@ -8,7 +8,11 @@ on:
 
 jobs:
   business-api:
-    runs-on: ubuntu-latest
+    # Pin ubuntu-24.04: postgresql-16 ada di repositori default 24.04,
+    # sedangkan ubuntu-latest sudah pindah ke 26 dan paketnya tidak ada
+    # di sana (terbukti run #40). Pola native yang sama dengan job
+    # owner-flow-e2e; tanpa Docker service agar tidak ada dua klaster.
+    runs-on: ubuntu-24.04
     # Gate integrasi: tes memakai PostgreSQL nyata dengan role runtime,
     # bukan sekadar unit test yang bisa lolos lewat t.Skip. Tanpa URL
     # database, job ini sengaja gagal (lihat langkah Test), bukan hijau
@@ -25,20 +29,6 @@ jobs:
       # login per-operator untuk tes CLI/rutin; password HANYA fixture
       # CI yang dibuang tiap run. Peran dibuat langkah Prepare.
       OPERATOR_TEST_DATABASE_URL: postgres://umnia_op_test:ci-operator-only@localhost:5432/umnia_test?sslmode=disable
-    services:
-      postgres:
-        image: postgres:16-bookworm
-        env:
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: ci-bootstrap-only
-          POSTGRES_DB: postgres
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 5s
-          --health-timeout 3s
-          --health-retries 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -100,6 +90,28 @@ jobs:
                   raise SystemExit(f'FAIL negative: {name} lolos validasi')
           print('VALIDATED: 3 negative schema checks')
           PY
+      # PostgreSQL 16 native via APT (pola job owner-flow-e2e): cluster
+      # 16/main dibuat saat instalasi dan dijalankan bila belum berjalan.
+      # Tanpa Docker service — satu klaster saja, supaya jalur TCP tes
+      # dan jalur peer skrip (sudo -u postgres psql) melihat klaster
+      # yang sama. Password bootstrap HANYA fixture CI yang dibuang tiap
+      # run: peran postgres bawaan cluster baru TIDAK punya password —
+      # tetapkan lewat koneksi lokal istimewa (peer auth OS postgres),
+      # BUKAN via TCP, sebelum pemakaian TCP.
+      - name: Install + bootstrap native PostgreSQL 16 (APT)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y postgresql-16
+          if ! pg_isready -h localhost -p 5432 -U postgres > /dev/null 2>&1; then
+            sudo pg_ctlcluster 16 main start
+          fi
+          pg_lsclusters
+          pg_isready -h localhost -p 5432 -U postgres
+          sudo -u postgres psql -v ON_ERROR_STOP=1 \
+            -c "ALTER ROLE postgres WITH PASSWORD 'ci-bootstrap-only';"
+          # Bukti autentikasi TCP + versi server sebelum langkah Prepare.
+          PGPASSWORD=ci-bootstrap-only psql -h localhost -U postgres -d postgres \
+            -v ON_ERROR_STOP=1 -tAc "SELECT version();"
       # Password di bawah HANYA fixture CI yang dibuang tiap run, bukan
       # rahasia produksi. Role runtime meniru deployment: NOSUPERUSER,
       # NOBYPASSRLS, pemilik database tes; migrasi dijalankan akun
@@ -117,6 +129,7 @@ jobs:
             -c "CREATE ROLE umnia_op_test NOSUPERUSER NOBYPASSRLS NOCREATEROLE NOCREATEDB NOREPLICATION LOGIN PASSWORD 'ci-operator-only';" \
             -c "GRANT umnia_operator TO umnia_op_test;" \
             -c "CREATE DATABASE umnia_test OWNER umnia_business;" \
+            -c "CREATE DATABASE umnia_business OWNER umnia_business;" \
             -c "CREATE DATABASE umnia_empty;" \
             -c "CREATE DATABASE umnia_partial OWNER umnia_business;" \
             -c "CREATE DATABASE umnia_003only OWNER umnia_business;" \
@@ -128,6 +141,26 @@ jobs:
             -c "CREATE DATABASE umnia_009only OWNER umnia_business;" \
             -c "CREATE DATABASE umnia_extra OWNER umnia_business;"
           PGPASSWORD=ci-bootstrap-only psql -h localhost -U postgres -d umnia_test \
+            -v ON_ERROR_STOP=1 -1 \
+            -f services/business-api/migrations/001_init.sql \
+            -f services/business-api/migrations/002_identity.sql \
+            -f services/business-api/migrations/003_modules.sql \
+            -f services/business-api/migrations/004_module_installations.sql \
+            -f services/business-api/migrations/005_core_master_data.sql \
+            -f services/business-api/migrations/006_rental_contracts.sql \
+            -f services/business-api/migrations/007_asset_availability.sql \
+            -f services/business-api/migrations/008_price_versions.sql \
+            -f services/business-api/migrations/009_rental_agreed_prices.sql \
+            -f services/business-api/migrations/010_rental_custody.sql \
+            -f services/business-api/migrations/011_operator_entitlement.sql
+          # Fixture DB bisnis (F1-OPERATOR-ENTITLEMENT-CI-FIX): skema
+          # penuh 001-011, seperti deployment (configure-postgres.sh
+          # selalu menerapkan 001-011 ke umnia_business). Preflight
+          # configure-postgres.sh memeriksa kepemilikan/hak terhadap DB
+          # bisnis bila ada, dan subtes table-privilege/custom-parent
+          # memberi hak pada tabel workspaces di sana — DB kosong
+          # membuat seed itu gagal 42P01 sebelum skrip berjalan.
+          PGPASSWORD=ci-bootstrap-only psql -h localhost -U postgres -d umnia_business \
             -v ON_ERROR_STOP=1 -1 \
             -f services/business-api/migrations/001_init.sql \
             -f services/business-api/migrations/002_identity.sql \
@@ -231,6 +264,19 @@ jobs:
             -f services/business-api/migrations/009_rental_agreed_prices.sql \
             -f services/business-api/migrations/010_rental_custody.sql \
             -c "INSERT INTO schema_migrations (version) VALUES ('999_future') ON CONFLICT (version) DO NOTHING;"
+      # Bukti klaster tunggal: jalur TCP (yang dipakai tes/snapshot) dan
+      # jalur peer lokal (yang dipakai configure-postgres.sh via
+      # sudo -u postgres psql) harus melihat data_directory, port, dan
+      # versi server yang sama. Bila container lama masih mengikat 5432,
+      # TCP akan mengembalikan direktori/versi berbeda dan langkah ini
+      # gagal sebelum tes berjalan. Sekaligus membuktikan DB fixture
+      # umnia_business dapat dijangkau lewat TCP.
+      - name: Verify single native cluster (TCP vs peer)
+        run: |
+          peer="$(sudo -u postgres psql -v ON_ERROR_STOP=1 -tA -d postgres -c "SELECT current_setting('data_directory') || '|' || current_setting('port') || '|' || version();")"
+          tcp="$(PGPASSWORD=ci-bootstrap-only psql -h localhost -U postgres -v ON_ERROR_STOP=1 -tA -d postgres -c "SELECT current_setting('data_directory') || '|' || current_setting('port') || '|' || version();")"
+          test -n "$peer" && test "$peer" = "$tcp" || { echo "peer/TCP melihat klaster berbeda"; echo "peer: $peer"; echo "tcp: $tcp"; exit 1; }
+          PGPASSWORD=ci-bootstrap-only psql -h localhost -U postgres -v ON_ERROR_STOP=1 -tAc "SELECT 1;" -d umnia_business
       # CLI operator (F1-OPERATOR-ENTITLEMENT-IMPLEMENT): dibangun di
       # sini supaya kegagalan build gagal cepat; tes integrasi tetap
       # membangun salinannya sendiri dari sumber yang sama.

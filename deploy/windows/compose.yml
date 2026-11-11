@@ -41,6 +41,11 @@ services:
     volumes:
       - postgres-business-data:/var/lib/postgresql/data
       - ./initdb:/docker-entrypoint-initdb.d:ro
+      # Roster operator (F1-OPERATOR-ENTITLEMENT-IMPLEMENT): mount
+      # read-only HANYA ke service ini (bukan admin/API/web). File
+      # deploy/operator-roster.env harus ada sebelum compose up pertama
+      # (boleh kosong); initdb membacanya untuk peran NOLOGIN + login.
+      - ../operator-roster.env:/docker-operator-roster.env:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U umnia_bootstrap -d umnia_business"]
       interval: 5s
@@ -109,6 +114,8 @@ services:
       - /migrations/009_rental_agreed_prices.sql
       - -f
       - /migrations/010_rental_custody.sql
+      - -f
+      - /migrations/011_operator_entitlement.sql
     depends_on:
       postgres-business:
         condition: service_healthy
@@ -166,6 +173,29 @@ services:
     depends_on:
       business-api:
         condition: service_healthy
+
+  # CLI operator (F1-OPERATOR-ENTITLEMENT-IMPLEMENT): tidak auto-start
+  # (profile operator). DSN eksplisit dari env pemanggil; tidak ada
+  # secret lain, tidak ada akses ke roster/API/web. Tanpa ":?" agar
+  # `compose config`/`up` normal tetap jalan tanpa var ini; CLI
+  # sendiri gagal tertutup (exit 2) bila DSN tidak di-set. Pemakaian:
+  #   UMNIA_OPERATOR_DATABASE_URL='postgres://umnia_op_<id>:<pw>@postgres-business:5432/umnia_business?sslmode=disable' \
+  #     docker compose --profile operator run --rm operator-cli \
+  #       --workspace <uuid> --module rental.basic --version 0.1.0 --reason "<alasan>"
+  operator-cli:
+    profiles: ["operator"]
+    build:
+      context: ../../services/business-api
+      dockerfile: Dockerfile
+      target: cli
+    environment:
+      UMNIA_OPERATOR_DATABASE_URL: ${UMNIA_OPERATOR_DATABASE_URL}
+    command: ["--help"]
+    depends_on:
+      postgres-business:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
 
 volumes:
   postgres-business-data:

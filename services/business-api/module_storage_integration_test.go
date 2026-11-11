@@ -75,8 +75,8 @@ func TestModuleStorageFreshSchema(t *testing.T) {
 	).Scan(&markers); err != nil {
 		t.Fatalf("baca markers: %v", err)
 	}
-	if markers != "001_init,002_identity,003_modules,004_module_installations,005_core_master_data,006_rental_contracts,007_asset_availability,008_price_versions,009_rental_agreed_prices,010_rental_custody" {
-		t.Fatalf("markers: want 001_init,002_identity,003_modules,004_module_installations,005_core_master_data,006_rental_contracts,007_asset_availability,008_price_versions,009_rental_agreed_prices,010_rental_custody, got %s", markers)
+	if markers != "001_init,002_identity,003_modules,004_module_installations,005_core_master_data,006_rental_contracts,007_asset_availability,008_price_versions,009_rental_agreed_prices,010_rental_custody,011_operator_entitlement" {
+		t.Fatalf("markers: want 001_init,002_identity,003_modules,004_module_installations,005_core_master_data,006_rental_contracts,007_asset_availability,008_price_versions,009_rental_agreed_prices,010_rental_custody,011_operator_entitlement, got %s", markers)
 	}
 	for _, table := range []string{"module_installations", "module_entitlements"} {
 		var n int
@@ -131,7 +131,8 @@ func TestModuleStorageFreshSchema(t *testing.T) {
 		}
 	}
 	// Kebijakan: instalasi punya select+insert+update (terpisah);
-	// entitlement hanya select — tidak ada kebijakan DML.
+	// entitlement: select anggota + select/insert khusus eksekutor
+	// operator (011) — tidak ada kebijakan DML untuk runtime bisnis.
 	rows, err := boot.Query(`SELECT tablename, policyname, cmd FROM pg_policies WHERE tablename IN ('module_installations', 'module_entitlements') ORDER BY tablename, policyname`)
 	if err != nil {
 		t.Fatalf("baca pg_policies: %v", err)
@@ -149,7 +150,7 @@ func TestModuleStorageFreshSchema(t *testing.T) {
 		t.Fatalf("rows pg_policies: %v", err)
 	}
 	want := map[string][]string{
-		"module_entitlements":  {"entitlements_select:SELECT"},
+		"module_entitlements":  {"entitlements_exec_operator_insert:INSERT", "entitlements_exec_operator_select:SELECT", "entitlements_select:SELECT"},
 		"module_installations": {"installations_insert:INSERT", "installations_select:SELECT", "installations_update:UPDATE"},
 	}
 	if !reflect.DeepEqual(got, want) {

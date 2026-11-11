@@ -816,6 +816,90 @@ rusak/hilang, finance/invoice/pembayaran, stock ledger/kuantitas,
 denda keterlambatan/deposit/pajak, koreksi/supersesi custody,
 maintenance/kondisi/lokasi, UI, otoritas grant nyata/entitlement.
 
+## F1-OPERATOR-ENTITLEMENT-IMPLEMENT — grant operator lewat rutin (migrasi 011)
+
+Satu-satunya jalur grant operator adalah EXECUTE atas rutin
+`app.grant_module_entitlement` (SECURITY DEFINER, pemilik NOLOGIN
+`umnia_grant_exec`; migrasi `011_operator_entitlement.sql`). Operator
+login (`umnia_op_<id>`, anggota grup NOLOGIN `umnia_operator`) TIDAK
+punya DML mentah atas `module_entitlements`/`operator_audit_events`;
+runtime bisnis/admin TIDAK punya EXECUTE atas rutin. Aktor audit =
+`session_user` (bukan flag CLI, bukan GUC, bukan `current_user` di
+dalam SECURITY DEFINER). Grant + audit operator atomik dalam satu
+pemanggilan rutin, di bawah kunci workspace FOR UPDATE yang sama
+dengan aktivasi modul. Rutin hanya mengizinkan `rental.basic/0.1.0`
+DAN memeriksa tuple katalog ada; memeriksa marker 011 DI DALAM rutin
+sebelum mutasi (CLI tidak bisa membaca `schema_migrations`).
+Permintaan versi selain 0.1.0 selalu invalid, apa pun baris yang ada;
+permintaan 0.1.0 pada baris versi berbeda adalah konflik.
+`audit_present` hanya true bila event audit cocok dengan provenance
+baris entitlement (aktor, source, reason, waktu) — bukan sekadar
+workspace/modul/versi yang sama.
+Readiness API tidak berubah (tetap menghitung 10 marker 001–010).
+
+### CLI grant-entitlement
+
+```bash
+go build -o grant-entitlement ./cmd/grant-entitlement
+UMNIA_OPERATOR_DATABASE_URL='postgres://umnia_op_test:<password>@localhost:5432/umnia_test?sslmode=disable' \
+  ./grant-entitlement --workspace <uuid> --module rental.basic --version 0.1.0 --reason "<alasan>"
+# granted workspace=<uuid> module=rental.basic version=0.1.0 granted_by=operator:umnia_op_test granted_at=<RFC3339> audit_present=true
+```
+
+Kode keluar: 0 sukses (`granted` / `already_granted` /
+`legacy_existing` — no-op mengembalikan aktor/waktu grant asli tanpa
+tulis ulang dan tanpa audit baru; `legacy_existing` tidak pernah
+memfabrikasi audit); 2 input tidak valid, workspace tidak ditemukan,
+atau skema belum siap; 3 konflik versi; 1 tidak tersedia/hasil tidak
+diketahui (jalankan ulang untuk mengamati state). CLI tidak mencetak
+DSN, alasan, atau galat mentah driver, dan tidak pernah retry tulis
+buta.
+
+### Provisioning lokal + tes
+
+```bash
+# 1. Roster deployment (gitignored, mode 0600): deploy/operator-roster.env
+#    UMNIA_OP_TEST=ci-operator-only
+#    UMNIA_OP_E2E=local-operator-e2e-only
+# 2. Provisioning peran + migrasi (sebelum 011):
+UMNIA_BUSINESS_DB_PASSWORD='...' UMNIA_ADMIN_DB_PASSWORD='...' \
+  bash deploy/linux/configure-postgres.sh
+# 3. Fixture DB umnia_test (sekali; 011 diterapkan tes itu sendiri):
+sudo -u postgres psql -v ON_ERROR_STOP=1 -c "CREATE DATABASE umnia_test OWNER umnia_business;"
+sudo -u postgres psql -v ON_ERROR_STOP=1 -d umnia_test -1 \
+  -f services/business-api/migrations/001_init.sql \
+  -f services/business-api/migrations/002_identity.sql \
+  -f services/business-api/migrations/003_modules.sql \
+  -f services/business-api/migrations/004_module_installations.sql \
+  -f services/business-api/migrations/005_core_master_data.sql \
+  -f services/business-api/migrations/006_rental_contracts.sql \
+  -f services/business-api/migrations/007_asset_availability.sql \
+  -f services/business-api/migrations/008_price_versions.sql \
+  -f services/business-api/migrations/009_rental_agreed_prices.sql \
+  -f services/business-api/migrations/010_rental_custody.sql
+# 4. Tes (prasyarat hilang = GAGAL, bukan dilewati):
+OPERATOR_TEST_DATABASE_URL='postgres://umnia_op_test:ci-operator-only@localhost:5432/umnia_test?sslmode=disable' \
+BUSINESS_DATABASE_URL='postgres://umnia_business:<password>@localhost:5432/umnia_test?sslmode=disable' \
+BUSINESS_BOOTSTRAP_DATABASE_URL='postgres://postgres:local-bootstrap-only@localhost:5432/umnia_test?sslmode=disable' \
+  go test -run 'TestGrantEntitlement' -v ./...
+```
+
+Tes integrasi (`grant_entitlement_integration_test.go`) memakai CLI
+dan rutin sungguhan: grant positif + aktivasi pemilik 200, no-op/
+legacy/konflik, DML mentah/fake audit/invoke runtime/SET ROLE/GUC
+palsu/shadowing temp ditolak, fault INSERT audit me-rollback grant,
+serialisasi kunci grant/aktivasi, isolasi lintas-workspace, DB tanpa
+011 gagal tertutup, ACL sesudah rerun, rotasi/nonaktifkan (termasuk
+sesi yang sudah terbuka), preflight provisioning menolak state tidak
+aman sebelum mutasi (ketiga provisioner), dan instalasi 011 pada
+klaster temp bisnis-saja tanpa peran umnia_admin. Peran adalah global klaster, sedangkan
+skema/izin per-database: DB tanpa 011 tidak punya rutin/EXECUTE
+meski peran klasternya ada.
+
+**Yang belum ada:** revoke, grant modul/versi lain, UI grant, grant
+massal, scheduler kedaluwarsa, dan penerimaan kode keamanan
+independen (review Windows masih diperlukan).
+
 ## Yang sengaja TIDAK ada di F1-03
 
 UI login/workspace (web masih skeleton F1-01), mailer undangan (token

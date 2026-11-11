@@ -1,9 +1,11 @@
 // Alur pemilik end-to-end di browser NYATA melawan web + business-api +
 // PG native terisolasi (umnia_e2e). Langkah pengguna memakai UI +
-// proxy same-origin; psql HANYA untuk setup/fault injection/entitlement
-// sintetis terisolasi. Rahasia (kata sandi, token, kode undangan) tidak
-// pernah di-log; kode undangan hanya hidup di memori tes ini.
+// proxy same-origin; psql HANYA untuk setup/fault injection. Grant
+// entitlement memakai CLI operator SUNGGUHAN (bukan INSERT sintetis).
+// Rahasia (kata sandi, token, kode undangan, DSN operator) tidak pernah
+// di-log; kode undangan hanya hidup di memori tes ini.
 import { execFileSync } from 'node:child_process'
+import { existsSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { expect, test, type Page } from '@playwright/test'
@@ -32,12 +34,29 @@ function psql(sql: string): string {
   return execFileSync('psql', [BOOTSTRAP_URL, '-v', 'ON_ERROR_STOP=1', '-tAc', sql], { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'] })
 }
 
+// Grant operator LEWAT CLI SUNGGUHAN (F1-OPERATOR-ENTITLEMENT-IMPLEMENT):
+// binary dibangun CI/dev (E2E_GRANT_CLI), DSN operator hanya hidup di
+// env proses tes ini (tidak ditulis ke file/log). Prasyarat yang hilang
+// (binary/DSN) adalah GAGAL, bukan dilewati.
+const REPO_ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..')
+const GRANT_CLI = process.env.E2E_GRANT_CLI || path.join(REPO_ROOT, 'services', 'business-api', 'grant-entitlement')
+const OPERATOR_URL = process.env.E2E_OPERATOR_DATABASE_URL || ''
+
 function grantRental(ws: string) {
-  // Grant sintetis terisolasi QA: kunci baris workspace, lalu INSERT.
-  psql(`BEGIN; SELECT id FROM workspaces WHERE id = '${ws}' FOR UPDATE; ` +
-    `INSERT INTO module_entitlements (workspace_id, module_id, version, granted_by, source, reason) ` +
-    `VALUES ('${ws}', 'rental.basic', '0.1.0', 'operator:fixture', 'fixture', 'tes E2E owner-flow') ` +
-    `ON CONFLICT (workspace_id, module_id) DO NOTHING; COMMIT;`)
+  if (!OPERATOR_URL) {
+    throw new Error('E2E_OPERATOR_DATABASE_URL belum diset — provisioning operator (lihat deploy/windows/README.md) belum dijalankan; tes gagal, bukan dilewati')
+  }
+  if (!existsSync(GRANT_CLI)) {
+    throw new Error(`CLI grant-entitlement tidak ditemukan di ${GRANT_CLI} — bangun dulu: go build -o grant-entitlement ./cmd/grant-entitlement (di services/business-api)`)
+  }
+  const out = execFileSync(GRANT_CLI, ['--workspace', ws, '--module', 'rental.basic', '--version', '0.1.0', '--reason', 'tes E2E owner-flow'], {
+    encoding: 'utf-8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: { ...process.env, UMNIA_OPERATOR_DATABASE_URL: OPERATOR_URL },
+  })
+  if (!out.startsWith('granted ')) {
+    throw new Error(`grant CLI: hasil tak terduga (${out.slice(0, 80)})`)
+  }
 }
 
 async function uiRegister(page: Page, email: string) {
@@ -206,7 +225,7 @@ test.describe.serial('alur pemilik', () => {
     await expect(page.getByText('Belum aktif.')).toBeVisible()
   })
 
-  test('grant sintetis terisolasi lalu aktivasi 200', async ({ page }) => {
+  test('grant operator lewat CLI lalu aktivasi 200', async ({ page }) => {
     grantRental(wsA)
     await uiLogin(page, ownerEmail)
     await gotoAuthed(page, `/workspaces/${wsA}/modules`, ownerEmail)

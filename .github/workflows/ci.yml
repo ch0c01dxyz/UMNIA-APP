@@ -21,6 +21,10 @@ jobs:
       # Password fixture CI yang dibuang tiap run, sama seperti langkah
       # Prepare di bawah.
       BUSINESS_BOOTSTRAP_DATABASE_URL: postgres://postgres:ci-bootstrap-only@localhost:5432/umnia_test?sslmode=disable
+      # Fixture grant operator (F1-OPERATOR-ENTITLEMENT-IMPLEMENT):
+      # login per-operator untuk tes CLI/rutin; password HANYA fixture
+      # CI yang dibuang tiap run. Peran dibuat langkah Prepare.
+      OPERATOR_TEST_DATABASE_URL: postgres://umnia_op_test:ci-operator-only@localhost:5432/umnia_test?sslmode=disable
     services:
       postgres:
         image: postgres:16-bookworm
@@ -108,6 +112,10 @@ jobs:
           PGPASSWORD=ci-bootstrap-only psql -h localhost -U postgres -d postgres \
             -v ON_ERROR_STOP=1 \
             -c "CREATE ROLE umnia_business NOSUPERUSER NOBYPASSRLS LOGIN PASSWORD 'ci-runtime-only';" \
+            -c "CREATE ROLE umnia_operator NOLOGIN NOSUPERUSER NOBYPASSRLS NOCREATEROLE NOCREATEDB NOREPLICATION;" \
+            -c "CREATE ROLE umnia_grant_exec NOLOGIN NOSUPERUSER NOBYPASSRLS NOCREATEROLE NOCREATEDB NOREPLICATION;" \
+            -c "CREATE ROLE umnia_op_test NOSUPERUSER NOBYPASSRLS NOCREATEROLE NOCREATEDB NOREPLICATION LOGIN PASSWORD 'ci-operator-only';" \
+            -c "GRANT umnia_operator TO umnia_op_test;" \
             -c "CREATE DATABASE umnia_test OWNER umnia_business;" \
             -c "CREATE DATABASE umnia_empty;" \
             -c "CREATE DATABASE umnia_partial OWNER umnia_business;" \
@@ -130,7 +138,8 @@ jobs:
             -f services/business-api/migrations/007_asset_availability.sql \
             -f services/business-api/migrations/008_price_versions.sql \
             -f services/business-api/migrations/009_rental_agreed_prices.sql \
-            -f services/business-api/migrations/010_rental_custody.sql
+            -f services/business-api/migrations/010_rental_custody.sql \
+            -f services/business-api/migrations/011_operator_entitlement.sql
           # Fixture negatif readiness: database yang berhenti di 002
           # (tanpa registry 003) harus dilaporkan belum siap.
           PGPASSWORD=ci-bootstrap-only psql -h localhost -U postgres -d umnia_partial \
@@ -222,6 +231,12 @@ jobs:
             -f services/business-api/migrations/009_rental_agreed_prices.sql \
             -f services/business-api/migrations/010_rental_custody.sql \
             -c "INSERT INTO schema_migrations (version) VALUES ('999_future') ON CONFLICT (version) DO NOTHING;"
+      # CLI operator (F1-OPERATOR-ENTITLEMENT-IMPLEMENT): dibangun di
+      # sini supaya kegagalan build gagal cepat; tes integrasi tetap
+      # membangun salinannya sendiri dari sumber yang sama.
+      - name: Build operator CLI
+        run: go build -o /tmp/grant-entitlement ./cmd/grant-entitlement
+        working-directory: services/business-api
       - name: Test (integration gate)
         run: |
           test -n "$BUSINESS_DATABASE_URL" || { echo "BUSINESS_DATABASE_URL wajib di gate integrasi"; exit 1; }
@@ -265,6 +280,12 @@ jobs:
       BUSINESS_DATABASE_URL: postgres://umnia_business:ci-runtime-only@localhost:5432/umnia_e2e?sslmode=disable
       BUSINESS_BOOTSTRAP_DATABASE_URL: postgres://postgres:ci-bootstrap-only@localhost:5432/umnia_e2e?sslmode=disable
       E2E_BOOTSTRAP_URL: postgres://postgres:ci-bootstrap-only@localhost:5432/umnia_e2e?sslmode=disable
+      # Fixture grant operator E2E (F1-OPERATOR-ENTITLEMENT-IMPLEMENT):
+      # CLI dibangun langkah Build operator CLI; DSN hanya hidup di
+      # proses tes (tidak ditulis ke file/log). Password HANYA fixture
+      # CI yang dibuang tiap run.
+      E2E_GRANT_CLI: /tmp/grant-entitlement
+      E2E_OPERATOR_DATABASE_URL: postgres://umnia_op_e2e:ci-operator-only@localhost:5432/umnia_e2e?sslmode=disable
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -300,7 +321,7 @@ jobs:
       # Password di bawah HANYA fixture CI yang dibuang tiap run, bukan
       # rahasia produksi. DB terisolasi umnia_e2e (bukan umnia_test) supaya
       # fixture E2E tidak bercampur dengan gate integrasi Go.
-      - name: Prepare E2E database (001-010)
+      - name: Prepare E2E database (001-011)
         run: |
           for i in $(seq 1 30); do
             pg_isready -h localhost -p 5432 -U postgres && break || sleep 2
@@ -308,6 +329,10 @@ jobs:
           PGPASSWORD=ci-bootstrap-only psql -h localhost -U postgres -d postgres \
             -v ON_ERROR_STOP=1 \
             -c "CREATE ROLE umnia_business NOSUPERUSER NOBYPASSRLS LOGIN PASSWORD 'ci-runtime-only';" \
+            -c "CREATE ROLE umnia_operator NOLOGIN NOSUPERUSER NOBYPASSRLS NOCREATEROLE NOCREATEDB NOREPLICATION;" \
+            -c "CREATE ROLE umnia_grant_exec NOLOGIN NOSUPERUSER NOBYPASSRLS NOCREATEROLE NOCREATEDB NOREPLICATION;" \
+            -c "CREATE ROLE umnia_op_e2e NOSUPERUSER NOBYPASSRLS NOCREATEROLE NOCREATEDB NOREPLICATION LOGIN PASSWORD 'ci-operator-only';" \
+            -c "GRANT umnia_operator TO umnia_op_e2e;" \
             -c "CREATE DATABASE umnia_e2e OWNER umnia_business;"
           PGPASSWORD=ci-bootstrap-only psql -h localhost -U postgres -d umnia_e2e \
             -v ON_ERROR_STOP=1 -1 \
@@ -320,7 +345,8 @@ jobs:
             -f services/business-api/migrations/007_asset_availability.sql \
             -f services/business-api/migrations/008_price_versions.sql \
             -f services/business-api/migrations/009_rental_agreed_prices.sql \
-            -f services/business-api/migrations/010_rental_custody.sql
+            -f services/business-api/migrations/010_rental_custody.sql \
+            -f services/business-api/migrations/011_operator_entitlement.sql
       - name: Build + start business-api
         run: |
           go build -o /tmp/umnia-business-api .
@@ -331,6 +357,11 @@ jobs:
             sleep 2
           done
           curl -fsS http://localhost:8080/readyz > /dev/null || { echo "business-api tidak siap"; cat /tmp/umnia-api.log; exit 1; }
+        working-directory: services/business-api
+      # CLI operator (F1-OPERATOR-ENTITLEMENT-IMPLEMENT): dipakai fixture
+      # E2E (owner-flow.spec.ts) lewat E2E_GRANT_CLI di atas.
+      - name: Build operator CLI
+        run: go build -o /tmp/grant-entitlement ./cmd/grant-entitlement
         working-directory: services/business-api
       - name: Build web
         run: |

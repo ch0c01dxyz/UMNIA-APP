@@ -26,6 +26,103 @@ Urutan startup:
    Readiness `/readyz` memeriksa migrasi `002_identity` sudah terapan,
    bukan hanya ping koneksi.
 
+## Operator entitlement — grant rental.basic (F1-OPERATOR-ENTITLEMENT-IMPLEMENT)
+
+Satu-satunya jalur grant operator adalah CLI `grant-entitlement` yang
+memanggil rutin `app.grant_module_entitlement` (SECURITY DEFINER,
+migrasi 011). Operator login TIDAK punya DML mentah; runtime bisnis/
+admin TIDAK bisa memanggil rutin. Aktor audit = `session_user`.
+Rutin hanya mengizinkan `rental.basic/0.1.0` dan memeriksa tuple
+katalog ada. Detail kontrak: `docs/reviews/f1-operator-entitlement-contract.md`.
+
+### 1. Buat roster deployment (sekali, sebelum compose up pertama)
+
+```powershell
+# Dari root repo. File ini gitignored — JANGAN commit.
+@'
+UMNIA_OP_E2E=<password-minimal-12-karakter>
+'@ | Set-Content -Path deploy\operator-roster.env -Encoding ascii
+# Kunci ACL ke pengguna saat ini saja (provision-operator.ps1 juga
+# melakukannya; lakukan manual bila file dibuat di luar skrip itu).
+# Pakai SID (bukan "$env:USERNAME:(F)" — PS 5.1 mengembang bentuk
+# itu menjadi "(F)" dan icacls gagal/mengunci ke prinsipal yang salah).
+# SID numerik HARUS diawali '*' — tanpa itu icacls gagal 1332
+# ("No mapping between account names and security IDs was done").
+$sid = ([System.Security.Principal.WindowsIdentity]::GetCurrent()).User.Value
+icacls deploy\operator-roster.env /inheritance:r /grant:r "*${sid}:(F)"
+# Himpunan pembaca yang diizinkan: pengguna provisioning (FullControl)
+# + pengecualian tepercaya SYSTEM (S-1-5-18) dan Administrators
+# (S-1-5-32-544). provision-operator.ps1 menghapus ACE eksplisit lain
+# (mis. Everyone:Read) — /inheritance:r + /grant:r saja tidak cukup.
+```
+
+Roster boleh kosong (peran NOLOGIN tetap dibuat, tanpa login). Tanpa
+file ini, Docker membuat direktori kosong di path mount itu; initdb
+melewati provisioning operator dan `migrate` gagal tertutup pada
+validasi peran 011 — buat roster dulu.
+
+### 2a. Volume baru — peran dibuat initdb
+
+`postgres-business` me-mount roster read-only (`/docker-operator-roster.env`).
+Skrip `initdb/01-runtime-roles.sh` (hanya saat volume masih kosong)
+membuat `umnia_operator` + `umnia_grant_exec` (NOLOGIN) dan login
+per-operator dari roster. Service `migrate` lalu menerapkan 001–011.
+
+### 2b. Volume lama — provision SEBELUM 011
+
+```powershell
+# Stack bisnis harus jalan; migrate BELUM boleh menerapkan 011.
+docker compose -f deploy/windows/compose.yml up -d postgres-business
+powershell -NoProfile -ExecutionPolicy Bypass -File deploy\windows\provision-operator.ps1
+docker compose -f deploy/windows/compose.yml up migrate
+```
+
+`provision-operator.ps1` idempotent (aman dijalankan ulang): membuat
+peran NOLOGIN + login dari roster, password hanya lewat stdin psql
+(bukan argv/log). Bila 011 sudah terlanjur gagal karena peran belum
+ada, jalankan skrip ini lalu jalankan `migrate` lagi (011 idempotent).
+
+### 3. Grant lewat operator-cli (profile operator)
+
+```powershell
+$env:UMNIA_OPERATOR_DATABASE_URL = 'postgres://umnia_op_e2e:<password>@postgres-business:5432/umnia_business?sslmode=disable'
+docker compose -f deploy/windows/compose.yml --profile operator run --rm operator-cli --workspace <uuid> --module rental.basic --version 0.1.0 --reason "<alasan>"
+# Keluar: granted workspace=<uuid> module=rental.basic version=0.1.0 granted_by=operator:umnia_op_e2e granted_at=<RFC3339> audit_present=true
+```
+
+DSN hanya hidup di env proses pemanggil; CLI tidak mencetak DSN,
+alasan, atau galat mentah driver. Kode keluar: 0 sukses
+(granted/already_granted/legacy_existing); 2 input tidak valid,
+workspace tidak ditemukan, atau skema belum siap; 3 konflik versi;
+1 tidak tersedia/hasil tidak diketahui (jalankan ulang untuk mengamati
+state — CLI tidak pernah retry tulis buta).
+
+### 4. Rotasi / nonaktifkan operator
+
+Rotasi kata sandi = ubah password di roster, lalu jalankan ulang
+`provision-operator.ps1` (Linux: `configure-postgres.sh`) — jangan
+menaruh password di argumen perintah. Nonaktifkan satu operator
+(tanpa password di perintah):
+
+```powershell
+docker compose -f deploy/windows/compose.yml exec postgres-business psql -U umnia_bootstrap -d umnia_business -c "REVOKE umnia_operator FROM umnia_op_e2e;"
+docker compose -f deploy/windows/compose.yml exec postgres-business psql -U umnia_bootstrap -d umnia_business -c "ALTER ROLE umnia_op_e2e NOLOGIN;"
+```
+
+Penonaktifan berlaku untuk sesi yang sudah terbuka pada pemanggilan
+berikutnya (guard per-call di dalam rutin). Rollback operasional =
+nonaktifkan akses seperti di atas; TIDAK PERNAH DROP/TRUNCATE/DELETE
+riwayat entitlement/audit, tabel, trigger, atau marker 011.
+
+### Yang belum terbukti di Windows
+
+Runtime Windows (compose up + grant CLI + aktivasi UI) adalah
+NOT RUN dari Linux dan harus dibuktikan reviewer di host Windows
+dengan perintah di atas + E2E `npm run test:e2e` (job CI
+owner-flow-e2e sudah memakai CLI sungguhan). Pembuatan peran di sini
+hanya untuk provisioning QA/dev terisolasi, bukan penambahan operator
+nyata atau pemberian grant produksi.
+
 ## Upgrade volume lama (dibuat sebelum perbaikan ini)
 
 Volume lama dibuat dengan `POSTGRES_USER=umnia_business` (superuser) dan

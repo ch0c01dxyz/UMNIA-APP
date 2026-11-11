@@ -3,4 +3,6 @@ node_modules/
 .nuxt/
 .output/
 services/business-api/business-api
+services/business-api/grant-entitlement
 deploy/windows/tests/bin/
+deploy/operator-roster.env

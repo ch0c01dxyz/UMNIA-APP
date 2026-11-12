@@ -5,6 +5,9 @@ on:
   # sebelum merge; PR tetap memicu CI seperti biasa.
   push:
   pull_request:
+  # Dispatch manual: jalan keluar bila sebuah run macet di startup
+  # (run #44) dan "Re-run all jobs" tidak lagi membuat attempt baru.
+  workflow_dispatch:
 
 jobs:
   business-api:

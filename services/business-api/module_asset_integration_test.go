@@ -211,6 +211,33 @@ func seedDraftForHold(t *testing.T, env *activationEnv, cust, item, starts, ends
 	return id, body
 }
 
+// liveWindow mengembalikan pasangan (starts, ends) relatif terhadap jam
+// saat ini, dalam format RFC3339 +07:00 yang dipakai fixture lain.
+// Jendela 48 jam yang dibuka 24 jam dari sekarang dan ditutup 72 jam
+// dari sekarang, jadi pembuatan hold selalu melihat draft yang masih
+// hidup, kapan pun suite dijalankan — dan panjang 48 jamnya menjaga
+// hubungan tumpang-tindih/bersebelahan yang diuji TestAssetAvailability
+// (geser 24 jam = tumpang tindih, geser 48 jam = bersebelahan).
+// Tanggal tetap 2026-11-10/12 kedaluwarsa pada 2026-11-12T02:00:00Z dan
+// meruntuhkan 11 tes di hosted CI run #45 (hold → 409 "periode draft
+// sudah berakhir"). Pola ini mengikuti seedCustodyRefs, yang menghitung
+// jendela dari jam DB + offset.
+func liveWindow() (string, string) {
+	const layout = "2006-01-02T15:04:05+07:00"
+	loc := time.FixedZone("WIB", 7*3600)
+	now := time.Now().In(loc)
+	return now.Add(24 * time.Hour).Format(layout),
+		now.Add(72 * time.Hour).Format(layout)
+}
+
+// shiftWindow menggeser jendela (starts, ends) sejauh d, format sama.
+func shiftWindow(starts, ends string, d time.Duration) (string, string) {
+	const layout = "2006-01-02T15:04:05+07:00"
+	s, _ := time.Parse(layout, starts)
+	e, _ := time.Parse(layout, ends)
+	return s.Add(d).Format(layout), e.Add(d).Format(layout)
+}
+
 // seedAsset membuat satu aset lewat API dan mengembalikan id-nya.
 func seedAsset(t *testing.T, env *activationEnv, item, serial string) string {
 	t.Helper()
@@ -890,12 +917,16 @@ func TestAssetHTTP(t *testing.T) {
 // memblokir, bersebelahan/beda aset/release/kedaluwarsa tidak.
 func TestAssetAvailability(t *testing.T) {
 	env := setupAsset(t)
+	liveStarts, liveEnds := liveWindow()
+	ovStarts, ovEnds := shiftWindow(liveStarts, liveEnds, 24*time.Hour)
+	afterStarts, afterEnds := shiftWindow(liveStarts, liveEnds, 48*time.Hour)
+	beforeStarts, beforeEnds := shiftWindow(liveStarts, liveEnds, -48*time.Hour)
 	cust, item := seedAssetRefs(t, env, "SKU-AVAIL-A")
 	_, item2 := seedAssetRefs(t, env, "SKU-AVAIL-B")
 	activateRental(t, env)
 	assetA := seedAsset(t, env, item, "SN-AVAIL-A")
 	assetB := seedAsset(t, env, item2, "SN-AVAIL-B")
-	draft, _ := seedDraftForHold(t, env, cust, item, "2026-11-10T09:00:00+07:00", "2026-11-12T09:00:00+07:00")
+	draft, _ := seedDraftForHold(t, env, cust, item, liveStarts, liveEnds)
 	holdID, _ := seedHold(t, env, draft, assetA, "avail-hold-1")
 
 	check := func(asset, starts, ends string, want bool) {
@@ -922,25 +953,25 @@ func TestAssetAvailability(t *testing.T) {
 	}
 	// Periode tumpang tindih → false; bersebelahan (mulai tepat di
 	// ends) → true; sebelum periode → true; aset berbeda → true.
-	check(assetA, "2026-11-10T09:00:00+07:00", "2026-11-12T09:00:00+07:00", false)
-	check(assetA, "2026-11-11T09:00:00+07:00", "2026-11-13T09:00:00+07:00", false)
-	check(assetA, "2026-11-12T09:00:00+07:00", "2026-11-14T09:00:00+07:00", true)
-	check(assetA, "2026-11-08T09:00:00+07:00", "2026-11-10T09:00:00+07:00", true)
-	check(assetB, "2026-11-10T09:00:00+07:00", "2026-11-12T09:00:00+07:00", true)
+	check(assetA, liveStarts, liveEnds, false)
+	check(assetA, ovStarts, ovEnds, false)
+	check(assetA, afterStarts, afterEnds, true)
+	check(assetA, beforeStarts, beforeEnds, true)
+	check(assetB, liveStarts, liveEnds, true)
 	// Kasir boleh membaca; aset hilang/lintas-tenant → 404 identik.
 	code, _ := getAvailability(t, env.srv, env.wsA, assetA, env.cashToken,
-		availQuery("2026-11-10T09:00:00+07:00", "2026-11-12T09:00:00+07:00"))
+		availQuery(liveStarts, liveEnds))
 	if code != http.StatusOK {
 		t.Fatalf("availability kasir: want 200, got %d", code)
 	}
 	code, body := getAvailability(t, env.srv, env.wsA, "99999999-8888-7777-6666-555555555555", env.ownerToken,
-		availQuery("2026-11-10T09:00:00+07:00", "2026-11-12T09:00:00+07:00"))
+		availQuery(liveStarts, liveEnds))
 	if code != http.StatusNotFound {
 		t.Fatalf("availability aset hilang: want 404, got %d (%v)", code, body)
 	}
 	assertFlatError(t, body, "aset tidak ditemukan")
 	code, _ = getAvailability(t, env.srv, env.wsA, assetB, env.otherToken,
-		availQuery("2026-11-10T09:00:00+07:00", "2026-11-12T09:00:00+07:00"))
+		availQuery(liveStarts, liveEnds))
 	if code != http.StatusForbidden {
 		t.Fatalf("availability nonmember: want 403, got %d", code)
 	}
@@ -964,11 +995,11 @@ func TestAssetAvailability(t *testing.T) {
 	if code != http.StatusOK {
 		t.Fatalf("release untuk availability: want 200, got %d", code)
 	}
-	check(assetA, "2026-11-10T09:00:00+07:00", "2026-11-12T09:00:00+07:00", true)
+	check(assetA, liveStarts, liveEnds, true)
 	holdID2, _ := seedHold(t, env, draft, assetA, "avail-hold-2")
-	check(assetA, "2026-11-10T09:00:00+07:00", "2026-11-12T09:00:00+07:00", false)
+	check(assetA, liveStarts, liveEnds, false)
 	expireHoldFixture(t, env.boot, holdID2, "-1 hour")
-	check(assetA, "2026-11-10T09:00:00+07:00", "2026-11-12T09:00:00+07:00", true)
+	check(assetA, liveStarts, liveEnds, true)
 }
 
 // TestHoldCreate: happy path + guard — periode disalin dari draft,
@@ -977,12 +1008,13 @@ func TestAssetAvailability(t *testing.T) {
 // berjalan boleh; inactive/revoked/read-denial 403; fault 500.
 func TestHoldCreate(t *testing.T) {
 	env := setupAsset(t)
+	liveStarts, liveEnds := liveWindow()
 	cust, item := seedAssetRefs(t, env, "SKU-HOLD-A")
 	_, item2 := seedAssetRefs(t, env, "SKU-HOLD-B")
 	activateRental(t, env)
 	assetA := seedAsset(t, env, item, "SN-HOLD-A")
 	assetB := seedAsset(t, env, item2, "SN-HOLD-B")
-	draft, draftBody := seedDraftForHold(t, env, cust, item, "2026-11-10T09:00:00+07:00", "2026-11-12T09:00:00+07:00")
+	draft, draftBody := seedDraftForHold(t, env, cust, item, liveStarts, liveEnds)
 
 	code, body := createHold(t, env.srv, env.wsA, draft, env.ownerToken, "hold-1", map[string]string{"asset_id": assetA})
 	if code != http.StatusCreated {
@@ -1063,6 +1095,7 @@ func TestHoldCreate(t *testing.T) {
 // core eksplisit ditolak → 403; fault query izin → 500.
 func TestHoldGuardDenials(t *testing.T) {
 	env := setupAsset(t)
+	liveStarts, liveEnds := liveWindow()
 	cust, item := seedAssetRefs(t, env, "SKU-GUARD-A")
 	asset := seedAsset(t, env, item, "SN-GUARD-A")
 
@@ -1075,7 +1108,7 @@ func TestHoldGuardDenials(t *testing.T) {
 
 	// Aktifkan, buat draft, lalu deaktivasi → 403.
 	activateRental(t, env)
-	draft, _ := seedDraftForHold(t, env, cust, item, "2026-11-10T09:00:00+07:00", "2026-11-12T09:00:00+07:00")
+	draft, _ := seedDraftForHold(t, env, cust, item, liveStarts, liveEnds)
 	if code, _ := deactivateModule(t, env.srv, env.wsA, "rental.basic", env.ownerToken); code != http.StatusOK {
 		t.Fatalf("deactivate prasyarat: want 200, got %d", code)
 	}
@@ -1156,12 +1189,13 @@ func TestHoldGuardDenials(t *testing.T) {
 // kunci released/expired tetap terikat; kunci case-sensitive.
 func TestHoldIdempotency(t *testing.T) {
 	env := setupAsset(t)
+	liveStarts, liveEnds := liveWindow()
 	cust, item := seedAssetRefs(t, env, "SKU-IDEM-A")
 	_, item2 := seedAssetRefs(t, env, "SKU-IDEM-B")
 	activateRental(t, env)
 	assetA := seedAsset(t, env, item, "SN-IDEM-A")
 	assetB := seedAsset(t, env, item2, "SN-IDEM-B")
-	draft, _ := seedDraftForHold(t, env, cust, item, "2026-11-10T09:00:00+07:00", "2026-11-12T09:00:00+07:00")
+	draft, _ := seedDraftForHold(t, env, cust, item, liveStarts, liveEnds)
 
 	// Pertama 201; replay persis → 200 dengan DTO yang sama, tanpa
 	// baris/audit tambahan.
@@ -1226,7 +1260,7 @@ func TestHoldIdempotency(t *testing.T) {
 	// kunci dibandingkan case-insensitive, permintaan kedua adalah
 	// replay → 200; bila case-sensitive, ini hold baru yang overlap
 	// dengan hold pertama → 409 EXCLUDE.
-	draft2, _ := seedDraftForHold(t, env, cust, item2, "2026-11-10T09:00:00+07:00", "2026-11-12T09:00:00+07:00")
+	draft2, _ := seedDraftForHold(t, env, cust, item2, liveStarts, liveEnds)
 	code, _ = createHold(t, env.srv, env.wsA, draft2, env.ownerToken, "IDEM-CASE-1", map[string]string{"asset_id": assetB})
 	if code != http.StatusCreated {
 		t.Fatalf("hold kunci huruf besar: want 201, got %d", code)
@@ -1264,10 +1298,12 @@ func TestHoldIdempotency(t *testing.T) {
 // paralel → satu 201 + satu 200, tetap satu hold + satu audit.
 func TestHoldConcurrentSameAsset(t *testing.T) {
 	env := setupAsset(t)
+	liveStarts, liveEnds := liveWindow()
+	afterStarts, afterEnds := shiftWindow(liveStarts, liveEnds, 48*time.Hour)
 	cust, item := seedAssetRefs(t, env, "SKU-RACE-A")
 	activateRental(t, env)
 	asset := seedAsset(t, env, item, "SN-RACE-A")
-	draft, _ := seedDraftForHold(t, env, cust, item, "2026-11-10T09:00:00+07:00", "2026-11-12T09:00:00+07:00")
+	draft, _ := seedDraftForHold(t, env, cust, item, liveStarts, liveEnds)
 
 	// Kunci berbeda, aset+periode sama.
 	codes, _ := parallel(t,
@@ -1289,7 +1325,7 @@ func TestHoldConcurrentSameAsset(t *testing.T) {
 	// Kunci sama paralel pada draft/aset lain → satu 201 + satu 200.
 	_, item2 := seedAssetRefs(t, env, "SKU-RACE-B")
 	asset2 := seedAsset(t, env, item2, "SN-RACE-B")
-	draft2, _ := seedDraftForHold(t, env, cust, item2, "2026-11-10T09:00:00+07:00", "2026-11-12T09:00:00+07:00")
+	draft2, _ := seedDraftForHold(t, env, cust, item2, liveStarts, liveEnds)
 	codes, _ = parallel(t,
 		func() (int, map[string]any, error) {
 			return callHoldAPI(env.srv, "POST", "/workspaces/"+env.wsA+"/rental/contracts/"+draft2+"/holds", env.ownerToken, []string{"race-same"}, map[string]string{"asset_id": asset2})
@@ -1307,14 +1343,14 @@ func TestHoldConcurrentSameAsset(t *testing.T) {
 		t.Fatalf("konkurren kunci sama: want 2 hold + 2 audit")
 	}
 	// Periode bersebelahan dan aset berbeda → dua 201 (bukan overlap).
-	draft3, _ := seedDraftForHold(t, env, cust, item, "2026-11-12T09:00:00+07:00", "2026-11-14T09:00:00+07:00")
+	draft3, _ := seedDraftForHold(t, env, cust, item, afterStarts, afterEnds)
 	code, _ := createHold(t, env.srv, env.wsA, draft3, env.ownerToken, "race-adjacent", map[string]string{"asset_id": asset})
 	if code != http.StatusCreated {
 		t.Fatalf("hold bersebelahan: want 201, got %d", code)
 	}
 	_, item3 := seedAssetRefs(t, env, "SKU-RACE-C")
 	asset3 := seedAsset(t, env, item3, "SN-RACE-C")
-	draft4, _ := seedDraftForHold(t, env, cust, item3, "2026-11-10T09:00:00+07:00", "2026-11-12T09:00:00+07:00")
+	draft4, _ := seedDraftForHold(t, env, cust, item3, liveStarts, liveEnds)
 	code, _ = createHold(t, env.srv, env.wsA, draft4, env.ownerToken, "race-other-asset", map[string]string{"asset_id": asset3})
 	if code != http.StatusCreated {
 		t.Fatalf("hold aset berbeda: want 201, got %d", code)
@@ -1328,10 +1364,11 @@ func TestHoldConcurrentSameAsset(t *testing.T) {
 // disimpulkan dari created_at (bukan kolom urutan commit).
 func TestHoldCreateVsDeactivateRace(t *testing.T) {
 	env := setupAsset(t)
+	liveStarts, liveEnds := liveWindow()
 	cust, item := seedAssetRefs(t, env, "SKU-RACE-D")
 	activateRental(t, env)
 	asset := seedAsset(t, env, item, "SN-RACE-D")
-	draft, _ := seedDraftForHold(t, env, cust, item, "2026-11-10T09:00:00+07:00", "2026-11-12T09:00:00+07:00")
+	draft, _ := seedDraftForHold(t, env, cust, item, liveStarts, liveEnds)
 	codes, _ := parallel(t,
 		func() (int, map[string]any, error) {
 			return callHoldAPI(env.srv, "POST", "/workspaces/"+env.wsA+"/rental/contracts/"+draft+"/holds", env.ownerToken, []string{"race-deact"}, map[string]string{"asset_id": asset})
@@ -1355,10 +1392,11 @@ func TestHoldCreateVsDeactivateRace(t *testing.T) {
 
 func TestHoldCreateVsRevokeRace(t *testing.T) {
 	env := setupAsset(t)
+	liveStarts, liveEnds := liveWindow()
 	cust, item := seedAssetRefs(t, env, "SKU-RACE-R")
 	activateRental(t, env)
 	asset := seedAsset(t, env, item, "SN-RACE-R")
-	draft, _ := seedDraftForHold(t, env, cust, item, "2026-11-10T09:00:00+07:00", "2026-11-12T09:00:00+07:00")
+	draft, _ := seedDraftForHold(t, env, cust, item, liveStarts, liveEnds)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -1397,10 +1435,11 @@ func TestHoldCreateVsRevokeRace(t *testing.T) {
 // Tanpa sleep 24 jam: deadline fixture sintetis 2 detik.
 func TestHoldExpiryNearCutoffWithLockWait(t *testing.T) {
 	env := setupAsset(t)
+	liveStarts, liveEnds := liveWindow()
 	cust, item := seedAssetRefs(t, env, "SKU-EXP-A")
 	activateRental(t, env)
 	asset := seedAsset(t, env, item, "SN-EXP-A")
-	draft, _ := seedDraftForHold(t, env, cust, item, "2026-11-10T09:00:00+07:00", "2026-11-12T09:00:00+07:00")
+	draft, _ := seedDraftForHold(t, env, cust, item, liveStarts, liveEnds)
 	oldHold, _ := seedHold(t, env, draft, asset, "exp-old")
 	// Deadline 2 detik ke depan (fixture bootstrap, bukan TTL API).
 	expireHoldFixture(t, env.boot, oldHold, "2 seconds")
@@ -1455,7 +1494,7 @@ func TestHoldExpiryNearCutoffWithLockWait(t *testing.T) {
 	}
 	// Availability untuk periode itu: hold baru masih hidup → false.
 	code, body := getAvailability(t, env.srv, env.wsA, asset, env.ownerToken,
-		availQuery("2026-11-10T09:00:00+07:00", "2026-11-12T09:00:00+07:00"))
+		availQuery(liveStarts, liveEnds))
 	if code != http.StatusOK || body["available"] != false {
 		t.Fatalf("availability sesudah hold baru: want 200 false, got %d (%v)", code, body)
 	}
@@ -1467,10 +1506,11 @@ func TestHoldExpiryNearCutoffWithLockWait(t *testing.T) {
 // kedaluwarsa → 200 expired tanpa audit release; 404/403 dijaga.
 func TestHoldRelease(t *testing.T) {
 	env := setupAsset(t)
+	liveStarts, liveEnds := liveWindow()
 	cust, item := seedAssetRefs(t, env, "SKU-REL-A")
 	activateRental(t, env)
 	asset := seedAsset(t, env, item, "SN-REL-A")
-	draft, _ := seedDraftForHold(t, env, cust, item, "2026-11-10T09:00:00+07:00", "2026-11-12T09:00:00+07:00")
+	draft, _ := seedDraftForHold(t, env, cust, item, liveStarts, liveEnds)
 	holdID, _ := seedHold(t, env, draft, asset, "rel-1")
 
 	code, body := releaseHold(t, env.srv, env.wsA, holdID, env.ownerToken)
@@ -1580,10 +1620,11 @@ func TestHoldRelease(t *testing.T) {
 // list memetakan status efektif.
 func TestHoldHistory(t *testing.T) {
 	env := setupAsset(t)
+	liveStarts, liveEnds := liveWindow()
 	cust, item := seedAssetRefs(t, env, "SKU-HIST-A")
 	activateRental(t, env)
 	asset := seedAsset(t, env, item, "SN-HIST-A")
-	draft, _ := seedDraftForHold(t, env, cust, item, "2026-11-10T09:00:00+07:00", "2026-11-12T09:00:00+07:00")
+	draft, _ := seedDraftForHold(t, env, cust, item, liveStarts, liveEnds)
 	holdID, _ := seedHold(t, env, draft, asset, "hist-1")
 	// Hold kedua pada aset BERBEDA (item yang sama, draft yang sama,
 	// periode yang sama — tidak overlap) lalu dibuat kedaluwarsa lewat
@@ -1639,10 +1680,11 @@ func TestHoldHistory(t *testing.T) {
 // create berhasil.
 func TestHoldGuardFaults(t *testing.T) {
 	env := setupAsset(t)
+	liveStarts, liveEnds := liveWindow()
 	cust, item := seedAssetRefs(t, env, "SKU-HFAULT-A")
 	activateRental(t, env)
 	asset := seedAsset(t, env, item, "SN-HFAULT-A")
-	draft, _ := seedDraftForHold(t, env, cust, item, "2026-11-10T09:00:00+07:00", "2026-11-12T09:00:00+07:00")
+	draft, _ := seedDraftForHold(t, env, cust, item, liveStarts, liveEnds)
 
 	t.Cleanup(func() {
 		for _, table := range []string{"module_installations", "module_entitlements", "rental_contracts", "physical_assets", "catalog_items", "rental_holds"} {
@@ -1683,10 +1725,11 @@ func TestHoldGuardFaults(t *testing.T) {
 // rollback (baris basi tetap 'held' di database).
 func TestHoldAuditFaultAtomicity(t *testing.T) {
 	env := setupAsset(t)
+	liveStarts, liveEnds := liveWindow()
 	cust, item := seedAssetRefs(t, env, "SKU-AFAULT-A")
 	activateRental(t, env)
 	asset := seedAsset(t, env, item, "SN-AFAULT-A")
-	draft, _ := seedDraftForHold(t, env, cust, item, "2026-11-10T09:00:00+07:00", "2026-11-12T09:00:00+07:00")
+	draft, _ := seedDraftForHold(t, env, cust, item, liveStarts, liveEnds)
 
 	// Trigger fault: INSERT audit hold_created selalu gagal.
 	_, err := env.boot.Exec(`
@@ -1758,10 +1801,11 @@ func TestHoldAuditFaultAtomicity(t *testing.T) {
 // replay hold lama sesudah arsip → 200 (bacaan histori).
 func TestHoldNewVsReplayArchive(t *testing.T) {
 	env := setupAsset(t)
+	liveStarts, liveEnds := liveWindow()
 	cust, item := seedAssetRefs(t, env, "SKU-ARCH-A")
 	activateRental(t, env)
 	asset := seedAsset(t, env, item, "SN-ARCH-A")
-	draft, _ := seedDraftForHold(t, env, cust, item, "2026-11-10T09:00:00+07:00", "2026-11-12T09:00:00+07:00")
+	draft, _ := seedDraftForHold(t, env, cust, item, liveStarts, liveEnds)
 	_, _ = seedHold(t, env, draft, asset, "arch-1")
 	archiveItem(t, env.boot, item)
 	code, body := createHold(t, env.srv, env.wsA, draft, env.ownerToken, "arch-new", map[string]string{"asset_id": asset})

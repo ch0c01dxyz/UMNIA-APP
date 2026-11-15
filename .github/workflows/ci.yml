@@ -155,10 +155,11 @@ jobs:
             -f services/business-api/migrations/008_price_versions.sql \
             -f services/business-api/migrations/009_rental_agreed_prices.sql \
             -f services/business-api/migrations/010_rental_custody.sql \
-            -f services/business-api/migrations/011_operator_entitlement.sql
+            -f services/business-api/migrations/011_operator_entitlement.sql \
+            -f services/business-api/migrations/012_rental_damaged_lost_return.sql
           # Fixture DB bisnis (F1-OPERATOR-ENTITLEMENT-CI-FIX): skema
-          # penuh 001-011, seperti deployment (configure-postgres.sh
-          # selalu menerapkan 001-011 ke umnia_business). Preflight
+          # penuh 001-012, seperti deployment (configure-postgres.sh
+          # selalu menerapkan 001-012 ke umnia_business). Preflight
           # configure-postgres.sh memeriksa kepemilikan/hak terhadap DB
           # bisnis bila ada, dan subtes table-privilege/custom-parent
           # memberi hak pada tabel workspaces di sana — DB kosong
@@ -175,7 +176,8 @@ jobs:
             -f services/business-api/migrations/008_price_versions.sql \
             -f services/business-api/migrations/009_rental_agreed_prices.sql \
             -f services/business-api/migrations/010_rental_custody.sql \
-            -f services/business-api/migrations/011_operator_entitlement.sql
+            -f services/business-api/migrations/011_operator_entitlement.sql \
+            -f services/business-api/migrations/012_rental_damaged_lost_return.sql
           # Fixture negatif readiness: database yang berhenti di 002
           # (tanpa registry 003) harus dilaporkan belum siap.
           PGPASSWORD=ci-bootstrap-only psql -h localhost -U postgres -d umnia_partial \
@@ -252,8 +254,9 @@ jobs:
             -f services/business-api/migrations/007_asset_availability.sql \
             -f services/business-api/migrations/008_price_versions.sql \
             -f services/business-api/migrations/009_rental_agreed_prices.sql
-          # Fixture positif readiness (F2-01-F): kesepuluh marker + satu
-          # marker tambahan yang tidak dikenal harus tetap siap.
+          # Fixture positif readiness (F2-01-G): kesebelas marker
+          # (001-010 + 012) + satu marker tambahan yang tidak dikenal
+          # harus tetap siap.
           PGPASSWORD=ci-bootstrap-only psql -h localhost -U postgres -d umnia_extra \
             -v ON_ERROR_STOP=1 -1 \
             -f services/business-api/migrations/001_init.sql \
@@ -266,6 +269,7 @@ jobs:
             -f services/business-api/migrations/008_price_versions.sql \
             -f services/business-api/migrations/009_rental_agreed_prices.sql \
             -f services/business-api/migrations/010_rental_custody.sql \
+            -f services/business-api/migrations/012_rental_damaged_lost_return.sql \
             -c "INSERT INTO schema_migrations (version) VALUES ('999_future') ON CONFLICT (version) DO NOTHING;"
       # Bukti klaster tunggal: jalur TCP (yang dipakai tes/snapshot) dan
       # jalur peer lokal (yang dipakai configure-postgres.sh via
@@ -370,7 +374,7 @@ jobs:
       # Password di bawah HANYA fixture CI yang dibuang tiap run, bukan
       # rahasia produksi. DB terisolasi umnia_e2e (bukan umnia_test) supaya
       # fixture E2E tidak bercampur dengan gate integrasi Go.
-      - name: Prepare E2E database (001-011)
+      - name: Prepare E2E database (001-012)
         run: |
           for i in $(seq 1 30); do
             pg_isready -h localhost -p 5432 -U postgres && break || sleep 2
@@ -395,7 +399,8 @@ jobs:
             -f services/business-api/migrations/008_price_versions.sql \
             -f services/business-api/migrations/009_rental_agreed_prices.sql \
             -f services/business-api/migrations/010_rental_custody.sql \
-            -f services/business-api/migrations/011_operator_entitlement.sql
+            -f services/business-api/migrations/011_operator_entitlement.sql \
+            -f services/business-api/migrations/012_rental_damaged_lost_return.sql
       - name: Build + start business-api
         run: |
           go build -o /tmp/umnia-business-api .

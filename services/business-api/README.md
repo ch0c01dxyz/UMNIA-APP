@@ -770,18 +770,21 @@ Tiga rute terautentikasi, semua di bawah `authMiddleware` +
   grace window), dan unit belum keluar (→ 409). 201 mengembalikan
   custody `out`.
 - `POST /workspaces/{id}/rental/contracts/{draft_id}/return`
-  — body kosong atau strict `{}` saja (tanpa timestamp/aktor/status/
-  biaya dari klien) + header `Idempotency-Key` wajib. SATU jalur
-  menyempit SELALU: `manage_business_data` + `view_workspace` +
+  — body kosong, strict `{}` (≡ `returned`), atau strict
+  `{"outcome": "returned" | "damaged" | "lost"}` (lihat F2-01-G)
+  + header `Idempotency-Key` wajib. SATU jalur menyempit SELALU:
+  `manage_business_data` + `view_workspace` +
   lock baris workspace, TANPA gate instalasi/entitlement Rental —
   owner/manager yang sah tetap bisa menerima unit sesudah
   revoke/deactivate. Lookup kunci return (workspace-scoped)
-  SEBELUM transisi: kunci milik draft path yang sama → 200 catatan
-  itu tanpa tulis/audit; milik draft lain → 409. Return hanya
+  SEBELUM transisi: kunci milik draft path yang sama + outcome
+  ternormalisasi yang sama → 200 catatan itu tanpa tulis/audit;
+  milik draft lain atau outcome berbeda → 409. Return hanya
   menutup custody `out` yang ada (UPDATE kondisional out →
-  returned + aktor/waktu/kunci return, tanpa SELECT FOR UPDATE) +
-  audit → commit. 200 mengembalikan custody `returned`. Return
-  keyspace TERPISAH dari keyspace handover (kolom berbeda).
+  status terminal + aktor/waktu/kunci return, tanpa SELECT FOR
+  UPDATE) + audit → commit. 200 mengembalikan custody terminal
+  (`returned`/`damaged`/`lost`). Return keyspace TERPISAH dari
+  keyspace handover (kolom berbeda).
 - `GET /workspaces/{id}/rental/contracts/{draft_id}/custody`
   — `view_workspace` saja (owner/manager/kasir), tanpa lock,
   tanpa tulis/audit, tanpa syarat instalasi/entitlement Rental.
@@ -794,9 +797,9 @@ Tiga rute terautentikasi, semua di bawah `authMiddleware` +
 dikembalikan sesudahnya; hold consumed tidak divalidasi ulang).
 Perbedaan identitas apa pun → 409, termasuk kunci dipakai untuk
 draft lain. Kunci lain untuk draft yang sudah punya custody → 409.
-Return: kunci return sama + draft yang sama → 200 tanpa tulis/
-audit; kunci return milik draft lain → 409; draft sudah
-dikembalikan dengan kunci lain → 409.
+Return: kunci return sama + draft yang sama + outcome ternormalisasi
+yang sama → 200 tanpa tulis/audit; kunci sama dengan outcome atau
+draft berbeda → 409; draft sudah terminal dengan kunci lain → 409.
 
 **Custody terbuka memblokir.** Selama custody `out` ada untuk
 sebuah aset, unit itu keluar secara fisik apa pun periode yang
@@ -809,12 +812,67 @@ released/expired: release hold consumed → 409 eksplisit, histori
 hold menampilkan `consumed` (tidak pernah diubah menjadi expired
 oleh cleanup), dan return TIDAK membuka lagi hold tersebut.
 Sesudah pengembalian nyata, unit bisa dipakai lagi tergantung hold
-lain yang masih hidup.
+lain yang masih hidup. Unit `damaged`/`lost` tetap terblokir:
+ketersediaan `available: false`, hold BARU dan handover → 409
+`unit tidak tersedia`; hold yang sudah ada sebelum resolusi tidak
+dihapus — replay-nya tetap 200, tetapi handover-nya → 409.
+Pengembalian utuh TIDAK mengubah kondisi aset (tetap `ready`).
 
 **Yang belum ada:** transisi draft, perjanjian mengikat,
-rusak/hilang, finance/invoice/pembayaran, stock ledger/kuantitas,
+finance/invoice/pembayaran, stock ledger/kuantitas,
 denda keterlambatan/deposit/pajak, koreksi/supersesi custody,
 maintenance/kondisi/lokasi, UI, otoritas grant nyata/entitlement.
+
+## F2-01-G — pengembalian rusak/hilang (migrasi 012)
+
+Migrasi `012_rental_damaged_lost_return` menambah resolusi terminal
+rusak/hilang pada endpoint return yang sama — tanpa rute, UI, API
+aset, atau sistem perbaikan/pemulihan baru. Tiga outcome:
+`returned` (utuh; default body kosong/`{}`), `damaged` (unit
+kembali rusak secara fisik), `lost` (deklarasi staf tanpa
+pengembalian fisik — BUKAN pengembalian: `returned_at` dan
+`returned_by` tetap NULL). Body strict JSON 16 KiB: satu objek,
+field yang dikenal saja, `outcome` harus string non-kosong yang
+dikenal; null/skalar/array/JSON ganda ditolak 400. Waktu/aktor
+resolusi berasal dari SATU `clock_timestamp()` sesudah lock
+workspace (cutoff DB), bukan dari klien; tidak ada
+uang/deposit/denda/pajak/consent pelanggan di slice ini.
+
+Kolom baru `rental_custody.resolved_at`/`resolved_by` (nullable)
+dan `physical_assets.condition` (`ready`/`damaged`/`lost`,
+default `ready`). CHECK state diperluas: `out` berarti
+`returned_at`/`returned_by`/`resolved_at`/`resolved_by`/kunci
+return kelimanya NULL; `returned`/`damaged` berarti kelimanya
+terisi DAN `returned_at = resolved_at` DAN `returned_by =
+resolved_by`; `lost` berarti `returned_at`/`returned_by` NULL
+dan `resolved_at`/`resolved_by`/kunci terisi. CHECK bernama baru
+`rental_custody_resolved_after_handover` (`resolved_at >=
+handed_out_at`); semua timestamp terminal finite. Backfill
+sekali: baris `returned` lama mendapat `resolved_*` dari
+`returned_*` yang sudah ada SEBELUM CHECK baru dipasang;
+original/timestamp/kunci/audit/histori tidak diubah; rerun 012
+tidak mengulang backfill; data inkonsisten membuat migrasi GAGAL
+(bukan auto-repair). RLS ENABLE+FORCE dipertahankan; kebijakan
+UPDATE custody diperluas ke status terminal (`returned`/
+`damaged`/`lost`) dengan grant kolom `resolved_at`/`resolved_by`;
+kebijakan UPDATE aset BARU hanya `ready` → `damaged`/`lost`
+(kolom `condition`/`updated_at`) — pengembalian utuh TIDAK
+meng-update aset, dan aset non-ready tidak pernah direset.
+Marker `012_rental_damaged_lost_return` terakhir; readiness
+`/readyz` kini mensyaratkan kesebelas marker (001–010 + 012;
+011 tetap hanya diperiksa rutin/CLI grant, bukan readiness).
+
+Hanya `damaged`/`lost` yang mengubah aset (`ready` → kondisi
+yang cocok, satu baris, `updated_at` = cutoff) dalam transaksi
+atomik yang sama dengan custody + audit; semua fault rollback
+penuh. Audit: `rental_returned` (utuh), `rental_returned_damaged`,
+`rental_loss_declared` (lost) — detail tetap
+`{rental_contract_id, asset_id}` saja. Resolusi tidak butuh
+Rental aktif/entitlement (tetap bisa sesudah revoke/deactivate);
+handover/hold baru tetap butuh hak Rental penuh. Alokasi
+memeriksa kondisi di tiga titik: ketersediaan (`available:
+false`), hold BARU (409 `unit tidak tersedia`), dan handover
+(409 `unit tidak tersedia`, sesudah cek unit-keluar).
 
 ## F1-OPERATOR-ENTITLEMENT-IMPLEMENT — grant operator lewat rutin (migrasi 011)
 

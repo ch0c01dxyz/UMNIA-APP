@@ -276,7 +276,7 @@ func assetSnapshot(t *testing.T, boot *sql.DB) map[string]string {
 	t.Helper()
 	out := map[string]string{}
 	queries := map[string]string{
-		"assets":      `SELECT coalesce(string_agg(id::text || '|' || workspace_id::text || '|' || catalog_item_id::text || '|' || serial || '|' || created_at::text || '|' || updated_at::text, chr(10) ORDER BY id), '') FROM physical_assets`,
+		"assets":      `SELECT coalesce(string_agg(id::text || '|' || workspace_id::text || '|' || catalog_item_id::text || '|' || serial || '|' || created_at::text || '|' || updated_at::text || '|' || condition, chr(10) ORDER BY id), '') FROM physical_assets`,
 		"holds":       `SELECT coalesce(string_agg(id::text || '|' || workspace_id::text || '|' || draft_id::text || '|' || asset_id::text || '|' || client_request_id || '|' || status || '|' || starts_at::text || '|' || ends_at::text || '|' || expires_at::text || '|' || created_at::text || '|' || updated_at::text || '|' || period::text, chr(10) ORDER BY id), '') FROM rental_holds`,
 		"policies":    `SELECT coalesce(string_agg(tablename || ':' || policyname || ':' || cmd || ':' || coalesce(qual,'') || ':' || coalesce(with_check,''), chr(10) ORDER BY tablename, policyname), '') FROM pg_policies WHERE tablename IN ('physical_assets', 'rental_holds')`,
 		"acl":         `SELECT coalesce(string_agg(relname || ':' || coalesce(relacl::text,''), chr(10) ORDER BY relname), '') FROM pg_class WHERE relname IN ('physical_assets', 'rental_holds')`,
@@ -308,8 +308,8 @@ func TestAssetFreshSchema(t *testing.T) {
 	).Scan(&markers); err != nil {
 		t.Fatalf("baca markers: %v", err)
 	}
-	if markers != "001_init,002_identity,003_modules,004_module_installations,005_core_master_data,006_rental_contracts,007_asset_availability,008_price_versions,009_rental_agreed_prices,010_rental_custody,011_operator_entitlement" {
-		t.Fatalf("markers: want 001_init,002_identity,003_modules,004_module_installations,005_core_master_data,006_rental_contracts,007_asset_availability,008_price_versions,009_rental_agreed_prices,010_rental_custody,011_operator_entitlement, got %s", markers)
+	if markers != "001_init,002_identity,003_modules,004_module_installations,005_core_master_data,006_rental_contracts,007_asset_availability,008_price_versions,009_rental_agreed_prices,010_rental_custody,011_operator_entitlement,012_rental_damaged_lost_return" {
+		t.Fatalf("markers: want 001_init,002_identity,003_modules,004_module_installations,005_core_master_data,006_rental_contracts,007_asset_availability,008_price_versions,009_rental_agreed_prices,010_rental_custody,011_operator_entitlement,012_rental_damaged_lost_return, got %s", markers)
 	}
 	for _, table := range []string{"physical_assets", "rental_holds"} {
 		var n int
@@ -346,7 +346,10 @@ func TestAssetFreshSchema(t *testing.T) {
 		t.Fatalf("btree_gist: want 1, got %d", n)
 	}
 	// Hak efektif runtime pada aset: SELECT/INSERT boleh;
-	// UPDATE/DELETE/TRUNCATE tidak.
+	// UPDATE/DELETE/TRUNCATE tidak di tingkat tabel — UPDATE di sini
+	// HANYA kolom (condition, updated_at) sejak 012, dan grant kolom
+	// tidak terlihat lewat has_table_privilege, hanya lewat
+	// has_column_privilege di bawah.
 	for _, p := range []struct {
 		action string
 		want   bool
@@ -399,11 +402,30 @@ func TestAssetFreshSchema(t *testing.T) {
 			t.Fatalf("hak UPDATE kolom rental_holds.%s: want %v, got %v", p.column, p.want, got)
 		}
 	}
-	// Kebijakan: aset SELECT + INSERT (tepat dua); hold SELECT +
-	// INSERT + UPDATE (tepat tiga).
+	// Hak UPDATE kolom aset (012): condition + updated_at saja;
+	// serial/kolom lain tidak (pola yang sama seperti hold).
+	for _, p := range []struct {
+		column string
+		want   bool
+	}{
+		{"condition", true}, {"updated_at", true},
+		{"workspace_id", false}, {"catalog_item_id", false},
+		{"serial", false}, {"created_at", false},
+	} {
+		var got bool
+		if err := boot.QueryRow(`SELECT has_column_privilege('umnia_business', 'physical_assets', $1, 'UPDATE')`, p.column).Scan(&got); err != nil {
+			t.Fatalf("has_column_privilege aset %s UPDATE: %v", p.column, err)
+		}
+		if got != p.want {
+			t.Fatalf("hak UPDATE kolom physical_assets.%s: want %v, got %v", p.column, p.want, got)
+		}
+	}
+	// Kebijakan: aset SELECT + INSERT + UPDATE (tepat tiga); hold
+	// SELECT + INSERT + UPDATE (tepat tiga).
 	for _, want := range []struct{ table, policy, cmd string }{
 		{"physical_assets", "physical_assets_select", "SELECT"},
 		{"physical_assets", "physical_assets_insert", "INSERT"},
+		{"physical_assets", "physical_assets_update", "UPDATE"},
 		{"rental_holds", "rental_holds_select", "SELECT"},
 		{"rental_holds", "rental_holds_insert", "INSERT"},
 		{"rental_holds", "rental_holds_update", "UPDATE"},
@@ -418,16 +440,16 @@ func TestAssetFreshSchema(t *testing.T) {
 			t.Fatalf("policy %s: want 1, got %d", want.policy, m)
 		}
 	}
-	// CHECK 1 (serial) + UNIQUE 2 (serial + workspace_id,id) + FK 2
-	// pada physical_assets.
+	// CHECK 2 (serial + condition) + UNIQUE 2 (serial +
+	// workspace_id,id) + FK 2 pada physical_assets.
 	var c, u, f int
 	if err := boot.QueryRow(
 		`SELECT count(*) FILTER (WHERE contype = 'c'), count(*) FILTER (WHERE contype = 'u'), count(*) FILTER (WHERE contype = 'f')
 		 FROM pg_constraint WHERE conrelid = 'physical_assets'::regclass`).Scan(&c, &u, &f); err != nil {
 		t.Fatalf("constraints physical_assets: %v", err)
 	}
-	if c != 1 || u != 2 || f != 2 {
-		t.Fatalf("constraints physical_assets: want CHECK 1 + UNIQUE 2 + FK 2, got CHECK %d + UNIQUE %d + FK %d", c, u, f)
+	if c != 2 || u != 2 || f != 2 {
+		t.Fatalf("constraints physical_assets: want CHECK 2 + UNIQUE 2 + FK 2, got CHECK %d + UNIQUE %d + FK %d", c, u, f)
 	}
 	// CHECK 3 (status, client_request_id, ends_at>starts_at) +
 	// UNIQUE 2 (workspace_id, client_request_id + workspace_id, id)
@@ -523,14 +545,20 @@ func TestAssetRerunPreservesData(t *testing.T) {
 		t.Fatalf("rerun 007: want exit 0, got %d (%s)", code, out)
 	}
 	// Pulihkan keadaan akhir rantai: 010 memiliki perluasan 'consumed'
-	// pada CHECK + kebijakan UPDATE hold — rerun 007 saja
-	// mengembalikan versi 007 (tanpa 'consumed'), jadi 010 harus
+	// pada CHECK + kebijakan UPDATE hold, dan 012 memiliki kolom
+	// condition + kebijakan/grant UPDATE aset — rerun 007 saja
+	// mengembalikan versi 007 (tanpa 'consumed', tanpa grant UPDATE
+	// kolom aset karena REVOKE ALL 007), jadi 010 lalu 012 harus
 	// berjalan lagi sebelum snapshot sesudah diambil. Hanya rerun
-	// kumulatif 001-010 yang menjamin keadaan akhir; tes ini
-	// membuktikan rerun 007 + pemulihan 010 tidak mengubah state.
+	// kumulatif 001-012 yang menjamin keadaan akhir; tes ini
+	// membuktikan rerun 007 + pemulihan 010 + 012 tidak mengubah state.
 	code, out = runPsqlFile(t, bootURL, "migrations/010_rental_custody.sql")
 	if code != 0 {
 		t.Fatalf("pulihkan 010 sesudah rerun 007: want exit 0, got %d (%s)", code, out)
+	}
+	code, out = runPsqlFile(t, bootURL, "migrations/012_rental_damaged_lost_return.sql")
+	if code != 0 {
+		t.Fatalf("pulihkan 012 sesudah rerun 007: want exit 0, got %d (%s)", code, out)
 	}
 	after := assetSnapshot(t, boot)
 	if !reflect.DeepEqual(before, after) {
@@ -1819,5 +1847,58 @@ func TestHoldNewVsReplayArchive(t *testing.T) {
 	}
 	if body["status"] != "held" {
 		t.Fatalf("replay sesudah arsip: want status held, got %v", body)
+	}
+}
+
+// TestAssetConditionRLS: kebijakan UPDATE aset 012 lewat koneksi runtime
+// yang sebenarnya — ready->damaged/lost lolos 1 baris; ready->ready
+// ditolak WITH CHECK (42501); damaged->ready tidak mengenai baris
+// (USING memfilter, 0 baris tanpa galat); UPDATE serial ditolak
+// (tanpa grant kolom, 42501). Semua percobaan dalam transaksi tenant
+// yang di-rollback, jadi kondisi aset kembali ready.
+func TestAssetConditionRLS(t *testing.T) {
+	env := setupAsset(t)
+	db := testDB(t)
+	_, itemID := seedAssetRefs(t, env, "SKU-RLS-COND")
+	assetID := seedAsset(t, env, itemID, "SN-RLS-COND")
+
+	tryUpdate := func(query string, args ...any) (int64, error) {
+		t.Helper()
+		tx := tenantTx(t, db, env.wsA, env.ownerID)
+		defer tx.Rollback()
+		res, err := tx.Exec(query, args...)
+		if err != nil {
+			return 0, err
+		}
+		n, _ := res.RowsAffected()
+		return n, nil
+	}
+	// ready -> damaged: 1 baris.
+	if n, err := tryUpdate(`UPDATE physical_assets SET condition = 'damaged', updated_at = now() WHERE workspace_id = $1 AND id = $2`, env.wsA, assetID); err != nil || n != 1 {
+		t.Fatalf("UPDATE ready->damaged: want 1 baris, got %d (%v)", n, err)
+	}
+	// ready -> lost: 1 baris.
+	if n, err := tryUpdate(`UPDATE physical_assets SET condition = 'lost', updated_at = now() WHERE workspace_id = $1 AND id = $2`, env.wsA, assetID); err != nil || n != 1 {
+		t.Fatalf("UPDATE ready->lost: want 1 baris, got %d (%v)", n, err)
+	}
+	// ready -> ready: WITH CHECK menolak (42501).
+	if _, err := tryUpdate(`UPDATE physical_assets SET condition = 'ready', updated_at = now() WHERE workspace_id = $1 AND id = $2`, env.wsA, assetID); err == nil || pgCode(err) != "42501" {
+		t.Fatalf("UPDATE ready->ready: want 42501, got %v", err)
+	}
+	// damaged -> ready: USING memfilter (0 baris, tanpa galat). Kondisi
+	// damaged disiapkan lewat bootstrap (bypass RLS) dan dipulihkan
+	// lewat cleanup supaya Fatalf tidak meninggalkan aset rusak.
+	if _, err := env.boot.Exec(`UPDATE physical_assets SET condition = 'damaged' WHERE id = $1`, assetID); err != nil {
+		t.Fatalf("siapkan damaged: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = env.boot.Exec(`UPDATE physical_assets SET condition = 'ready' WHERE id = $1`, assetID)
+	})
+	if n, err := tryUpdate(`UPDATE physical_assets SET condition = 'ready', updated_at = now() WHERE workspace_id = $1 AND id = $2`, env.wsA, assetID); err != nil || n != 0 {
+		t.Fatalf("UPDATE damaged->ready: want 0 baris, got %d (%v)", n, err)
+	}
+	// UPDATE serial: tanpa grant kolom (42501).
+	if _, err := tryUpdate(`UPDATE physical_assets SET serial = 'SN-RLS-COND-2' WHERE workspace_id = $1 AND id = $2`, env.wsA, assetID); err == nil || pgCode(err) != "42501" {
+		t.Fatalf("UPDATE serial: want 42501, got %v", err)
 	}
 }

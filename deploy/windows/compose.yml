@@ -116,6 +116,8 @@ services:
       - /migrations/010_rental_custody.sql
       - -f
       - /migrations/011_operator_entitlement.sql
+      - -f
+      - /migrations/012_rental_damaged_lost_return.sql
     depends_on:
       postgres-business:
         condition: service_healthy

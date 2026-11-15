@@ -80,16 +80,19 @@ func checkDatabase(db *sql.DB) string {
 		return "error"
 	}
 	var count int
-	// Kesepuluh versi wajib ada: database yang berhenti di 009 (tanpa
-	// custody serah terima 010) belum siap, sama seperti database
-	// kosong atau yang berhenti di 002/003/004/005/006/007/008. Marker
-	// tambahan di luar kesepuluh nama ini (mis. migrasi masa depan)
-	// tidak menggagalkan readiness — hitungan hanya menyaring
-	// kesepuluh nama tersebut, dan version adalah primary key
-	// sehingga hitungan itu cukup.
+	// Kesebelas versi wajib ada: database yang berhenti di 010
+	// (tanpa resolusi rusak/hilang 012) belum siap, sama seperti
+	// database kosong atau yang berhenti di
+	// 002/003/004/005/006/007/008/009. 011 TIDAK dipersyaratkan di
+	// sini — marker operator hanya diperiksa di dalam rutin grant
+	// (CLI/routine), bukan oleh handler runtime. Marker tambahan di
+	// luar kesebelas nama ini (mis. migrasi masa depan) tidak
+	// menggagalkan readiness — hitungan hanya menyaring kesebelas
+	// nama tersebut, dan version adalah primary key sehingga
+	// hitungan itu cukup.
 	err := db.QueryRowContext(ctx,
-		`SELECT count(*) FROM schema_migrations WHERE version IN ('001_init', '002_identity', '003_modules', '004_module_installations', '005_core_master_data', '006_rental_contracts', '007_asset_availability', '008_price_versions', '009_rental_agreed_prices', '010_rental_custody')`).Scan(&count)
-	if err != nil || count != 10 {
+		`SELECT count(*) FROM schema_migrations WHERE version IN ('001_init', '002_identity', '003_modules', '004_module_installations', '005_core_master_data', '006_rental_contracts', '007_asset_availability', '008_price_versions', '009_rental_agreed_prices', '010_rental_custody', '012_rental_damaged_lost_return')`).Scan(&count)
+	if err != nil || count != 11 {
 		return "error"
 	}
 	return "ok"

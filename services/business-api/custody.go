@@ -13,16 +13,19 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
-// Custody serah terima + pengembalian F2-01-F (migrasi 010): satu
-// baris rental_custody per draft Rental, untuk satu unit serial yang
-// diidentifikasi aset + hold-nya. Aktor adalah staf (owner/manager),
-// BUKAN pelanggan. Custody adalah catatan in-app — BUKAN consent/
-// tanda tangan pelanggan, BUKAN perjanjian hukum, BUKAN invoice/
-// pembayaran, BUKAN posting ledger, dan BUKAN jumlah yang disepakati
-// baru. Custody tidak memutasi draft, item, harga, atau fakta harga;
-// yang berubah hanyalah status hold yang dipakai (held -> consumed).
-// Hold TTL bukan pengembalian fisik; periode berakhir bukan unit
-// kembali. Selama custody out ada, unit keluar apa pun periode/TTL.
+// Custody serah terima + pengembalian F2-01-F (migrasi 010) + resolusi
+// rusak/hilang F2-01-G (migrasi 012): satu baris rental_custody per
+// draft Rental, untuk satu unit serial yang diidentifikasi aset +
+// hold-nya. Aktor adalah staf (owner/manager), BUKAN pelanggan.
+// Custody adalah catatan in-app — BUKAN consent/tanda tangan
+// pelanggan, BUKAN perjanjian hukum, BUKAN invoice/pembayaran, BUKAN
+// posting ledger, dan BUKAN jumlah yang disepakati baru. Custody
+// tidak memutasi draft, item, harga, atau fakta harga; yang berubah
+// hanyalah status hold yang dipakai (held -> consumed) dan — untuk
+// damaged/lost — kondisi aset (ready -> damaged/lost). Hold TTL bukan
+// pengembalian fisik; periode berakhir bukan unit kembali. Selama
+// custody out ada, unit keluar apa pun periode/TTL; selama aset
+// damaged/lost, unit dikecualikan dari availability/hold/handover.
 
 type custodyRow struct {
 	ID, WorkspaceID, RentalContractID, RentalAgreedPriceID, AssetID, HoldID, ClientRequestID string
@@ -32,6 +35,8 @@ type custodyRow struct {
 	ReturnedAt                                                                               sql.NullTime
 	HandedOutBy                                                                              string
 	ReturnedBy                                                                               sql.NullString
+	ResolvedAt                                                                               sql.NullTime
+	ResolvedBy                                                                               sql.NullString
 }
 
 type custodyDTO struct {
@@ -48,15 +53,17 @@ type custodyDTO struct {
 	ReturnedAt            *string `json:"returned_at"`
 	HandedOutBy           string  `json:"handed_out_by"`
 	ReturnedBy            *string `json:"returned_by"`
+	ResolvedAt            *string `json:"resolved_at"`
+	ResolvedBy            *string `json:"resolved_by"`
 }
 
-const custodyColumns = `id, workspace_id, rental_contract_id, rental_agreed_price_id, asset_id, hold_id, client_request_id, return_client_request_id, status, handed_out_at, returned_at, handed_out_by, returned_by`
+const custodyColumns = `id, workspace_id, rental_contract_id, rental_agreed_price_id, asset_id, hold_id, client_request_id, return_client_request_id, status, handed_out_at, returned_at, handed_out_by, returned_by, resolved_at, resolved_by`
 
 func scanCustodyRow(row *sql.Row) (custodyRow, error) {
 	var c custodyRow
 	err := row.Scan(&c.ID, &c.WorkspaceID, &c.RentalContractID, &c.RentalAgreedPriceID, &c.AssetID,
 		&c.HoldID, &c.ClientRequestID, &c.ReturnClientRequestID, &c.Status, &c.HandedOutAt,
-		&c.ReturnedAt, &c.HandedOutBy, &c.ReturnedBy)
+		&c.ReturnedAt, &c.HandedOutBy, &c.ReturnedBy, &c.ResolvedAt, &c.ResolvedBy)
 	return c, err
 }
 
@@ -78,6 +85,14 @@ func custodyToDTO(c custodyRow) custodyDTO {
 	if c.ReturnedBy.Valid {
 		s := c.ReturnedBy.String
 		d.ReturnedBy = &s
+	}
+	if c.ResolvedAt.Valid {
+		s := formatRentalTimeUTC(c.ResolvedAt.Time)
+		d.ResolvedAt = &s
+	}
+	if c.ResolvedBy.Valid {
+		s := c.ResolvedBy.String
+		d.ResolvedBy = &s
 	}
 	return d
 }
@@ -294,10 +309,10 @@ func (s *server) handleHandoverRental(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Aset harus ada di workspace ini; hilang/lintas-tenant → 404.
-	var assetItemID string
+	var assetItemID, assetCondition string
 	err = tx.QueryRow(
-		`SELECT catalog_item_id FROM physical_assets WHERE workspace_id = $1 AND id = $2`,
-		wsID, assetID).Scan(&assetItemID)
+		`SELECT catalog_item_id, condition FROM physical_assets WHERE workspace_id = $1 AND id = $2`,
+		wsID, assetID).Scan(&assetItemID, &assetCondition)
 	if err == sql.ErrNoRows {
 		writeError(w, http.StatusNotFound, "aset tidak ditemukan")
 		return
@@ -365,6 +380,12 @@ func (s *server) handleHandoverRental(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "unit sedang dipinjam")
 		return
 	}
+	// Unit rusak/hilang tidak bisa diserahkan, walau hold-nya masih
+	// live (backstop alokasi nyata — kondisi dicek di bawah lock).
+	if assetCondition == "damaged" || assetCondition == "lost" {
+		writeError(w, http.StatusConflict, "unit tidak tersedia")
+		return
+	}
 	// Simpan custody + konsumsi hold + audit dalam SATU transaksi;
 	// 201 hanya sesudah commit. handed_out_at = cutoff pasca-lock;
 	// handed_out_by = subjek staf yang menyerahkan (bukan pelanggan).
@@ -430,6 +451,19 @@ func (s *server) handleHandoverRental(w http.ResponseWriter, r *http.Request) {
 // revoke/deactivate. Return hanya menutup custody out yang ada;
 // tidak bisa mengalokasikan apa pun, tidak menghitung ulang harga,
 // tidak memperbarui hold, tidak memungut biaya.
+// terminalMessage mengembalikan pesan 409 untuk custody yang sudah
+// terminal, sesuai outcome tercatat (F2-01-G).
+func terminalMessage(status string) string {
+	switch status {
+	case "damaged":
+		return "draft ini sudah ditutup sebagai rusak"
+	case "lost":
+		return "draft ini sudah ditutup sebagai hilang"
+	default:
+		return "draft ini sudah dikembalikan"
+	}
+}
+
 func (s *server) handleReturnRental(w http.ResponseWriter, r *http.Request) {
 	if !s.requireDB(w) {
 		return
@@ -457,19 +491,31 @@ func (s *server) handleReturnRental(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	key := keys[0]
-	// Body: kosong atau strict {} saja — tanpa timestamp/aktor/
-	// status/biaya dari klien. Body kosong membuat Decode pertama
+	// Body: kosong, strict {}, atau strict {"outcome": ...} saja —
+	// tanpa timestamp/aktor/biaya dari klien. Outcome ternormalisasi
+	// SEKALI di sini (kosong/hilang -> "returned") dan dipakai semua
+	// cabang replay di bawah. Body kosong membuat Decode pertama
 	// mengembalikan io.EOF, jadi baca byte dulu seperti pola strict.
+	// Tolak: null/skalar/array/JSON ganda, kunci tak dikenal, outcome
+	// null/kosong/bukan-string/di luar himpunan.
+	outcome := "returned"
 	bodyBytes, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxMasterDataBodyBytes))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "body tidak valid")
 		return
 	}
 	if len(bytes.TrimSpace(bodyBytes)) > 0 {
-		var empty struct{}
+		trimmedBody := bytes.TrimSpace(bodyBytes)
+		if trimmedBody[0] != '{' {
+			writeError(w, http.StatusBadRequest, "body tidak valid")
+			return
+		}
+		var parsed struct {
+			Outcome json.RawMessage `json:"outcome"`
+		}
 		dec := json.NewDecoder(bytes.NewReader(bodyBytes))
 		dec.DisallowUnknownFields()
-		if err := dec.Decode(&empty); err != nil {
+		if err := dec.Decode(&parsed); err != nil {
 			writeError(w, http.StatusBadRequest, "body tidak valid")
 			return
 		}
@@ -477,6 +523,25 @@ func (s *server) handleReturnRental(w http.ResponseWriter, r *http.Request) {
 		if err := dec.Decode(&extra); err != io.EOF {
 			writeError(w, http.StatusBadRequest, "body tidak valid")
 			return
+		}
+		if len(parsed.Outcome) > 0 {
+			trimmed := bytes.TrimSpace(parsed.Outcome)
+			if len(trimmed) == 0 || trimmed[0] != '"' {
+				writeError(w, http.StatusBadRequest, "body tidak valid")
+				return
+			}
+			var s string
+			if err := json.Unmarshal(trimmed, &s); err != nil || s == "" {
+				writeError(w, http.StatusBadRequest, "body tidak valid")
+				return
+			}
+			switch s {
+			case "returned", "damaged", "lost":
+				outcome = s
+			default:
+				writeError(w, http.StatusBadRequest, "body tidak valid")
+				return
+			}
 		}
 	}
 	tx, err := beginTenant(s.db, subject, wsID)
@@ -519,8 +584,9 @@ func (s *server) handleReturnRental(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Replay kunci return: lookup workspace-scoped SEBELUM transisi.
-	// Kunci milik draft path yang sama → 200 catatan itu, tanpa
-	// tulis/audit/perubahan timestamp; milik draft lain → 409.
+	// Kunci + draft + outcome ternormalisasi yang sama → 200 catatan
+	// itu, tanpa tulis/audit/perubahan timestamp; draft atau outcome
+	// berbeda → 409.
 	replayed, err := scanCustodyRow(tx.QueryRow(
 		`SELECT `+custodyColumns+`
 		 FROM rental_custody WHERE workspace_id = $1 AND return_client_request_id = $2`,
@@ -530,7 +596,7 @@ func (s *server) handleReturnRental(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err == nil {
-		if replayed.RentalContractID == draftID {
+		if replayed.RentalContractID == draftID && replayed.Status == outcome {
 			writeJSON(w, http.StatusOK, custodyToDTO(replayed))
 			return
 		}
@@ -550,22 +616,27 @@ func (s *server) handleReturnRental(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "transaksi gagal")
 		return
 	}
-	// Sudah dikembalikan (dengan kunci lain — kunci yang sama sudah
-	// ditangkap replay di atas) → 409.
-	if custody.Status == "returned" {
-		writeError(w, http.StatusConflict, "draft ini sudah dikembalikan")
+	// Sudah terminal (dengan kunci lain — kunci yang sama sudah
+	// ditangkap replay di atas) → 409 dengan pesan per outcome
+	// tercatat.
+	if custody.Status != "out" {
+		writeError(w, http.StatusConflict, terminalMessage(custody.Status))
 		return
 	}
-	// Transisi kondisional out -> returned + aktor/waktu/kunci
-	// return. Tanpa SELECT FOR UPDATE: kebijakan UPDATE (USING
-	// status='out') akan menyaring baris returned — lock workspace +
-	// UPDATE kondisional mendukung replay idempotent. 0 baris
-	// berarti penulis lain menutupnya bersamaan: baca ulang dan
-	// jawab dari keadaan saat ini.
+	// Transisi kondisional out -> outcome + aktor/waktu/kunci return
+	// + resolved_* (waktu/aktor penutupan). Untuk lost, returned_*
+	// tetap NULL (bukan pengembalian fisik); resolved_* terisi untuk
+	// ketiga outcome. Tanpa SELECT FOR UPDATE: kebijakan UPDATE
+	// (USING status='out') akan menyaring baris terminal — lock
+	// workspace + UPDATE kondisional mendukung replay idempotent.
+	// 0 baris berarti penulis lain menutupnya bersamaan: baca ulang
+	// dan jawab dari keadaan saat ini.
+	retAt := sql.NullTime{Time: cutoff, Valid: outcome != "lost"}
+	retBy := sql.NullString{String: subject, Valid: outcome != "lost"}
 	res, err := tx.Exec(
-		`UPDATE rental_custody SET status = 'returned', returned_at = $2, returned_by = $3, return_client_request_id = $4
-		 WHERE workspace_id = $1 AND rental_contract_id = $5 AND status = 'out'`,
-		wsID, cutoff, subject, key, draftID)
+		`UPDATE rental_custody SET status = $2, returned_at = $3, returned_by = $4, resolved_at = $5, resolved_by = $6, return_client_request_id = $7
+		 WHERE workspace_id = $1 AND rental_contract_id = $8 AND status = 'out'`,
+		wsID, outcome, retAt, retBy, cutoff, subject, key, draftID)
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == "rental_custody_workspace_id_return_client_request_id_key" {
@@ -585,19 +656,51 @@ func (s *server) handleReturnRental(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "transaksi gagal")
 			return
 		}
-		if current.Status == "returned" {
-			if current.ReturnClientRequestID.Valid && current.ReturnClientRequestID.String == key {
+		// Jawab dari keadaan saat ini: kunci + outcome yang sama
+		// (bukan kunci saja) -> 200; kunci sama tapi outcome beda
+		// -> 409 kunci; kunci beda -> 409 per outcome tercatat.
+		if current.Status != "out" {
+			if current.ReturnClientRequestID.Valid && current.ReturnClientRequestID.String == key && current.Status == outcome {
 				writeJSON(w, http.StatusOK, custodyToDTO(current))
 				return
 			}
-			writeError(w, http.StatusConflict, "draft ini sudah dikembalikan")
+			if current.ReturnClientRequestID.Valid && current.ReturnClientRequestID.String == key {
+				writeError(w, http.StatusConflict, "kunci idempotency sudah dipakai untuk permintaan yang berbeda")
+				return
+			}
+			writeError(w, http.StatusConflict, terminalMessage(current.Status))
 			return
 		}
 		writeError(w, http.StatusInternalServerError, "transaksi gagal")
 		return
 	}
+	// Hanya damaged/lost yang memutasi kondisi aset (ready ->
+	// kondisi itu, satu baris, updated_at = cutoff). Return utuh
+	// TIDAK menyentuh aset sama sekali. Baris yang tidak terduga
+	// non-ready (0 baris) adalah inkonsistensi -> 500 dan rollback.
+	if outcome != "returned" {
+		res2, err := tx.Exec(
+			`UPDATE physical_assets SET condition = $2, updated_at = $3
+			 WHERE workspace_id = $1 AND id = $4 AND condition = 'ready'`,
+			wsID, outcome, cutoff, custody.AssetID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "transaksi gagal")
+			return
+		}
+		n2, _ := res2.RowsAffected()
+		if n2 != 1 {
+			writeError(w, http.StatusInternalServerError, "transaksi gagal")
+			return
+		}
+	}
+	auditAction := "rental_returned"
+	if outcome == "damaged" {
+		auditAction = "rental_returned_damaged"
+	} else if outcome == "lost" {
+		auditAction = "rental_loss_declared"
+	}
 	details, _ := json.Marshal(map[string]string{"rental_contract_id": draftID, "asset_id": custody.AssetID})
-	if err := writeBusinessAudit(tx, wsID, subject, "rental_returned", "rental_custody", custody.ID, string(details)); err != nil {
+	if err := writeBusinessAudit(tx, wsID, subject, auditAction, "rental_custody", custody.ID, string(details)); err != nil {
 		writeError(w, http.StatusInternalServerError, "audit gagal ditulis")
 		return
 	}
@@ -609,9 +712,13 @@ func (s *server) handleReturnRental(w http.ResponseWriter, r *http.Request) {
 	// baru ditulis: baca ulang lewat s.db tanpa konteks tenant akan
 	// disaring RLS FORCE (0 baris), jadi tidak ada query sesudah
 	// commit di sini.
-	custody.Status = "returned"
-	custody.ReturnedAt = sql.NullTime{Time: cutoff, Valid: true}
-	custody.ReturnedBy = sql.NullString{String: subject, Valid: true}
+	custody.Status = outcome
+	if outcome != "lost" {
+		custody.ReturnedAt = sql.NullTime{Time: cutoff, Valid: true}
+		custody.ReturnedBy = sql.NullString{String: subject, Valid: true}
+	}
+	custody.ResolvedAt = sql.NullTime{Time: cutoff, Valid: true}
+	custody.ResolvedBy = sql.NullString{String: subject, Valid: true}
 	custody.ReturnClientRequestID = sql.NullString{String: key, Valid: true}
 	writeJSON(w, http.StatusOK, custodyToDTO(custody))
 }

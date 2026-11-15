@@ -277,10 +277,10 @@ func (s *server) handleGetAssetAvailability(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusInternalServerError, "transaksi gagal")
 		return
 	}
-	var found string
+	var assetCondition string
 	err = tx.QueryRow(
-		`SELECT id FROM physical_assets WHERE workspace_id = $1 AND id = $2`,
-		wsID, assetID).Scan(&found)
+		`SELECT condition FROM physical_assets WHERE workspace_id = $1 AND id = $2`,
+		wsID, assetID).Scan(&assetCondition)
 	if err == sql.ErrNoRows {
 		writeError(w, http.StatusNotFound, "aset tidak ditemukan")
 		return
@@ -292,9 +292,10 @@ func (s *server) handleGetAssetAvailability(w http.ResponseWriter, r *http.Reque
 	// Advisory: hanya hold HIDUP yang belum kedaluwarsa pada cutoff
 	// yang memblokir, ATAU custody out yang masih terbuka untuk aset
 	// yang sama (unit keluar secara fisik apa pun periode yang
-	// diminta — tidak ada asumsi pengembalian di masa depan). Hasil
-	// ini bukan jaminan reservasi (TOCTOU) — hanya create hold yang
-	// menjamin.
+	// diminta — tidak ada asumsi pengembalian di masa depan), ATAU
+	// kondisi aset damaged/lost (unit dikecualikan untuk periode apa
+	// pun). Hasil ini bukan jaminan reservasi (TOCTOU) — hanya
+	// create hold yang menjamin.
 	var blocked bool
 	err = tx.QueryRow(
 		`SELECT EXISTS(SELECT 1 FROM rental_holds
@@ -306,6 +307,9 @@ func (s *server) handleGetAssetAvailability(w http.ResponseWriter, r *http.Reque
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "ketersediaan gagal dibaca")
 		return
+	}
+	if assetCondition == "damaged" || assetCondition == "lost" {
+		blocked = true
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"asset_id":  assetID,

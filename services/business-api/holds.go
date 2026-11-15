@@ -252,10 +252,10 @@ func (s *server) handleCreateHold(w http.ResponseWriter, r *http.Request) {
 	}
 	// Aset harus ada di workspace ini; hilang/lintas-tenant → 404
 	// dengan pesan yang sama.
-	var assetItemID string
+	var assetItemID, assetCondition string
 	err = tx.QueryRow(
-		`SELECT catalog_item_id FROM physical_assets WHERE workspace_id = $1 AND id = $2`,
-		wsID, assetID).Scan(&assetItemID)
+		`SELECT catalog_item_id, condition FROM physical_assets WHERE workspace_id = $1 AND id = $2`,
+		wsID, assetID).Scan(&assetItemID, &assetCondition)
 	if err == sql.ErrNoRows {
 		writeError(w, http.StatusNotFound, "aset tidak ditemukan")
 		return
@@ -301,6 +301,13 @@ func (s *server) handleCreateHold(w http.ResponseWriter, r *http.Request) {
 	}
 	if assetOut {
 		writeError(w, http.StatusConflict, "unit sedang dipinjam")
+		return
+	}
+	// Unit rusak/hilang tidak bisa ditahan lagi (kondisi dibaca
+	// bersama item aset di atas). Replay kunci yang sudah ada tetap
+	// 200 di atas, bukan hold baru — cek ini hanya untuk hold BARU.
+	if assetCondition == "damaged" || assetCondition == "lost" {
+		writeError(w, http.StatusConflict, "unit tidak tersedia")
 		return
 	}
 	// Hold baru untuk periode draft yang sudah berakhir → 409.

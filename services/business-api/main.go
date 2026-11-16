@@ -161,6 +161,7 @@ func newMux(db *sql.DB) *http.ServeMux {
 	mux.HandleFunc("POST /workspaces/{id}/rental/contracts/{draft_id}/payments/{payment_id}/reversal-proposals", srv.authMiddleware(srv.handleProposeReversal))
 	mux.HandleFunc("POST /workspaces/{id}/rental/contracts/{draft_id}/payments/{payment_id}/reversal-proposals/{proposal_id}/approvals", srv.authMiddleware(srv.handleApproveReversal))
 	mux.HandleFunc("GET /workspaces/{id}/rental/contracts/{draft_id}/payments", srv.authMiddleware(srv.handleGetPayments))
+	mux.HandleFunc("GET /workspaces/{id}/finance/summary", srv.authMiddleware(srv.handleGetFinanceSummary))
 	mux.HandleFunc("POST /workspaces/{id}/invites", srv.authMiddleware(srv.handleCreateInvite))
 	mux.HandleFunc("POST /invites/accept", srv.authMiddleware(srv.handleAcceptInvite))
 	mux.HandleFunc("GET /workspaces/{id}/audit", srv.authMiddleware(srv.handleListAudit))

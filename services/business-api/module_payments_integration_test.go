@@ -10,15 +10,21 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -253,6 +259,31 @@ func postRawGo(srv *httptest.Server, path, token string, keys []string, raw stri
 	var buf bytes.Buffer
 	buf.WriteString(raw)
 	req, err := http.NewRequest(http.MethodPost, srv.URL+path, &buf)
+	if err != nil {
+		return 0, nil, err
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	for _, k := range keys {
+		req.Header.Add("Idempotency-Key", k)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer resp.Body.Close()
+	var out map[string]any
+	_ = json.NewDecoder(resp.Body).Decode(&out)
+	return resp.StatusCode, out, nil
+}
+
+// postRawGoCtx seperti postRawGo tetapi dengan context pemanggil:
+// request yang terblokir gagal cepat saat context berakhir.
+func postRawGoCtx(ctx context.Context, srv *httptest.Server, path, token string, keys []string, raw string) (int, map[string]any, error) {
+	var buf bytes.Buffer
+	buf.WriteString(raw)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, srv.URL+path, &buf)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -1816,4 +1847,850 @@ func atoiStrict(t *testing.T, s string) int {
 		n = n*10 + int(c-'0')
 	}
 	return n
+}
+
+// --- F2-02-C: ringkasan pembayaran workspace (read-only) ---
+
+// seedSummaryChain mirrors seedPaymentChainOn but with currency and
+// optional finance activation (withFinance=false seeds the rental
+// chain + agreed-price fact WITHOUT finance issuance/activation).
+func seedSummaryChain(t *testing.T, env *activationEnv, ws, token, sku, keyPrefix, amount string, draftHours int, currency string, withFinance bool) (draftID, factID, total string) {
+	t.Helper()
+	code, body := createCustomer(t, env.srv, ws, token, map[string]string{"display_name": "Pelanggan Bayar"})
+	if code != http.StatusCreated {
+		t.Fatalf("seed customer %s: want 201, got %d (%v)", keyPrefix, code, body)
+	}
+	custID, _ := body["id"].(string)
+	code, body = createCatalogItem(t, env.srv, ws, token, map[string]string{"sku": sku, "name": "Barang Bayar", "unit": "pcs"})
+	if code != http.StatusCreated {
+		t.Fatalf("seed item %s: want 201, got %d (%v)", keyPrefix, code, body)
+	}
+	itemID, _ := body["id"].(string)
+	activateRentalOn(t, env, ws, token)
+	base := dbCutoff(t, env.boot)
+	priceID := seedPriceOn(t, env, ws, token, itemID, keyPrefix+"-price", base.Add(1*time.Hour), base.Add(73*time.Hour), amount, currency)
+	starts := base.Add(2 * time.Hour).UTC().Format(time.RFC3339Nano)
+	ends := base.Add(time.Duration(2+draftHours) * time.Hour).UTC().Format(time.RFC3339Nano)
+	code, body = createDraft(t, env.srv, ws, token, keyPrefix+"-draft", draftBody(custID, itemID, starts, ends))
+	if code != http.StatusCreated {
+		t.Fatalf("seed draft %s: want 201, got %d (%v)", keyPrefix, code, body)
+	}
+	draftID, _ = body["id"].(string)
+	code, quote := getQuote(t, env.srv, ws, draftID, token)
+	if code != http.StatusOK {
+		t.Fatalf("seed quote %s: want 200, got %d (%v)", keyPrefix, code, quote)
+	}
+	total, _ = quote["total_minor"].(string)
+	if total == "" {
+		t.Fatalf("quote %s tanpa total_minor: %v", keyPrefix, quote)
+	}
+	code, body = acceptPrice(t, env.srv, ws, draftID, token, keyPrefix+"-accept", acceptBody(priceID, total))
+	if code != http.StatusCreated {
+		t.Fatalf("accept %s: want 201, got %d (%v)", keyPrefix, code, body)
+	}
+	if withFinance {
+		activateFinance(t, env, ws, token)
+	}
+	code, body = getAgreedPrice(t, env.srv, ws, draftID, token)
+	if code != http.StatusOK {
+		t.Fatalf("baca fakta %s: want 200, got %d (%v)", keyPrefix, code, body)
+	}
+	factID, _ = body["id"].(string)
+	return draftID, factID, total
+}
+
+func getFinanceSummary(t *testing.T, srv *httptest.Server, ws, token string) (int, map[string]any) {
+	t.Helper()
+	return doJSON(t, srv, "GET", "/workspaces/"+ws+"/finance/summary", token, nil)
+}
+
+func getFinanceSummaryRaw(t *testing.T, srv *httptest.Server, ws, token, query string) (int, map[string]any) {
+	t.Helper()
+	path := "/workspaces/" + ws + "/finance/summary"
+	if query != "" {
+		path += "?" + query
+	}
+	req, err := http.NewRequest(http.MethodGet, srv.URL+path, nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("do request: %v", err)
+	}
+	defer resp.Body.Close()
+	var out map[string]any
+	_ = json.NewDecoder(resp.Body).Decode(&out)
+	return resp.StatusCode, out
+}
+
+// getFinanceSummaryGoCtx is the context-aware goroutine-safe GET:
+// errors returned, never Fatalf. The caller's context bounds the
+// request; no global client setting is touched.
+func getFinanceSummaryGoCtx(ctx context.Context, srv *httptest.Server, ws, token string) (int, map[string]any, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL+"/workspaces/"+ws+"/finance/summary", nil)
+	if err != nil {
+		return 0, nil, err
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer resp.Body.Close()
+	var out map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return resp.StatusCode, nil, err
+	}
+	return resp.StatusCode, out, nil
+}
+
+// getFinanceSummaryGo is the goroutine-safe GET: errors returned, never Fatalf.
+func getFinanceSummaryGo(srv *httptest.Server, ws, token string) (int, map[string]any, error) {
+	return getFinanceSummaryGoCtx(context.Background(), srv, ws, token)
+}
+
+func findSummaryCurrency(body map[string]any, currency string) (map[string]any, bool) {
+	list, ok := body["currencies"].([]any)
+	if !ok {
+		return nil, false
+	}
+	for _, item := range list {
+		m, _ := item.(map[string]any)
+		if m["currency"] == currency {
+			return m, true
+		}
+	}
+	return nil, false
+}
+
+func summaryCurrency(t *testing.T, body map[string]any, currency string) map[string]any {
+	t.Helper()
+	m, ok := findSummaryCurrency(body, currency)
+	if !ok {
+		t.Fatalf("summary tanpa currency %s: %v", currency, body)
+	}
+	return m
+}
+
+func assertSummaryCurrency(t *testing.T, body map[string]any, currency, total, paid, outstanding string, payments, reversals, pendPay, pendRev int) {
+	t.Helper()
+	m := summaryCurrency(t, body, currency)
+	if m["total_minor"] != total || m["paid_minor"] != paid || m["outstanding_minor"] != outstanding {
+		t.Fatalf("summary %s: want total/paid/outstanding %s/%s/%s, got %v", currency, total, paid, outstanding, m)
+	}
+	for k, v := range map[string]float64{
+		"payments_count": float64(payments), "reversals_count": float64(reversals),
+		"pending_payment_proposals_count": float64(pendPay), "pending_reversal_proposals_count": float64(pendRev),
+	} {
+		if m[k] != v {
+			t.Fatalf("summary %s: want %s=%v, got %v (%v)", currency, k, v, m[k], m)
+		}
+	}
+}
+
+func assertSummaryCorrupt(t *testing.T, code int, body map[string]any) {
+	t.Helper()
+	if code != http.StatusInternalServerError {
+		t.Fatalf("summary korup: want 500, got %d (%v)", code, body)
+	}
+	if body["error"] != "total tidak konsisten" {
+		t.Fatalf("summary korup: want error total tidak konsisten, got %v", body)
+	}
+	if _, has := body["currencies"]; has {
+		t.Fatalf("summary korup: currencies parsial tidak boleh ada: %v", body)
+	}
+}
+
+// payPosted proposes + approves one payment on any workspace/currency; returns payment ID.
+func payPosted(t *testing.T, env *activationEnv, ws, draft, proposerToken, approverToken, keyPrefix, amount, currency string) string {
+	t.Helper()
+	code, body := proposePayment(t, env.srv, ws, draft, proposerToken, keyPrefix+"-p", map[string]any{
+		"amount_minor": amount, "currency": currency, "method": "cash",
+	})
+	if code != http.StatusCreated {
+		t.Fatalf("pay propose %s: want 201, got %d (%v)", keyPrefix, code, body)
+	}
+	proposalID, _ := body["id"].(string)
+	code, body = approvePayment(t, env.srv, ws, draft, proposalID, approverToken, keyPrefix+"-a")
+	if code != http.StatusCreated {
+		t.Fatalf("pay approve %s: want 201, got %d (%v)", keyPrefix, code, body)
+	}
+	paymentID, _ := body["id"].(string)
+	return paymentID
+}
+
+// reversePosted proposes + approves a full reversal; returns reversal ID.
+func reversePosted(t *testing.T, env *activationEnv, ws, draft, paymentID, proposerToken, approverToken, keyPrefix string) string {
+	t.Helper()
+	code, body := proposeReversal(t, env.srv, ws, draft, paymentID, proposerToken, keyPrefix+"-rp", map[string]any{"reason": "koreksi " + keyPrefix})
+	if code != http.StatusCreated {
+		t.Fatalf("rev propose %s: want 201, got %d (%v)", keyPrefix, code, body)
+	}
+	revProposalID, _ := body["id"].(string)
+	code, body = approveReversal(t, env.srv, ws, draft, paymentID, revProposalID, approverToken, keyPrefix+"-ra")
+	if code != http.StatusCreated {
+		t.Fatalf("rev approve %s: want 201, got %d (%v)", keyPrefix, code, body)
+	}
+	reversalID, _ := body["id"].(string)
+	return reversalID
+}
+
+// insertCorruptPayment inserts a posted payment row directly, bypassing
+// approval/cap. Proposer = owner, approver = manager, timestamps now().
+func insertCorruptPayment(t *testing.T, boot *sql.DB, ws, draftID, factID, proposalID, key, amount, currency, ownerID, mgrID string) string {
+	t.Helper()
+	amt, err := strconv.ParseInt(amount, 10, 64)
+	if err != nil {
+		t.Fatalf("parse amount %s: %v", amount, err)
+	}
+	var id string
+	err = boot.QueryRow(
+		`INSERT INTO rental_payments (workspace_id, rental_contract_id, rental_agreed_price_id, proposal_id, client_request_id, amount_minor, currency, method, reference, proposed_by, proposed_at, approved_by, approved_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, 'cash', NULL, $8, now(), $9, now()) RETURNING id::text`,
+		ws, draftID, factID, proposalID, key, amt, currency, ownerID, mgrID).Scan(&id)
+	if err != nil {
+		t.Fatalf("insert corrupt payment %s: %v", key, err)
+	}
+	return id
+}
+
+// insertCorruptProposal inserts a payment proposal row directly.
+func insertCorruptProposal(t *testing.T, boot *sql.DB, ws, draftID, factID, key, amount, currency, ownerID string) string {
+	t.Helper()
+	amt, err := strconv.ParseInt(amount, 10, 64)
+	if err != nil {
+		t.Fatalf("parse amount %s: %v", amount, err)
+	}
+	var id string
+	err = boot.QueryRow(
+		`INSERT INTO rental_payment_proposals (workspace_id, rental_contract_id, rental_agreed_price_id, client_request_id, amount_minor, currency, method, reference, proposed_by, proposed_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, 'cash', NULL, $7, now()) RETURNING id::text`,
+		ws, draftID, factID, key, amt, currency, ownerID).Scan(&id)
+	if err != nil {
+		t.Fatalf("insert corrupt proposal %s: %v", key, err)
+	}
+	return id
+}
+
+// summaryStateSnapshot is an exact state snapshot for the no-writes proof.
+type summaryStateSnapshot struct {
+	proposals, payments, revProposals, reversals int
+	audits, installations, entitlements          int
+	facts, paymentsDump                          string
+}
+
+func snapshotSummaryState(t *testing.T, env *activationEnv) summaryStateSnapshot {
+	t.Helper()
+	var s summaryStateSnapshot
+	s.proposals = countRows(t, env.boot, "rental_payment_proposals", env.wsA)
+	s.payments = countRows(t, env.boot, "rental_payments", env.wsA)
+	s.revProposals = countRows(t, env.boot, "rental_payment_reversal_proposals", env.wsA)
+	s.reversals = countRows(t, env.boot, "rental_payment_reversals", env.wsA)
+	s.audits = countRows(t, env.boot, "audit_events", env.wsA)
+	s.installations = countRows(t, env.boot, "module_installations", env.wsA)
+	s.entitlements = countRows(t, env.boot, "module_entitlements", env.wsA)
+	if err := env.boot.QueryRow(`SELECT COALESCE(string_agg(id::text || '|' || total_minor::text || '|' || currency, ',' ORDER BY id), '') FROM rental_agreed_prices WHERE workspace_id = $1`, env.wsA).Scan(&s.facts); err != nil {
+		t.Fatalf("snapshot facts: %v", err)
+	}
+	if err := env.boot.QueryRow(`SELECT COALESCE(string_agg(id::text || '|' || amount_minor::text || '|' || currency || '|' || client_request_id, ',' ORDER BY id), '') FROM rental_payments WHERE workspace_id = $1`, env.wsA).Scan(&s.paymentsDump); err != nil {
+		t.Fatalf("snapshot payments: %v", err)
+	}
+	return s
+}
+
+func TestFinanceSummary_EmptyFactOnlyZero(t *testing.T) {
+	env := setupPayments(t)
+	code, body := getFinanceSummary(t, env.srv, env.wsA, env.ownerToken)
+	if code != http.StatusOK {
+		t.Fatalf("summary kosong: want 200, got %d (%v)", code, body)
+	}
+	list, ok := body["currencies"].([]any)
+	if !ok || len(list) != 0 {
+		t.Fatalf("summary kosong: want currencies [], got %v", body["currencies"])
+	}
+	if body["workspace_id"] != env.wsA {
+		t.Fatalf("summary kosong: want workspace_id %s, got %v", env.wsA, body["workspace_id"])
+	}
+	observed, ok := body["observed_at"].(string)
+	if !ok || observed == "" {
+		t.Fatalf("summary tanpa observed_at: %v", body)
+	}
+	if _, err := time.Parse(time.RFC3339Nano, observed); err != nil {
+		t.Fatalf("observed_at bukan RFC3339Nano: %q (%v)", observed, err)
+	}
+	draftID, _, total := seedSummaryChain(t, env, env.wsA, env.ownerToken, "SKU-SUM-00", "sum-00", "150000", 48, "IDR", true)
+	if total != "300000" {
+		t.Fatalf("total fakta: want 300000, got %s", total)
+	}
+	code, body = getFinanceSummary(t, env.srv, env.wsA, env.ownerToken)
+	if code != http.StatusOK {
+		t.Fatalf("summary fakta saja: want 200, got %d (%v)", code, body)
+	}
+	assertSummaryCurrency(t, body, "IDR", "300000", "0", "300000", 0, 0, 0, 0)
+	_, _, total0 := seedSummaryChain(t, env, env.wsA, env.ownerToken, "SKU-SUM-0Z", "sum-0z", "0", 24, "IDR", true)
+	if total0 != "0" {
+		t.Fatalf("total nol: want 0, got %s", total0)
+	}
+	code, body = getFinanceSummary(t, env.srv, env.wsA, env.ownerToken)
+	if code != http.StatusOK {
+		t.Fatalf("summary harga nol: want 200, got %d (%v)", code, body)
+	}
+	assertSummaryCurrency(t, body, "IDR", "300000", "0", "300000", 0, 0, 0, 0)
+	_ = draftID
+}
+
+func TestFinanceSummary_MultiDraftCountsNoFanout(t *testing.T) {
+	env := setupPayments(t)
+	d1, _, _ := seedSummaryChain(t, env, env.wsA, env.ownerToken, "SKU-SUM-10", "sum-10", "150000", 48, "IDR", true)
+	p1 := payPosted(t, env, env.wsA, d1, env.ownerToken, env.mgrToken, "sum-10-a", "100000", "IDR")
+	p2 := payPosted(t, env, env.wsA, d1, env.ownerToken, env.mgrToken, "sum-10-b", "50000", "IDR")
+	reversePosted(t, env, env.wsA, d1, p1, env.mgrToken, env.ownerToken, "sum-10-r1")
+	code, body := proposeReversal(t, env.srv, env.wsA, d1, p2, env.mgrToken, "sum-10-r2a", map[string]any{"reason": "koreksi pertama"})
+	if code != http.StatusCreated {
+		t.Fatalf("propose reversal pertama: want 201, got %d (%v)", code, body)
+	}
+	revPropA, _ := body["id"].(string)
+	code, body = proposeReversal(t, env.srv, env.wsA, d1, p2, env.mgrToken, "sum-10-r2b", map[string]any{"reason": "koreksi kedua"})
+	if code != http.StatusCreated {
+		t.Fatalf("propose reversal kedua: want 201, got %d (%v)", code, body)
+	}
+	revPropB, _ := body["id"].(string)
+	code, body = approveReversal(t, env.srv, env.wsA, d1, p2, revPropA, env.ownerToken, "sum-10-r2a-ok")
+	if code != http.StatusCreated {
+		t.Fatalf("approve reversal pertama: want 201, got %d (%v)", code, body)
+	}
+	p3 := payPosted(t, env, env.wsA, d1, env.ownerToken, env.mgrToken, "sum-10-c", "70000", "IDR")
+	_ = p3
+	code, body = proposePayment(t, env.srv, env.wsA, d1, env.ownerToken, "sum-10-pp", map[string]any{"amount_minor": "10000", "currency": "IDR", "method": "cash"})
+	if code != http.StatusCreated {
+		t.Fatalf("pending proposal: want 201, got %d (%v)", code, body)
+	}
+	d2, _, _ := seedSummaryChain(t, env, env.wsA, env.ownerToken, "SKU-SUM-11", "sum-11", "150000", 48, "IDR", true)
+	payPosted(t, env, env.wsA, d2, env.ownerToken, env.mgrToken, "sum-11-a", "300000", "IDR")
+	code, body = getFinanceSummary(t, env.srv, env.wsA, env.ownerToken)
+	if code != http.StatusOK {
+		t.Fatalf("summary: want 200, got %d (%v)", code, body)
+	}
+	assertSummaryCurrency(t, body, "IDR", "600000", "370000", "230000", 4, 2, 1, 1)
+	if _, ok := findSummaryCurrency(body, "USD"); ok {
+		t.Fatalf("summary IDR saja: ada bucket USD: %v", body)
+	}
+	// Usulan pembalikan kedua tetap pending sesudah yang pertama disetujui.
+	code, body = getPayments(t, env.srv, env.wsA, d1, env.ownerToken)
+	if code != http.StatusOK {
+		t.Fatalf("histori d1: want 200, got %d (%v)", code, body)
+	}
+	pendingRev, _ := body["pending_reversal_proposals"].([]any)
+	if len(pendingRev) != 1 {
+		t.Fatalf("histori d1: want 1 pending reversal, got %v", body["pending_reversal_proposals"])
+	}
+	pendingRevMap, _ := pendingRev[0].(map[string]any)
+	if pendingRevMap["id"] != revPropB {
+		t.Fatalf("histori d1: pending reversal want %s, got %v", revPropB, pendingRevMap["id"])
+	}
+	if body["paid_minor"] != "70000" || body["total_minor"] != "300000" {
+		t.Fatalf("histori d1 berubah: %v", body)
+	}
+}
+
+func TestFinanceSummary_CurrenciesAndLargeAggregates(t *testing.T) {
+	env := setupPayments(t)
+	maxInt64 := "9223372036854775807"
+	dA, _, totalA := seedSummaryChain(t, env, env.wsA, env.ownerToken, "SKU-SUM-20", "sum-20", maxInt64, 24, "IDR", true)
+	if totalA != maxInt64 {
+		t.Fatalf("total A: want %s, got %s", maxInt64, totalA)
+	}
+	payPosted(t, env, env.wsA, dA, env.ownerToken, env.mgrToken, "sum-20-a", maxInt64, "IDR")
+	dB, _, totalB := seedSummaryChain(t, env, env.wsA, env.ownerToken, "SKU-SUM-21", "sum-21", maxInt64, 24, "IDR", true)
+	if totalB != maxInt64 {
+		t.Fatalf("total B: want %s, got %s", maxInt64, totalB)
+	}
+	for i := 0; i < 3; i++ {
+		p := payPosted(t, env, env.wsA, dB, env.ownerToken, env.mgrToken, fmt.Sprintf("sum-21-c%d", i), maxInt64, "IDR")
+		reversePosted(t, env, env.wsA, dB, p, env.mgrToken, env.ownerToken, fmt.Sprintf("sum-21-r%d", i))
+	}
+	payPosted(t, env, env.wsA, dB, env.ownerToken, env.mgrToken, "sum-21-final", maxInt64, "IDR")
+	dC, _, totalC := seedSummaryChain(t, env, env.wsA, env.ownerToken, "SKU-SUM-22", "sum-22", "250000", 48, "USD", true)
+	if totalC != "500000" {
+		t.Fatalf("total C: want 500000, got %s", totalC)
+	}
+	payPosted(t, env, env.wsA, dC, env.ownerToken, env.mgrToken, "sum-22-a", "200000", "USD")
+	code, body := getFinanceSummary(t, env.srv, env.wsA, env.ownerToken)
+	if code != http.StatusOK {
+		t.Fatalf("summary: want 200, got %d (%v)", code, body)
+	}
+	twoMax := "18446744073709551614"
+	assertSummaryCurrency(t, body, "IDR", twoMax, twoMax, "0", 5, 3, 0, 0)
+	assertSummaryCurrency(t, body, "USD", "500000", "200000", "300000", 1, 0, 0, 0)
+	list, _ := body["currencies"].([]any)
+	if len(list) != 2 {
+		t.Fatalf("summary: want 2 currency, got %v", body["currencies"])
+	}
+	first, _ := list[0].(map[string]any)
+	second, _ := list[1].(map[string]any)
+	if first["currency"] != "IDR" || second["currency"] != "USD" {
+		t.Fatalf("urutan currency: want [IDR USD], got %v", body["currencies"])
+	}
+}
+
+func TestFinanceSummary_Corruption(t *testing.T) {
+	t.Run("over-cap", func(t *testing.T) {
+		env := setupPayments(t)
+		d, factID, _ := seedSummaryChain(t, env, env.wsA, env.ownerToken, "SKU-SUM-30", "sum-30", "100", 24, "IDR", true)
+		code, body := proposePayment(t, env.srv, env.wsA, d, env.ownerToken, "sum-30-p", map[string]any{"amount_minor": "100", "currency": "IDR", "method": "cash"})
+		if code != http.StatusCreated {
+			t.Fatalf("propose: want 201, got %d (%v)", code, body)
+		}
+		proposalID, _ := body["id"].(string)
+		payID := insertCorruptPayment(t, env.boot, env.wsA, d, factID, proposalID, "sum-30-pay", "150", "IDR", env.ownerID, env.mgrID)
+		before, ok := readPayment(t, env.boot, env.wsA, payID)
+		if !ok {
+			t.Fatalf("payment korup tidak terbaca")
+		}
+		auditsBefore := countBusinessAudits(t, env.boot, env.wsA, "rental_payment_posted")
+		code, body = getFinanceSummary(t, env.srv, env.wsA, env.ownerToken)
+		assertSummaryCorrupt(t, code, body)
+		after, ok := readPayment(t, env.boot, env.wsA, payID)
+		if !ok || before != after {
+			t.Fatalf("GET memperbaiki baris korup: sebelum=%+v sesudah=%+v", before, after)
+		}
+		if got := countBusinessAudits(t, env.boot, env.wsA, "rental_payment_posted"); got != auditsBefore {
+			t.Fatalf("GET menulis audit: sebelum=%d sesudah=%d", auditsBefore, got)
+		}
+	})
+	t.Run("offset-hidden", func(t *testing.T) {
+		env := setupPayments(t)
+		dA, factA, _ := seedSummaryChain(t, env, env.wsA, env.ownerToken, "SKU-SUM-31a", "sum-31a", "100", 24, "IDR", true)
+		_, _, _ = seedSummaryChain(t, env, env.wsA, env.ownerToken, "SKU-SUM-31b", "sum-31b", "100", 24, "IDR", true)
+		code, body := proposePayment(t, env.srv, env.wsA, dA, env.ownerToken, "sum-31a-p", map[string]any{"amount_minor": "100", "currency": "IDR", "method": "cash"})
+		if code != http.StatusCreated {
+			t.Fatalf("propose: want 201, got %d (%v)", code, body)
+		}
+		proposalID, _ := body["id"].(string)
+		insertCorruptPayment(t, env.boot, env.wsA, dA, factA, proposalID, "sum-31a-pay", "150", "IDR", env.ownerID, env.mgrID)
+		code, body = getFinanceSummary(t, env.srv, env.wsA, env.ownerToken)
+		assertSummaryCorrupt(t, code, body)
+	})
+	t.Run("mismatched-payment-currency", func(t *testing.T) {
+		env := setupPayments(t)
+		d, factID, _ := seedSummaryChain(t, env, env.wsA, env.ownerToken, "SKU-SUM-32", "sum-32", "100", 24, "IDR", true)
+		code, body := proposePayment(t, env.srv, env.wsA, d, env.ownerToken, "sum-32-p", map[string]any{"amount_minor": "100", "currency": "IDR", "method": "cash"})
+		if code != http.StatusCreated {
+			t.Fatalf("propose: want 201, got %d (%v)", code, body)
+		}
+		proposalID, _ := body["id"].(string)
+		insertCorruptPayment(t, env.boot, env.wsA, d, factID, proposalID, "sum-32-pay", "50", "USD", env.ownerID, env.mgrID)
+		code, body = getFinanceSummary(t, env.srv, env.wsA, env.ownerToken)
+		assertSummaryCorrupt(t, code, body)
+	})
+	t.Run("mismatched-proposal-currency", func(t *testing.T) {
+		env := setupPayments(t)
+		d, factID, _ := seedSummaryChain(t, env, env.wsA, env.ownerToken, "SKU-SUM-33", "sum-33", "100", 24, "IDR", true)
+		insertCorruptProposal(t, env.boot, env.wsA, d, factID, "sum-33-pp", "50", "USD", env.ownerID)
+		code, body := getFinanceSummary(t, env.srv, env.wsA, env.ownerToken)
+		assertSummaryCorrupt(t, code, body)
+	})
+	t.Run("pending-over-ceiling-stays-valid", func(t *testing.T) {
+		env := setupPayments(t)
+		d, _, _ := seedSummaryChain(t, env, env.wsA, env.ownerToken, "SKU-SUM-34", "sum-34", "100", 24, "IDR", true)
+		code, body := proposePayment(t, env.srv, env.wsA, d, env.ownerToken, "sum-34-p", map[string]any{"amount_minor": "101", "currency": "IDR", "method": "cash"})
+		if code != http.StatusCreated {
+			t.Fatalf("usulan over-ceiling: want 201, got %d (%v)", code, body)
+		}
+		code, body = getFinanceSummary(t, env.srv, env.wsA, env.ownerToken)
+		if code != http.StatusOK {
+			t.Fatalf("summary sesudah usulan over-ceiling: want 200, got %d (%v)", code, body)
+		}
+		assertSummaryCurrency(t, body, "IDR", "100", "0", "100", 0, 0, 1, 0)
+	})
+}
+
+func TestFinanceSummary_Access(t *testing.T) {
+	env := setupPayments(t)
+	d, _, _ := seedSummaryChain(t, env, env.wsA, env.ownerToken, "SKU-SUM-40", "sum-40", "150000", 48, "IDR", true)
+	payPosted(t, env, env.wsA, d, env.ownerToken, env.mgrToken, "sum-40-a", "100000", "IDR")
+	for _, tc := range []struct{ name, token string }{
+		{"owner", env.ownerToken}, {"manager", env.mgrToken}, {"cashier", env.cashToken},
+	} {
+		code, body := getFinanceSummary(t, env.srv, env.wsA, tc.token)
+		if code != http.StatusOK {
+			t.Fatalf("summary %s: want 200, got %d (%v)", tc.name, code, body)
+		}
+		assertSummaryCurrency(t, body, "IDR", "300000", "100000", "200000", 1, 0, 0, 0)
+	}
+	code, _ := getFinanceSummary(t, env.srv, env.wsA, "")
+	if code != http.StatusUnauthorized {
+		t.Fatalf("summary tanpa token: want 401, got %d", code)
+	}
+	code, body := getFinanceSummary(t, env.srv, "bukan-uuid", env.ownerToken)
+	if code != http.StatusBadRequest {
+		t.Fatalf("summary uuid buruk: want 400, got %d (%v)", code, body)
+	}
+	code, _ = getFinanceSummary(t, env.srv, "11111111-2222-3333-4444-555555555555", env.ownerToken)
+	if code != http.StatusForbidden {
+		t.Fatalf("summary ws asing: want 403, got %d", code)
+	}
+	code, _ = getFinanceSummary(t, env.srv, env.wsA, env.otherToken)
+	if code != http.StatusForbidden {
+		t.Fatalf("summary nonmember: want 403, got %d", code)
+	}
+	if _, err := env.boot.Exec(`DELETE FROM membership_roles WHERE workspace_id = $1 AND subject_id = $2 AND role = 'cashier'`, env.wsA, env.cashID); err != nil {
+		t.Fatalf("hapus peran cashier: %v", err)
+	}
+	code, _ = getFinanceSummary(t, env.srv, env.wsA, env.cashToken)
+	if code != http.StatusForbidden {
+		t.Fatalf("summary tanpa peran baca: want 403, got %d", code)
+	}
+	if _, err := env.boot.Exec(`INSERT INTO membership_roles (workspace_id, subject_id, role) VALUES ($1, $2, 'cashier') ON CONFLICT DO NOTHING`, env.wsA, env.cashID); err != nil {
+		t.Fatalf("pulihkan peran cashier: %v", err)
+	}
+	code, _ = getFinanceSummary(t, env.srv, env.wsA, env.cashToken)
+	if code != http.StatusOK {
+		t.Fatalf("summary sesudah pulih peran: want 200, got %d", code)
+	}
+	if _, err := env.boot.Exec(`DELETE FROM membership_roles WHERE workspace_id = $1 AND subject_id = $2`, env.wsA, env.cashID); err != nil {
+		t.Fatalf("hapus peran cashier: %v", err)
+	}
+	if _, err := env.boot.Exec(`DELETE FROM workspace_memberships WHERE workspace_id = $1 AND subject_id = $2`, env.wsA, env.cashID); err != nil {
+		t.Fatalf("hapus membership cashier: %v", err)
+	}
+	code, _ = getFinanceSummary(t, env.srv, env.wsA, env.cashToken)
+	if code != http.StatusForbidden {
+		t.Fatalf("summary tanpa membership: want 403, got %d", code)
+	}
+	code, body = getFinanceSummaryRaw(t, env.srv, env.wsA, env.ownerToken, "currency=IDR")
+	if code != http.StatusBadRequest {
+		t.Fatalf("summary ?currency=IDR: want 400, got %d (%v)", code, body)
+	}
+	code, body = getFinanceSummaryRaw(t, env.srv, env.wsA, env.ownerToken, "from=2026-01-01")
+	if code != http.StatusBadRequest {
+		t.Fatalf("summary ?from=: want 400, got %d (%v)", code, body)
+	}
+	code, body = getFinanceSummaryRaw(t, env.srv, env.wsA, env.ownerToken, "currency=")
+	if code != http.StatusBadRequest {
+		t.Fatalf("summary ?currency= kosong: want 400, got %d (%v)", code, body)
+	}
+	code, body = getPayments(t, env.srv, env.wsA, d, env.ownerToken)
+	if code != http.StatusOK {
+		t.Fatalf("histori lama: want 200, got %d (%v)", code, body)
+	}
+	if body["paid_minor"] != "100000" || body["total_minor"] != "300000" {
+		t.Fatalf("histori lama berubah: %v", body)
+	}
+}
+
+func TestFinanceSummary_NoFinanceGate(t *testing.T) {
+	env := setupPayments(t)
+	d, _, _ := seedSummaryChain(t, env, env.wsA, env.ownerToken, "SKU-SUM-41", "sum-41", "150000", 48, "IDR", false)
+	code, body := getFinanceSummary(t, env.srv, env.wsA, env.ownerToken)
+	if code != http.StatusOK {
+		t.Fatalf("summary tanpa finance: want 200, got %d (%v)", code, body)
+	}
+	assertSummaryCurrency(t, body, "IDR", "300000", "0", "300000", 0, 0, 0, 0)
+	code, body = proposePayment(t, env.srv, env.wsA, d, env.ownerToken, "sum-41-p", map[string]any{"amount_minor": "1000", "currency": "IDR", "method": "cash"})
+	if code != http.StatusForbidden {
+		t.Fatalf("tulis tanpa finance: want 403, got %d (%v)", code, body)
+	}
+	if body["error"] != "finance belum aktif di workspace ini" {
+		t.Fatalf("tulis tanpa finance: want error finance belum aktif, got %v", body)
+	}
+	activateFinance(t, env, env.wsA, env.ownerToken)
+	payPosted(t, env, env.wsA, d, env.ownerToken, env.mgrToken, "sum-41-a", "100000", "IDR")
+	code, body = deactivateModule(t, env.srv, env.wsA, "finance.basic", env.ownerToken)
+	if code != http.StatusOK {
+		t.Fatalf("deaktivasi finance: want 200, got %d (%v)", code, body)
+	}
+	code, body = getFinanceSummary(t, env.srv, env.wsA, env.ownerToken)
+	if code != http.StatusOK {
+		t.Fatalf("summary sesudah deactivate: want 200, got %d (%v)", code, body)
+	}
+	assertSummaryCurrency(t, body, "IDR", "300000", "100000", "200000", 1, 0, 0, 0)
+	bin := buildGrantCLI(t)
+	opURL := os.Getenv("OPERATOR_TEST_DATABASE_URL")
+	if opURL == "" {
+		t.Fatalf("OPERATOR_TEST_DATABASE_URL kosong — provisioning operator belum dijalankan; tes gagal, bukan dilewati")
+	}
+	revokeFinanceViaCLI(t, bin, opURL, env.wsA, "tes cabut ringkasan")
+	code, body = getFinanceSummary(t, env.srv, env.wsA, env.ownerToken)
+	if code != http.StatusOK {
+		t.Fatalf("summary sesudah revoke: want 200, got %d (%v)", code, body)
+	}
+	assertSummaryCurrency(t, body, "IDR", "300000", "100000", "200000", 1, 0, 0, 0)
+}
+
+func TestFinanceSummary_NoWritesOnGet(t *testing.T) {
+	env := setupPayments(t)
+	d, _, _ := seedSummaryChain(t, env, env.wsA, env.ownerToken, "SKU-SUM-50", "sum-50", "150000", 48, "IDR", true)
+	p1 := payPosted(t, env, env.wsA, d, env.ownerToken, env.mgrToken, "sum-50-a", "100000", "IDR")
+	reversePosted(t, env, env.wsA, d, p1, env.mgrToken, env.ownerToken, "sum-50-r1")
+	payPosted(t, env, env.wsA, d, env.ownerToken, env.mgrToken, "sum-50-b", "50000", "IDR")
+	code, body := proposePayment(t, env.srv, env.wsA, d, env.ownerToken, "sum-50-pp", map[string]any{"amount_minor": "10000", "currency": "IDR", "method": "cash"})
+	if code != http.StatusCreated {
+		t.Fatalf("pending proposal: want 201, got %d (%v)", code, body)
+	}
+	before := snapshotSummaryState(t, env)
+	for i := 0; i < 3; i++ {
+		code, body := getFinanceSummary(t, env.srv, env.wsA, env.ownerToken)
+		if code != http.StatusOK {
+			t.Fatalf("GET %d: want 200, got %d (%v)", i, code, body)
+		}
+		assertSummaryCurrency(t, body, "IDR", "300000", "50000", "250000", 2, 1, 1, 0)
+	}
+	after := snapshotSummaryState(t, env)
+	if before != after {
+		t.Fatalf("GET mengubah state: sebelum=%+v sesudah=%+v", before, after)
+	}
+}
+
+func TestFinanceSummary_ConcurrentConsistency(t *testing.T) {
+	env := setupPayments(t)
+	draftID, _, total := seedPaymentChain(t, env, "SKU-SUM-60", "sum-60")
+	if total != "300000" {
+		t.Fatalf("total: want 300000, got %s", total)
+	}
+	const cycles = 12
+	const amount = "10000"
+	const reads = 40
+	amountBig := big.NewInt(10000)
+	totalBig := big.NewInt(300000)
+	// Satu context/deadline untuk SELURUH tes ini, dibuat SEBELUM
+	// reader/writer dimulai dan dipropagasi ke setiap GET/POST:
+	// request yang terblokir gagal cepat saat deadline, bukan
+	// menggantung tes.
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	var wg sync.WaitGroup
+	writerErr := make(chan error, 1)
+	var writerOK atomic.Int32
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < cycles; i++ {
+			pfx := fmt.Sprintf("sum-60-c%d", i)
+			code, body, err := postRawGoCtx(ctx, env.srv, "/workspaces/"+env.wsA+"/rental/contracts/"+draftID+"/payment-proposals", env.ownerToken, []string{pfx + "-p"}, `{"amount_minor":"10000","currency":"IDR","method":"cash"}`)
+			if err != nil || code != http.StatusCreated {
+				writerErr <- fmt.Errorf("cycle %d propose: err=%v code=%d", i, err, code)
+				return
+			}
+			proposalID, _ := body["id"].(string)
+			code, body, err = postRawGoCtx(ctx, env.srv, "/workspaces/"+env.wsA+"/rental/contracts/"+draftID+"/payment-proposals/"+proposalID+"/approvals", env.mgrToken, []string{pfx + "-a"}, `{}`)
+			if err != nil || code != http.StatusCreated {
+				writerErr <- fmt.Errorf("cycle %d approve: err=%v code=%d", i, err, code)
+				return
+			}
+			writerOK.Add(2)
+			paymentID, _ := body["id"].(string)
+			code, body, err = postRawGoCtx(ctx, env.srv, "/workspaces/"+env.wsA+"/rental/contracts/"+draftID+"/payments/"+paymentID+"/reversal-proposals", env.mgrToken, []string{pfx + "-rp"}, `{"reason":"siklus `+pfx+`"}`)
+			if err != nil || code != http.StatusCreated {
+				writerErr <- fmt.Errorf("cycle %d propose reversal: err=%v code=%d", i, err, code)
+				return
+			}
+			revProposalID, _ := body["id"].(string)
+			code, _, err = postRawGoCtx(ctx, env.srv, "/workspaces/"+env.wsA+"/rental/contracts/"+draftID+"/payments/"+paymentID+"/reversal-proposals/"+revProposalID+"/approvals", env.ownerToken, []string{pfx + "-ra"}, `{}`)
+			if err != nil || code != http.StatusCreated {
+				writerErr <- fmt.Errorf("cycle %d approve reversal: err=%v code=%d", i, err, code)
+				return
+			}
+			writerOK.Add(2)
+		}
+	}()
+	var readErr error
+	checked := 0
+	for i := 0; i < reads; i++ {
+		code, body, err := getFinanceSummaryGoCtx(ctx, env.srv, env.wsA, env.ownerToken)
+		if err != nil {
+			readErr = fmt.Errorf("GET %d: %v", i, err)
+			break
+		}
+		if code != http.StatusOK {
+			readErr = fmt.Errorf("GET %d: want 200, got %d (%v)", i, code, body)
+			break
+		}
+		if _, ok := body["observed_at"].(string); !ok {
+			readErr = fmt.Errorf("GET %d: tanpa observed_at: %v", i, body)
+			break
+		}
+		m, ok := findSummaryCurrency(body, "IDR")
+		if !ok {
+			readErr = fmt.Errorf("GET %d: tanpa currency IDR: %v", i, body)
+			break
+		}
+		payments, _ := m["payments_count"].(float64)
+		reversals, _ := m["reversals_count"].(float64)
+		pendPay, _ := m["pending_payment_proposals_count"].(float64)
+		pendRev, _ := m["pending_reversal_proposals_count"].(float64)
+		if m["total_minor"] != "300000" {
+			readErr = fmt.Errorf("GET %d: total want 300000, got %v", i, m["total_minor"])
+			break
+		}
+		active := big.NewInt(int64(payments - reversals))
+		wantPaid := new(big.Int).Mul(amountBig, active)
+		if m["paid_minor"] != wantPaid.String() {
+			readErr = fmt.Errorf("GET %d: paid want %s, got %v (payments=%v reversals=%v)", i, wantPaid, m["paid_minor"], payments, reversals)
+			break
+		}
+		wantOut := new(big.Int).Sub(totalBig, wantPaid)
+		if m["outstanding_minor"] != wantOut.String() {
+			readErr = fmt.Errorf("GET %d: outstanding want %s, got %v", i, wantOut, m["outstanding_minor"])
+			break
+		}
+		if payments < 0 || payments > cycles || reversals < 0 || reversals > payments || pendPay < 0 || pendPay > 1 || pendRev < 0 || pendRev > 1 {
+			readErr = fmt.Errorf("GET %d: hitungan tak terjangkau: %v", i, m)
+			break
+		}
+		checked++
+	}
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-ctx.Done():
+		// Deadline: batalkan, lalu tunggu writer benar-benar
+		// selesai (request-nya gagal cepat karena context) sebelum
+		// cleanup fixture — tanpa waiter tak berbatas.
+		cancel()
+		<-done
+		t.Fatal("concurrent test timed out (context deadline)")
+	}
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	select {
+	case err := <-writerErr:
+		t.Fatalf("writer gagal: %v", err)
+	default:
+	}
+	if checked == 0 {
+		t.Fatalf("tidak ada respons GET yang diperiksa")
+	}
+	if got := writerOK.Load(); got != 4*cycles {
+		t.Fatalf("writer: want %d panggilan sukses, got %d", 4*cycles, got)
+	}
+	code, body, err := getFinanceSummaryGoCtx(ctx, env.srv, env.wsA, env.ownerToken)
+	if err != nil {
+		t.Fatalf("summary akhir: %v", err)
+	}
+	if code != http.StatusOK {
+		t.Fatalf("summary akhir: want 200, got %d (%v)", code, body)
+	}
+	assertSummaryCurrency(t, body, "IDR", "300000", "0", "300000", cycles, cycles, 0, 0)
+}
+
+// TestFinanceSummary_QueryRejected membuktikan ringkasan tidak
+// menerima parameter query apa pun: hanya GET polos (atau trailing
+// "?" dengan RawQuery kosong) yang lolos; field kosong, field
+// malformed, dan escape tidak valid semuanya 400.
+func TestFinanceSummary_QueryRejected(t *testing.T) {
+	env := setupPayments(t)
+	seedPaymentChain(t, env, "SKU-SUM-Q", "sum-q")
+	code, body := getFinanceSummary(t, env.srv, env.wsA, env.ownerToken)
+	if code != http.StatusOK {
+		t.Fatalf("summary polos: want 200, got %d (%v)", code, body)
+	}
+	assertSummaryCurrency(t, body, "IDR", "300000", "0", "300000", 0, 0, 0, 0)
+	// Trailing "?" (RawQuery kosong) tidak ditolak.
+	req, err := http.NewRequest(http.MethodGet, env.srv.URL+"/workspaces/"+env.wsA+"/finance/summary?", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+env.ownerToken)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("do request: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("summary trailing ?: want 200, got %d", resp.StatusCode)
+	}
+	rejected := []struct {
+		name  string
+		query string
+	}{
+		{"currency kosong", "currency="},
+		{"as_of kosong", "as_of="},
+		{"as_of escape rusak", "as_of=%ZZ"},
+		{"dua field", "currency=USD;as_of=2020-01-01"},
+		{"nama field escape rusak", "%ZZ=USD"},
+		{"currency biasa", "currency=IDR"},
+		{"from biasa", "from=2026-01-01"},
+	}
+	for _, tc := range rejected {
+		t.Run(tc.name, func(t *testing.T) {
+			code, body := getFinanceSummaryRaw(t, env.srv, env.wsA, env.ownerToken, tc.query)
+			if code != http.StatusBadRequest {
+				t.Fatalf("summary ?%s: want 400, got %d (%v)", tc.query, code, body)
+			}
+		})
+	}
+}
+
+// TestFinanceSummary_BlockedRequestCancels membuktikan request GET
+// ringkasan yang terblokir di server berhenti cepat begitu context
+// berakhir — bukan menunggu server melepasnya — dan handler/server
+// dilepas (drain) sesudahnya tanpa goroutine bocor.
+func TestFinanceSummary_BlockedRequestCancels(t *testing.T) {
+	entered := make(chan struct{})
+	released := make(chan struct{})
+	finished := make(chan struct{})
+	var once sync.Once
+	blocked := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		once.Do(func() { close(entered) })
+		<-released
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"currencies":[]}`))
+		close(finished)
+	}))
+	defer blocked.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	type result struct {
+		code int
+		err  error
+	}
+	resCh := make(chan result, 1)
+	go func() {
+		code, _, err := getFinanceSummaryGoCtx(ctx, blocked, "11111111-2222-3333-4444-555555555555", "token")
+		resCh <- result{code, err}
+	}()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		close(released)
+		t.Fatal("blocked server tidak menerima request")
+	}
+	start := time.Now()
+	select {
+	case res := <-resCh:
+		elapsed := time.Since(start)
+		if res.err == nil {
+			close(released)
+			t.Fatalf("blocked GET: want deadline error, got code %d", res.code)
+		}
+		if !errors.Is(res.err, context.DeadlineExceeded) {
+			close(released)
+			t.Fatalf("blocked GET: want context.DeadlineExceeded, got %v", res.err)
+		}
+		if elapsed > 5*time.Second {
+			close(released)
+			t.Fatalf("blocked GET lambat: %v", elapsed)
+		}
+	case <-time.After(10 * time.Second):
+		close(released)
+		t.Fatal("blocked GET tidak berhenti dalam 10 detik")
+	}
+	close(released)
+	select {
+	case <-finished:
+	case <-time.After(5 * time.Second):
+		t.Fatal("handler blocked tidak selesai sesudah release")
+	}
 }

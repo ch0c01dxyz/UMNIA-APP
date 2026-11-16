@@ -1025,6 +1025,79 @@ uang; tidak ada second approver lifecycle; approval dua aktor
 tetap wajib per pembayaran/pembalikan. Readiness tidak berubah
 (12 marker; 014 BUKAN marker readiness).
 
+## F2-02-C — ringkasan pembayaran workspace (read-only, tanpa migrasi)
+
+Satu rute baru `GET /workspaces/{id}/finance/summary` dengan satu
+handler `handleGetFinanceSummary` + helper
+`readWorkspacePaymentSummary` di `payments.go`. Tanpa tabel,
+migrasi, rute mutasi, kapabilitas baru, atau perubahan registry.
+Ringkasan ini adalah proyeksi baca atas fakta 013 yang sudah ada,
+bukan laporan generik dan bukan awal framework pelaporan.
+
+DTO: `workspace_id`, `observed_at` (satu sampel jam DB dalam
+transaksi snapshot yang sama, UTC RFC3339Nano), `currencies[]`
+(diurutkan currency ASC; `[]` bila tidak ada fakta harga, tidak
+pernah null atau bucket IDR/nol buatan). Tiap elemen: `currency`,
+`total_minor`, `paid_minor`, `outstanding_minor` (ketiganya string
+desimal kanonis), `payments_count`, `reversals_count`,
+`pending_payment_proposals_count`,
+`pending_reversal_proposals_count` (keempatnya bilangan JSON
+nonnegatif). `observed_at` adalah jam observasi saja — BUKAN ID
+snapshot, watermark complete-as-of, atau token rekonstruksi
+historis; snapshot bisa mendahului sampel jam dan mengecualikan
+commit yang masuk di antaranya. Tidak ada parameter query yang
+didukung: URL dengan RawQuery tidak kosong -> 400 apa adanya —
+termasuk nilai kosong, field malformed, dan escape tidak valid —
+tanpa mem-parse filter apa pun. Hanya GET polos tanpa `?` yang
+diterima; trailing `?` dengan RawQuery kosong bukan parameter dan
+tidak ditolak.
+
+Semantik: `total_minor` per currency = jumlah plafon acuan
+internal atas `rental_agreed_prices`; `paid_minor` = jumlah
+pembayaran posted TANPA pembalikan posted; `outstanding_minor` =
+total - paid, semuanya dalam numeric PostgreSQL (tanpa float,
+clamp, atau konversi int64 — total lintas draft boleh melebihi
+MaxInt64). Validasi dilakukan PER DRAFT terhadap total fakta draft
+itu sendiri SEBELUM pengelompokan: draft A plafon 100/paid 150
+plus draft B plafon 100/paid 0 harus 500, bukan lolos karena
+total 200/paid 150 di level currency. Currency pembayaran/usulan
+yang tidak cocok dengan fakta terikat = korup 500, bukan drop
+diam-diam atau bucket baru; currency pembalikan mengikuti
+pembayaran/fakta induknya. Usulan pending yang melebihi plafon
+tetap valid dan inert (tidak ada efek moneter). `payments_count`
+menghitung SEMUA pembayaran posted termasuk yang dibatalkan;
+`reversals_count` menghitung fakta pembalikan posted; pending =
+usulan tanpa fakta posted untuk ID usulan itu — usulan pembalikan
+kedua yang basi tetap dihitung pending sesudah usulan lain
+membatalkan targetnya (semantik sama dengan GET per-draft).
+Agregasi memakai CTE per-draft (tanpa join multi-relasi, jadi tanpa
+fanout) dalam jumlah query SQL konstan yang terbatas; draft tanpa
+fakta tidak berkontribusi, fakta tanpa pembayaran berkontribusi
+total/outstanding dengan paid 0. Data korup (over-cap/negatif per
+draft, currency tidak cocok, agregat tidak kanonis) -> SELURUH
+respons 500 `total tidak konsisten`, tanpa data parsial dan tanpa
+auto-repair; galat DB umum -> 500 `transaksi gagal`.
+
+Guard: tenant + membership + `view_workspace` saja — owner/
+manager/cashier boleh membaca; tanpa gerbang entitlement/
+aktivasi Finance dan tanpa framework kapabilitas (ini proyeksi
+riwayat core, bukan klaim `finance.summary.read` ditegakkan).
+Tetap terbaca tanpa penerbitan/aktivasi Finance dan sesudah
+deactivate/revoke. Nonmember/lintas-tenant/workspace tidak
+dikenal -> 403 (tanpa oracle keberadaan); UUID tidak valid -> 400.
+Satu snapshot `beginTenantSnapshot` (REPEATABLE READ); tanpa
+`paymentOpenTx`/lock mutasi, tanpa DML, audit, event (termasuk
+`finance.summary.generated`), cache, atau materialisasi.
+
+Penamaan jujur: total/paid/outstanding adalah acuan internal,
+bukan utang hukum, booked revenue, profit, settlement bank, pajak,
+atau refund kas; pembalikan catatan BUKAN pengembalian uang. GET
+ini tidak butuh approval finansial dan tidak melemahkan syarat dua
+aktor berbeda untuk mutasi finansial. Di luar scope: cashflow,
+time-series, filter as-of/tanggal, ekspor, pagination, rincian
+per-metode/per-pihak, pajak, fee/deposit, refund kas,
+ledger/jurnal, Finance Advanced, billing, UI.
+
 ## F1-OPERATOR-ENTITLEMENT-IMPLEMENT — grant operator lewat rutin (migrasi 011)
 
 Satu-satunya jalur grant operator adalah EXECUTE atas rutin

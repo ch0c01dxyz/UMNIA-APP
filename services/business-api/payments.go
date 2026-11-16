@@ -171,6 +171,140 @@ func readPaymentTotals(tx *sql.Tx, wsID, draftID string) (paymentFact, string, s
 	return fact, paidText, outstandingText, overCap, nil
 }
 
+// readWorkspacePaymentSummary membaca ringkasan pembayaran workspace
+// dalam SATU transaksi snapshot pemanggil (beginTenantSnapshot).
+// Query 1 mengagregasi uang per currency dari komponen per-draft dan
+// memvalidasi SETIAP draft — jumlah posted aktif tanpa pembalikan
+// terhadap total fakta draft itu sendiri, SEBELUM pengelompokan
+// (cek per currency saja akan menyembunyikan draft over-cap yang
+// diimbangi headroom draft lain). Query 2 menghitung baris posted/
+// pending per currency dari CTE per-draft (tanpa join multi-relasi,
+// jadi tanpa fanout). Kedua query dikelompokkan oleh currency fakta;
+// currency pembayaran/usulan yang tidak cocok dengan fakta terikat
+// adalah korup. Agregat/hitungan tidak valid -> errTotalsCorrupt.
+func readWorkspacePaymentSummary(tx *sql.Tx, wsID string) ([]financeSummaryCurrencyDTO, error) {
+	moneyRows, err := tx.Query(
+		`WITH per_draft AS (
+			SELECT f.currency,
+				f.total_minor::numeric AS total_num,
+				COALESCE(SUM(p.amount_minor) FILTER (WHERE NOT EXISTS (
+					SELECT 1 FROM rental_payment_reversals r
+					WHERE r.workspace_id = p.workspace_id AND r.payment_id = p.id
+				)), 0)::numeric AS active_paid_num,
+				COALESCE(BOOL_OR(p.currency <> f.currency), FALSE) AS bad_payment_currency,
+				EXISTS (SELECT 1 FROM rental_payment_proposals pp
+					WHERE pp.workspace_id = f.workspace_id
+						AND pp.rental_contract_id = f.rental_contract_id
+						AND pp.rental_agreed_price_id = f.id
+						AND pp.currency <> f.currency) AS bad_proposal_currency
+			 FROM rental_agreed_prices f
+			 LEFT JOIN rental_payments p
+				ON p.workspace_id = f.workspace_id AND p.rental_contract_id = f.rental_contract_id
+			 WHERE f.workspace_id = $1
+			 GROUP BY f.id, f.currency, f.total_minor
+		)
+		SELECT currency,
+			SUM(total_num)::text AS total_text,
+			SUM(active_paid_num)::text AS paid_text,
+			SUM(total_num - active_paid_num)::text AS outstanding_text,
+			BOOL_OR(active_paid_num > total_num OR active_paid_num < 0
+				OR bad_payment_currency OR bad_proposal_currency) AS corrupt
+		 FROM per_draft
+		 GROUP BY currency
+		 ORDER BY currency`,
+		wsID)
+	if err != nil {
+		return nil, err
+	}
+	defer moneyRows.Close()
+	byCurrency := map[string]*financeSummaryCurrencyDTO{}
+	order := []string{}
+	for moneyRows.Next() {
+		var c financeSummaryCurrencyDTO
+		var totalText, paidText, outstandingText string
+		var corrupt bool
+		if err := moneyRows.Scan(&c.Currency, &totalText, &paidText, &outstandingText, &corrupt); err != nil {
+			return nil, err
+		}
+		if corrupt || !isCanonicalNonNegativeInt(totalText) || !isCanonicalNonNegativeInt(paidText) || !isCanonicalNonNegativeInt(outstandingText) {
+			return nil, errTotalsCorrupt
+		}
+		c.TotalMinor, c.PaidMinor, c.OutstandingMinor = totalText, paidText, outstandingText
+		cp := c
+		byCurrency[c.Currency] = &cp
+		order = append(order, c.Currency)
+	}
+	if err := moneyRows.Err(); err != nil {
+		return nil, err
+	}
+	// Hitungan: tiap relasi diagregasi per draft dulu, lalu di-join
+	// ke fakta (satu baris per draft) dan dikelompokkan per currency
+	// fakta. Usulan pending adalah usulan tanpa fakta posted untuk ID
+	// usulan itu (usulan pembalikan kedua yang basi tetap dihitung
+	// pending sesudah usulan lain membatalkan targetnya).
+	countRows, err := tx.Query(
+		`WITH pay AS (
+			SELECT p.rental_contract_id, COUNT(*)::bigint AS n
+			 FROM rental_payments p WHERE p.workspace_id = $1 GROUP BY p.rental_contract_id
+		), rev AS (
+			SELECT r.rental_contract_id, COUNT(*)::bigint AS n
+			 FROM rental_payment_reversals r WHERE r.workspace_id = $1 GROUP BY r.rental_contract_id
+		), pendp AS (
+			SELECT pp.rental_contract_id, COUNT(*)::bigint AS n
+			 FROM rental_payment_proposals pp
+			 WHERE pp.workspace_id = $1
+				AND NOT EXISTS (SELECT 1 FROM rental_payments p
+					WHERE p.workspace_id = pp.workspace_id AND p.proposal_id = pp.id)
+			 GROUP BY pp.rental_contract_id
+		), pendr AS (
+			SELECT rp.rental_contract_id, COUNT(*)::bigint AS n
+			 FROM rental_payment_reversal_proposals rp
+			 WHERE rp.workspace_id = $1
+				AND NOT EXISTS (SELECT 1 FROM rental_payment_reversals r
+					WHERE r.workspace_id = rp.workspace_id AND r.reversal_proposal_id = rp.id)
+			 GROUP BY rp.rental_contract_id
+		)
+		SELECT f.currency,
+			COALESCE(SUM(pay.n), 0)::bigint AS payments_count,
+			COALESCE(SUM(rev.n), 0)::bigint AS reversals_count,
+			COALESCE(SUM(pendp.n), 0)::bigint AS pending_payment_proposals_count,
+			COALESCE(SUM(pendr.n), 0)::bigint AS pending_reversal_proposals_count
+		 FROM rental_agreed_prices f
+		 LEFT JOIN pay ON pay.rental_contract_id = f.rental_contract_id
+		 LEFT JOIN rev ON rev.rental_contract_id = f.rental_contract_id
+		 LEFT JOIN pendp ON pendp.rental_contract_id = f.rental_contract_id
+		 LEFT JOIN pendr ON pendr.rental_contract_id = f.rental_contract_id
+		 WHERE f.workspace_id = $1
+		 GROUP BY f.currency`,
+		wsID)
+	if err != nil {
+		return nil, err
+	}
+	defer countRows.Close()
+	for countRows.Next() {
+		var currency string
+		var payments, reversals, pendPay, pendRev int64
+		if err := countRows.Scan(&currency, &payments, &reversals, &pendPay, &pendRev); err != nil {
+			return nil, err
+		}
+		if payments < 0 || reversals < 0 || pendPay < 0 || pendRev < 0 {
+			return nil, errTotalsCorrupt
+		}
+		if c, ok := byCurrency[currency]; ok {
+			c.PaymentsCount, c.ReversalsCount = payments, reversals
+			c.PendingPaymentProposalsCount, c.PendingReversalProposalsCount = pendPay, pendRev
+		}
+	}
+	if err := countRows.Err(); err != nil {
+		return nil, err
+	}
+	out := []financeSummaryCurrencyDTO{}
+	for _, currency := range order {
+		out = append(out, *byCurrency[currency])
+	}
+	return out, nil
+}
+
 // normalizePaymentReference: nil -> NULL; string disimpan VERBATIM
 // bila 1-128 rune dan mengandung karakter non-whitespace.
 func normalizePaymentReference(ref *string) (sql.NullString, bool) {
@@ -431,6 +565,29 @@ type paymentsHistoryDTO struct {
 	Reversals                []reversalDTO         `json:"reversals"`
 	PendingPaymentProposals  []paymentProposalDTO  `json:"pending_payment_proposals"`
 	PendingReversalProposals []reversalProposalDTO `json:"pending_reversal_proposals"`
+}
+
+// --- F2-02-C: ringkasan pembayaran workspace (read-only) ---
+// Proyeksi baca atas fakta 013 lintas draft: total adalah jumlah
+// plafon acuan internal (bukan utang hukum/pendapatan), paid adalah
+// pembayaran posted aktif, outstanding adalah sisa plafon. Pembalikan
+// catatan BUKAN pengembalian uang; tidak ada field kas/refund.
+
+type financeSummaryCurrencyDTO struct {
+	Currency                      string `json:"currency"`
+	TotalMinor                    string `json:"total_minor"`
+	PaidMinor                     string `json:"paid_minor"`
+	OutstandingMinor              string `json:"outstanding_minor"`
+	PaymentsCount                 int64  `json:"payments_count"`
+	ReversalsCount                int64  `json:"reversals_count"`
+	PendingPaymentProposalsCount  int64  `json:"pending_payment_proposals_count"`
+	PendingReversalProposalsCount int64  `json:"pending_reversal_proposals_count"`
+}
+
+type financeSummaryDTO struct {
+	WorkspaceID string                      `json:"workspace_id"`
+	ObservedAt  string                      `json:"observed_at"`
+	Currencies  []financeSummaryCurrencyDTO `json:"currencies"`
 }
 
 // --- INSERT aman-konflik (ON CONFLICT DO NOTHING RETURNING) ---
@@ -1375,5 +1532,77 @@ func (s *server) handleGetPayments(w http.ResponseWriter, r *http.Request) {
 		TotalMinor: strconv.FormatInt(fact.TotalMinor, 10), PaidMinor: paidText, OutstandingMinor: outstandingText,
 		Payments: payments, Reversals: reversals,
 		PendingPaymentProposals: pendingProposals, PendingReversalProposals: pendingReversals,
+	})
+}
+
+// handleGetFinanceSummary mengembalikan ringkasan pembayaran
+// workspace (F2-02-C): satu proyeksi baca atas fakta posted,
+// dikelompokkan per currency fakta yang eksak. Tanpa gerbang
+// finance: anggota saat ini dengan view_workspace boleh membaca,
+// termasuk tanpa penerbitan/aktivasi Finance maupun sesudah
+// deactivate/revoke. observed_at adalah satu sampel jam DB yang
+// diambil dalam transaksi snapshot yang sama — jam observasi saja,
+// BUKAN ID snapshot, watermark complete-as-of, atau token
+// rekonstruksi historis. Tanpa DML, audit, event, cache, atau
+// materialisasi.
+func (s *server) handleGetFinanceSummary(w http.ResponseWriter, r *http.Request) {
+	if !s.requireDB(w) {
+		return
+	}
+	subject, ok := s.authedSubject(w, r)
+	if !ok {
+		return
+	}
+	wsID := r.PathValue("id")
+	if !isValidUUID(wsID) {
+		writeError(w, http.StatusBadRequest, "id workspace tidak valid")
+		return
+	}
+	// Ringkasan tidak menerima parameter query apa pun: tolak
+	// RawQuery tidak kosong apa adanya, SEBELUM transaksi — tanpa
+	// mem-parse field (nilai kosong, field malformed, dan escape
+	// tidak valid semuanya ditolak). Trailing "?" dengan RawQuery
+	// kosong bukan parameter dan tidak ditolak.
+	if r.URL.RawQuery != "" {
+		writeError(w, http.StatusBadRequest, "parameter query tidak didukung")
+		return
+	}
+	tx, err := beginTenantSnapshot(r.Context(), s.db, subject, wsID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "transaksi gagal")
+		return
+	}
+	defer tx.Rollback()
+	allowed, err := s.hasPermission(tx, wsID, subject, "view_workspace")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "izin gagal diperiksa")
+		return
+	}
+	if !allowed {
+		writeError(w, http.StatusForbidden, "tidak punya izin membaca data core")
+		return
+	}
+	observedAt, err := captureCutoff(tx)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "transaksi gagal")
+		return
+	}
+	currencies, err := readWorkspacePaymentSummary(tx, wsID)
+	if err != nil {
+		if errors.Is(err, errTotalsCorrupt) {
+			writeError(w, http.StatusInternalServerError, "total tidak konsisten")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "transaksi gagal")
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		writeError(w, http.StatusInternalServerError, "transaksi gagal")
+		return
+	}
+	writeJSON(w, http.StatusOK, financeSummaryDTO{
+		WorkspaceID: wsID,
+		ObservedAt:  observedAt.UTC().Format(time.RFC3339Nano),
+		Currencies:  currencies,
 	})
 }

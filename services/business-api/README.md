@@ -874,6 +874,92 @@ memeriksa kondisi di tiga titik: ketersediaan (`available:
 false`), hold BARU (409 `unit tidak tersedia`), dan handover
 (409 `unit tidak tersedia`, sesudah cek unit-keluar).
 
+## F2-02-A — pembayaran manual + pembalikan catatan (migrasi 013)
+
+Migrasi `013_rental_payments` menambah catatan pembayaran manual
+staf (cash/transfer) terhadap fakta harga draft yang sama — tanpa
+invoice/utang/consent pelanggan/konfirmasi bank, tanpa gate status
+custody, tanpa biaya rusak/hilang. Model append-only usulan ->
+fakta: `rental_payment_proposals` -> `rental_payments` (fakta
+posted), `rental_payment_reversal_proposals` ->
+`rental_payment_reversals` (pembalikan penuh satu catatan).
+Usulan pending TIDAK memengaruhi paid/outstanding/reserved dan
+tidak mereservasi saldo; tidak ada kolom status, penolakan,
+kedaluwarsa, atau workflow engine — status diturunkan dari ada
+tidaknya fakta posted. Pembalikan catatan BUKAN refund/cash-out
+aktual; tidak ada pembalikan parsial/un-reverse.
+
+Lima rute di namespace rental yang sama, semua di bawah
+`authMiddleware` + transaksi tenant + lock baris workspace +
+guard finance (instalasi `finance.basic` 0.1.0 aktif + entitlement
+yang cocok + `manage_business_data` + `view_workspace`, dicek
+ulang sesudah lock) + satu cutoff DB:
+
+- `POST .../payment-proposals` — body strict `{amount_minor,
+  currency, method, reference?}` -> 201 usulan; TIDAK ada cek
+  plafon di usulan.
+- `POST .../payment-proposals/{proposal_id}/approvals` — body
+  tepat `{}` -> 201 fakta posted; pemeriksa harus berbeda dari
+  pengusul (403), plafon dihitung ulang di bawah lock (409
+  `pembayaran melebihi sisa`).
+- `POST .../payments/{payment_id}/reversal-proposals` — body
+  strict `{reason}` -> 201 usulan pembalikan; beberapa usulan
+  pending untuk satu pembayaran diizinkan.
+- `POST .../payments/{payment_id}/reversal-proposals/{proposal_id}/approvals`
+  — body tepat `{}` -> 201 fakta pembalikan.
+- `GET .../payments` — satu snapshot repeatable-read: total,
+  paid, outstanding (semua string desimal) + `payments[]`
+  (dengan proyeksi `reversed`/`reversal_id`) + `reversals[]` +
+  dua array usulan pending; terbaca sesudah deactivate/revoke.
+
+Uang: jumlah string desimal kanonis positif (`parseCanonicalMoney`,
+tanpa JSON numerik/float/eksponen/tanda/nol-di-depan/spasi,
+`> 0` dan `<= MaxInt64`); currency tepat `[A-Z]{3}` dan HARUS sama
+dengan fakta (mismatch 409); metode `cash`/`transfer` saja.
+Referensi opsional: absen/null -> NULL, 1–128 rune berisi
+non-spasi disimpan verbatim; alasan pembalikan wajib, di-trim,
+1–500 rune. Paid = `COALESCE(SUM(amount_minor)` pembayaran
+posted TANPA pembalikan posted, `0)` dihitung di **numeric**
+PostgreSQL 16 (`SUM(bigint) -> numeric`); outstanding =
+total − paid; konversi ke int64 HANYA sesudah cek
+`0 <= paid <= total` — data inkonsisten -> 500 `total tidak
+konsisten`, tanpa clamp/auto-repair. Gross riwayat
+bayar/balik BOLEH melebihi BIGINT selama net aktif valid.
+Empat keyspace idempotency terpisah (satu
+`UNIQUE(workspace_id, client_request_id)` per tabel): kunci +
+payload ternormalisasi + target yang sama -> 200 tanpa tulis/
+audit baru; kunci sama isi/target berbeda -> 409. INSERT
+konflik-aman (`ON CONFLICT DO NOTHING RETURNING`) — transaksi
+tidak pernah di-query sesudah abort 23505.
+
+RLS ENABLE+FORCE di keempat tabel; runtime SELECT + INSERT saja
+(tanpa UPDATE/DELETE/TRUNCATE). INSERT mengikat aktor ke subjek
+saat ini (`proposed_by`/`approved_by = current_subject`) DAN
+fakta menyalin payload/metadata usulan yang ditautkan secara
+verbatim (`reference IS NOT DISTINCT FROM` untuk nullable) —
+CHECK dua kolom aktor saja tidak cukup. FK komposit mengikat
+workspace + draft + fakta/usulan/pembayaran (bukan FK
+same-workspace independen). Marker `013_rental_payments`
+terakhir; readiness `/readyz` kini mensyaratkan keduabelas
+marker (001–010 + 012 + 013; 011 tetap hanya diperiksa
+rutin/CLI grant, bukan readiness). Audit:
+`rental_payment_proposed`, `rental_payment_posted`,
+`rental_payment_reversal_proposed`,
+`rental_payment_reversal_posted` — detail tanpa referensi
+eksternal.
+
+Batas: rutin/CLI operator tetap rental-only dan TIDAK diperluas
+ke finance — TIDAK ADA jalur grant `finance.basic` produksi;
+tes memakai fixture entitlement sintetis bootstrap. **POST
+Finance live tetap 403 sampai slice pemberian-entitlement
+Finance terpisah yang diotorisasi.** Backend siap/teruji bukan
+berarti pembayaran nyata bisa dipakai. Tidak ada
+pajak/deposit/denda/FX/gateway/ledger/UI/recovery di slice ini.
+
+**Yang belum ada:** pemberian entitlement `finance.basic`
+nyata, pajak/deposit/denda, gateway/FX, ledger, UI pembayaran,
+dan recovery/kompensasi di luar pembalikan catatan penuh.
+
 ## F1-OPERATOR-ENTITLEMENT-IMPLEMENT — grant operator lewat rutin (migrasi 011)
 
 Satu-satunya jalur grant operator adalah EXECUTE atas rutin

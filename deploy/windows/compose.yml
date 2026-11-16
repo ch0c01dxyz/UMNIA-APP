@@ -118,6 +118,8 @@ services:
       - /migrations/011_operator_entitlement.sql
       - -f
       - /migrations/012_rental_damaged_lost_return.sql
+      - -f
+      - /migrations/013_rental_payments.sql
     depends_on:
       postgres-business:
         condition: service_healthy

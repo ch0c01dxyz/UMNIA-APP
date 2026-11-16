@@ -162,8 +162,8 @@ func TestAgreedPriceFreshSchema(t *testing.T) {
 	).Scan(&markers); err != nil {
 		t.Fatalf("baca markers: %v", err)
 	}
-	if markers != "001_init,002_identity,003_modules,004_module_installations,005_core_master_data,006_rental_contracts,007_asset_availability,008_price_versions,009_rental_agreed_prices,010_rental_custody,011_operator_entitlement,012_rental_damaged_lost_return" {
-		t.Fatalf("markers: want 001_init,002_identity,003_modules,004_module_installations,005_core_master_data,006_rental_contracts,007_asset_availability,008_price_versions,009_rental_agreed_prices,010_rental_custody,011_operator_entitlement,012_rental_damaged_lost_return, got %s", markers)
+	if markers != "001_init,002_identity,003_modules,004_module_installations,005_core_master_data,006_rental_contracts,007_asset_availability,008_price_versions,009_rental_agreed_prices,010_rental_custody,011_operator_entitlement,012_rental_damaged_lost_return,013_rental_payments" {
+		t.Fatalf("markers: want 001_init,002_identity,003_modules,004_module_installations,005_core_master_data,006_rental_contracts,007_asset_availability,008_price_versions,009_rental_agreed_prices,010_rental_custody,011_operator_entitlement,012_rental_damaged_lost_return,013_rental_payments, got %s", markers)
 	}
 	var n int
 	if err := boot.QueryRow(`SELECT count(*) FROM rental_agreed_prices`).Scan(&n); err != nil {
@@ -233,18 +233,20 @@ func TestAgreedPriceFreshSchema(t *testing.T) {
 		}
 	}
 	// CHECK 9 (client_request_id, rule, amount>=0, currency, units,
-	// total>=0, ends>starts, total numerik, finite times) + UNIQUE 3
-	// (draft, key, workspace_id+id) + FK 6 (workspace + 4 komposit +
-	// accepted_by) + EXCLUDE 0. UNIQUE (workspace_id, id)
-	// ditambahkan 010 sebagai target FK komposit custody.
+	// total>=0, ends>starts, total numerik, finite times) + UNIQUE 4
+	// (draft, key, workspace_id+id, workspace_id+draft+id) + FK 6
+	// (workspace + 4 komposit + accepted_by) + EXCLUDE 0. UNIQUE
+	// (workspace_id, id) ditambahkan 010 sebagai target FK komposit
+	// custody; UNIQUE (workspace_id, rental_contract_id, id)
+	// ditambahkan 013 sebagai target FK komposit pembayaran.
 	var c, u, f, x int
 	if err := boot.QueryRow(
 		`SELECT count(*) FILTER (WHERE contype = 'c'), count(*) FILTER (WHERE contype = 'u'), count(*) FILTER (WHERE contype = 'f'), count(*) FILTER (WHERE contype = 'x')
 		 FROM pg_constraint WHERE conrelid = 'rental_agreed_prices'::regclass`).Scan(&c, &u, &f, &x); err != nil {
 		t.Fatalf("constraints rental_agreed_prices: %v", err)
 	}
-	if c != 9 || u != 3 || f != 6 || x != 0 {
-		t.Fatalf("constraints rental_agreed_prices: want CHECK 9 + UNIQUE 3 + FK 6 + EXCLUDE 0, got CHECK %d + UNIQUE %d + FK %d + EXCLUDE %d", c, u, f, x)
+	if c != 9 || u != 4 || f != 6 || x != 0 {
+		t.Fatalf("constraints rental_agreed_prices: want CHECK 9 + UNIQUE 4 + FK 6 + EXCLUDE 0, got CHECK %d + UNIQUE %d + FK %d + EXCLUDE %d", c, u, f, x)
 	}
 	// CHECK finite bernama: ketiga timestamp harus finite.
 	var finiteDef string

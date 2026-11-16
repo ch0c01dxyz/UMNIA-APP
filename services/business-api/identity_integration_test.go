@@ -442,9 +442,9 @@ func TestReadyzRequiresMigratedSchema(t *testing.T) {
 	if got := checkDatabase(only009DB); got != "error" {
 		t.Fatalf("checkDatabase pada DB 009-saja: want error, got %q", got)
 	}
-	// Database dengan kesebelas marker (001-010 + 012) + satu marker
-	// tambahan yang tidak dikenal tetap siap (F2-01-G). umnia_extra
-	// disediakan setup CI/lokal (001-010 + 012 + marker '999_future').
+	// Database dengan keduabelas marker (001-010 + 012 + 013) + satu marker
+	// tambahan yang tidak dikenal tetap siap (F2-02-A). umnia_extra
+	// disediakan setup CI/lokal (001-010 + 012 + 013 + marker '999_future').
 	u.Path = "/umnia_extra"
 	extraDB, err := sql.Open("pgx", u.String())
 	if err != nil {
@@ -455,7 +455,7 @@ func TestReadyzRequiresMigratedSchema(t *testing.T) {
 		t.Skipf("umnia_extra tidak tersedia: %v", err)
 	}
 	if got := checkDatabase(extraDB); got != "ok" {
-		t.Fatalf("checkDatabase pada DB 11 marker + ekstra: want ok, got %q", got)
+		t.Fatalf("checkDatabase pada DB 12 marker + ekstra: want ok, got %q", got)
 	}
 }
 

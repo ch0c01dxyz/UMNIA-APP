@@ -80,19 +80,19 @@ func checkDatabase(db *sql.DB) string {
 		return "error"
 	}
 	var count int
-	// Kesebelas versi wajib ada: database yang berhenti di 010
-	// (tanpa resolusi rusak/hilang 012) belum siap, sama seperti
+	// Keduabelas versi wajib ada: database yang berhenti di 012
+	// (tanpa catatan pembayaran manual 013) belum siap, sama seperti
 	// database kosong atau yang berhenti di
-	// 002/003/004/005/006/007/008/009. 011 TIDAK dipersyaratkan di
+	// 002/003/004/005/006/007/008/009/010. 011 TIDAK dipersyaratkan di
 	// sini — marker operator hanya diperiksa di dalam rutin grant
 	// (CLI/routine), bukan oleh handler runtime. Marker tambahan di
-	// luar kesebelas nama ini (mis. migrasi masa depan) tidak
-	// menggagalkan readiness — hitungan hanya menyaring kesebelas
+	// luar keduabelas nama ini (mis. migrasi masa depan) tidak
+	// menggagalkan readiness — hitungan hanya menyaring keduabelas
 	// nama tersebut, dan version adalah primary key sehingga
 	// hitungan itu cukup.
 	err := db.QueryRowContext(ctx,
-		`SELECT count(*) FROM schema_migrations WHERE version IN ('001_init', '002_identity', '003_modules', '004_module_installations', '005_core_master_data', '006_rental_contracts', '007_asset_availability', '008_price_versions', '009_rental_agreed_prices', '010_rental_custody', '012_rental_damaged_lost_return')`).Scan(&count)
-	if err != nil || count != 11 {
+		`SELECT count(*) FROM schema_migrations WHERE version IN ('001_init', '002_identity', '003_modules', '004_module_installations', '005_core_master_data', '006_rental_contracts', '007_asset_availability', '008_price_versions', '009_rental_agreed_prices', '010_rental_custody', '012_rental_damaged_lost_return', '013_rental_payments')`).Scan(&count)
+	if err != nil || count != 12 {
 		return "error"
 	}
 	return "ok"
@@ -156,6 +156,11 @@ func newMux(db *sql.DB) *http.ServeMux {
 	mux.HandleFunc("POST /workspaces/{id}/rental/contracts/{draft_id}/handover", srv.authMiddleware(srv.handleHandoverRental))
 	mux.HandleFunc("POST /workspaces/{id}/rental/contracts/{draft_id}/return", srv.authMiddleware(srv.handleReturnRental))
 	mux.HandleFunc("GET /workspaces/{id}/rental/contracts/{draft_id}/custody", srv.authMiddleware(srv.handleGetCustody))
+	mux.HandleFunc("POST /workspaces/{id}/rental/contracts/{draft_id}/payment-proposals", srv.authMiddleware(srv.handleProposePayment))
+	mux.HandleFunc("POST /workspaces/{id}/rental/contracts/{draft_id}/payment-proposals/{proposal_id}/approvals", srv.authMiddleware(srv.handleApprovePayment))
+	mux.HandleFunc("POST /workspaces/{id}/rental/contracts/{draft_id}/payments/{payment_id}/reversal-proposals", srv.authMiddleware(srv.handleProposeReversal))
+	mux.HandleFunc("POST /workspaces/{id}/rental/contracts/{draft_id}/payments/{payment_id}/reversal-proposals/{proposal_id}/approvals", srv.authMiddleware(srv.handleApproveReversal))
+	mux.HandleFunc("GET /workspaces/{id}/rental/contracts/{draft_id}/payments", srv.authMiddleware(srv.handleGetPayments))
 	mux.HandleFunc("POST /workspaces/{id}/invites", srv.authMiddleware(srv.handleCreateInvite))
 	mux.HandleFunc("POST /invites/accept", srv.authMiddleware(srv.handleAcceptInvite))
 	mux.HandleFunc("GET /workspaces/{id}/audit", srv.authMiddleware(srv.handleListAudit))

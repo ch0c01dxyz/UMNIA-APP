@@ -133,6 +133,7 @@ jobs:
             -c "GRANT umnia_operator TO umnia_op_test;" \
             -c "CREATE DATABASE umnia_test OWNER umnia_business;" \
             -c "CREATE DATABASE umnia_business OWNER umnia_business;" \
+            -c "CREATE DATABASE umnia_admin;" \
             -c "CREATE DATABASE umnia_empty;" \
             -c "CREATE DATABASE umnia_partial OWNER umnia_business;" \
             -c "CREATE DATABASE umnia_003only OWNER umnia_business;" \

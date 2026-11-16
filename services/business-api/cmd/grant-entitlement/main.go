@@ -1,17 +1,27 @@
 // Command grant-entitlement adalah satu-satunya cara operator memberi
-// entitlement rental.basic/0.1.0 ke satu workspace: ia memanggil rutin
-// app.grant_module_entitlement (SECURITY DEFINER) lewat DSN operator,
-// bukan lewat DML mentah. CLI tidak membaca .env aplikasi, tidak
-// menerima --operator/--source, tidak pernah mencetak DSN, alasan
-// (reason), atau galat mentah driver. Satu pemanggilan = satu percobaan;
-// tidak ada retry internal (retry = jalankan ulang CLI, yang mengamati
-// state yang ada tanpa tulis bila sudah granted).
+// atau mencabut entitlement ke satu workspace: ia memanggil rutin
+// SECURITY DEFINER lewat DSN operator, bukan lewat DML mentah.
+// --operation grant (default) memanggil app.grant_module_entitlement
+// untuk rental.basic/0.1.0 atau app.grant_finance_entitlement untuk
+// finance.basic/0.1.0; --operation revoke hanya untuk finance.basic
+// dan memanggil app.revoke_finance_entitlement (tiga argumen).
+// CLI tidak membaca .env aplikasi, tidak menerima --operator/--source,
+// tidak pernah mencetak DSN, alasan (reason), atau galat mentah
+// driver. Satu pemanggilan = satu percobaan; tidak ada retry internal.
+// Retry BUKAN observasi read-only: retry adalah mutasi desired-state
+// — perintah lawan yang masuk di antaranya (mis. revoke sesudah grant
+// yang hasilnya tidak diketahui) membuat retry menjadi transisi BARU,
+// bukan pengulangan yang lama. Bila hasil tidak diketahui dan ada
+// operator lain yang bersaing, rekonsiliasi state/audit yang sah
+// dulu sebelum menjalankan ulang; tidak ada deduplikasi seumur hidup
+// tanpa operation ID.
 //
-// Kode keluar: 0 sukses (granted / already_granted / legacy_existing);
-// 2 input tidak valid, workspace tidak ditemukan, atau skema operator
-// belum siap (tidak ada tulis yang dicoba); 3 konflik versi (tidak ada
-// tulis); 1 tidak tersedia / hasil tidak diketahui (mungkin sudah
-// tertulis — jalankan ulang untuk mengamati state).
+// Kode keluar: 0 sukses (granted / already_granted / legacy_existing /
+// revoked / already_revoked); 2 input tidak valid, kombinasi tidak
+// didukung, workspace tidak ditemukan, atau skema operator belum siap
+// (tidak ada tulis yang dicoba); 3 konflik versi (tidak ada tulis);
+// 1 tidak tersedia / hasil tidak diketahui (mungkin sudah tertulis —
+// jalankan ulang untuk mengamati state, dengan catatan retry di atas).
 package main
 
 import (
@@ -39,9 +49,12 @@ const (
 )
 
 const (
-	routineSignature = `app.grant_module_entitlement(uuid, text, text, text)`
-	metadataQuery    = `SELECT has_function_privilege('` + routineSignature + `'::regprocedure, 'EXECUTE')`
-	grantQuery       = `SELECT * FROM app.grant_module_entitlement($1, $2, $3, $4)`
+	grantRoutineSignature        = `app.grant_module_entitlement(uuid, text, text, text)`
+	grantFinanceRoutineSignature = `app.grant_finance_entitlement(uuid, text, text, text)`
+	revokeRoutineSignature       = `app.revoke_finance_entitlement(uuid, text, text)`
+	grantQuery                   = `SELECT * FROM app.grant_module_entitlement($1, $2, $3, $4)`
+	grantFinanceQuery            = `SELECT * FROM app.grant_finance_entitlement($1, $2, $3, $4)`
+	revokeQuery                  = `SELECT * FROM app.revoke_finance_entitlement($1, $2, $3)`
 )
 
 const (
@@ -51,6 +64,13 @@ const (
 	errConflictCode = "U11CF"
 )
 
+const (
+	errNotReadyCode14 = "U14NR"
+	errInvalidCode14  = "U14IV"
+	errNotFoundCode14 = "U14NF"
+	errConflictCode14 = "U14CF"
+)
+
 type grantResult struct {
 	result       string
 	workspaceID  string
@@ -58,6 +78,20 @@ type grantResult struct {
 	version      string
 	grantedBy    string
 	grantedAt    time.Time
+	auditPresent bool
+}
+
+// revokeResult mencerminkan hasil rutin revoke: revoked_by/revoked_at
+// NULL untuk already_revoked (tanpa baris saat ini), jadi dipakai
+// sql.NullString/sql.NullTime agar kebenaran itu tercetak jujur
+// (kosong, bukan aktor/waktu palsu).
+type revokeResult struct {
+	result       string
+	workspaceID  string
+	moduleID     string
+	version      string
+	revokedBy    sql.NullString
+	revokedAt    sql.NullTime
 	auditPresent bool
 }
 
@@ -74,15 +108,16 @@ func openRealDB(_ context.Context, dsn string) (*sql.DB, error) {
 	return db, nil
 }
 
-// run menjalankan satu grant dan mengembalikan kode keluar. getenv dan
-// openDB diinjeksikan supaya tes unit bisa memeriksa validasi/redaksi
-// tanpa database sungguhan.
+// run menjalankan satu grant/revoke dan mengembalikan kode keluar.
+// getenv dan openDB diinjeksikan supaya tes unit bisa memeriksa
+// validasi/redaksi tanpa database sungguhan.
 func run(args []string, getenv func(string) string, openDB func(context.Context, string) (*sql.DB, error), stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("grant-entitlement", flag.ContinueOnError)
 	fs.SetOutput(stderr)
+	operation := fs.String("operation", "grant", "grant atau revoke (default grant; revoke hanya finance.basic)")
 	workspace := fs.String("workspace", "", "workspace UUID target")
-	module := fs.String("module", "", "module id (hanya rental.basic)")
-	version := fs.String("version", "", "versi katalog (hanya 0.1.0)")
+	module := fs.String("module", "", "module id (rental.basic atau finance.basic)")
+	version := fs.String("version", "", "versi katalog (0.1.0; wajib 0.1.0 untuk finance)")
 	reason := fs.String("reason", "", "alasan wajib (1-500 karakter)")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -90,14 +125,44 @@ func run(args []string, getenv func(string) string, openDB func(context.Context,
 		}
 		return exitInput
 	}
+	op := strings.TrimSpace(*operation)
 	ws := strings.TrimSpace(*workspace)
 	mod := strings.TrimSpace(*module)
 	ver := strings.TrimSpace(*version)
 	rsn := strings.TrimSpace(*reason)
+	if op != "grant" && op != "revoke" {
+		fmt.Fprintln(stderr, "grant-entitlement: invalid input")
+		return exitInput
+	}
+	// Revoke boleh tanpa --version: defaultnya 0.1.0 (satu-satunya
+	// versi Finance yang didukung). Grant tetap wajib menyebut versi.
+	if op == "revoke" && ver == "" {
+		ver = "0.1.0"
+	}
 	// Batas dihitung dalam rune (karakter), sama seperti char_length
 	// di sisi SQL — bukan byte, agar alasan multibyte yang valid
 	// tidak ditolak.
 	if !isValidUUID(ws) || mod == "" || utf8.RuneCountInString(mod) > 128 || ver == "" || utf8.RuneCountInString(ver) > 64 || rsn == "" || utf8.RuneCountInString(rsn) > 500 {
+		fmt.Fprintln(stderr, "grant-entitlement: invalid input")
+		return exitInput
+	}
+	// Kombinasi yang tidak didukung ditolak SEBELUM akses DB.
+	// Revoke hanya untuk finance.basic; versi Finance harus 0.1.0
+	// untuk grant maupun revoke. Grant rental dengan versi lain
+	// tetap diserahkan ke rutin 011 (otoritas versi rental).
+	if op == "revoke" && mod != "finance.basic" {
+		fmt.Fprintln(stderr, "grant-entitlement: invalid input")
+		return exitInput
+	}
+	if mod == "finance.basic" && ver != "0.1.0" {
+		fmt.Fprintln(stderr, "grant-entitlement: invalid input")
+		return exitInput
+	}
+	// Grant hanya mengenal rental.basic/finance.basic (R1: modul
+	// tak dikenal — mis. finance.advanced — lolos ke openDB dan
+	// keluar 1 unavailable sebelum perbaikan). Ditolak di sini,
+	// sebelum DSN dibaca/diakses.
+	if op == "grant" && mod != "rental.basic" && mod != "finance.basic" {
 		fmt.Fprintln(stderr, "grant-entitlement: invalid input")
 		return exitInput
 	}
@@ -123,8 +188,23 @@ func run(args []string, getenv func(string) string, openDB func(context.Context,
 		return exitUnavailable
 	}
 
-	// Metadata fungsi/EXECUTE: rutin tidak ada atau tidak bisa
-	// dieksekusi peran ini = skema belum siap (fail closed).
+	// Dispatch tetap: grant+rental -> 011; grant+finance -> rutin
+	// grant Finance; revoke+finance -> rutin revoke Finance (tiga
+	// argumen). Modul lain tidak pernah sampai sini (ditolak di
+	// validasi di atas, sebelum akses DB).
+	routineSig, callQuery := grantRoutineSignature, grantQuery
+	isRevoke := op == "revoke"
+	switch {
+	case isRevoke:
+		routineSig, callQuery = revokeRoutineSignature, revokeQuery
+	case mod == "finance.basic":
+		routineSig, callQuery = grantFinanceRoutineSignature, grantFinanceQuery
+	}
+	metadataQuery := `SELECT has_function_privilege('` + routineSig + `'::regprocedure, 'EXECUTE')`
+
+	// Metadata fungsi/EXECUTE untuk tanda tangan YANG DIPILIH:
+	// rutin tidak ada atau tidak bisa dieksekusi peran ini = skema
+	// belum siap (fail closed).
 	var canExecute bool
 	if err := db.QueryRowContext(ctx, metadataQuery).Scan(&canExecute); err != nil {
 		msg, code := classifyMetadataError(err)
@@ -137,8 +217,28 @@ func run(args []string, getenv func(string) string, openDB func(context.Context,
 	}
 
 	// Satu pemanggilan rutin; tidak ada retry internal.
+	if isRevoke {
+		var r revokeResult
+		err = db.QueryRowContext(ctx, callQuery, ws, mod, rsn).Scan(
+			&r.result, &r.workspaceID, &r.moduleID, &r.version, &r.revokedBy, &r.revokedAt, &r.auditPresent)
+		if err != nil {
+			msg, code := classifyCallError(err)
+			fmt.Fprintln(stderr, "grant-entitlement: "+msg)
+			return code
+		}
+		revokedBy, revokedAt := "", ""
+		if r.revokedBy.Valid {
+			revokedBy = r.revokedBy.String
+		}
+		if r.revokedAt.Valid {
+			revokedAt = r.revokedAt.Time.Format(time.RFC3339)
+		}
+		fmt.Fprintf(stdout, "%s workspace=%s module=%s version=%s revoked_by=%s revoked_at=%s audit_present=%t\n",
+			r.result, r.workspaceID, r.moduleID, r.version, revokedBy, revokedAt, r.auditPresent)
+		return exitOK
+	}
 	var r grantResult
-	err = db.QueryRowContext(ctx, grantQuery, ws, mod, ver, rsn).Scan(
+	err = db.QueryRowContext(ctx, callQuery, ws, mod, ver, rsn).Scan(
 		&r.result, &r.workspaceID, &r.moduleID, &r.version, &r.grantedBy, &r.grantedAt, &r.auditPresent)
 	if err != nil {
 		msg, code := classifyCallError(err)
@@ -191,13 +291,13 @@ func classifyCallError(err error) (string, int) {
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) {
 		switch pgErr.Code {
-		case errNotReadyCode:
+		case errNotReadyCode, errNotReadyCode14:
 			return "not ready (operator schema is not provisioned)", exitInput
-		case errInvalidCode:
+		case errInvalidCode, errInvalidCode14:
 			return "invalid input", exitInput
-		case errNotFoundCode:
+		case errNotFoundCode, errNotFoundCode14:
 			return "not found", exitInput
-		case errConflictCode:
+		case errConflictCode, errConflictCode14:
 			return "conflict (a different version is already granted)", exitConflict
 		}
 		if isConnectionCode(pgErr.Code) {

@@ -138,6 +138,7 @@ DECLARE
   v_login text;
   v_roles text[] := __V_ROLES__;
   v_logins text[] := __V_LOGINS__;
+  v_finance_delete_ok boolean;
 BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname IN ('umnia_operator', 'umnia_grant_exec')
              AND (rolcanlogin OR rolsuper OR rolbypassrls OR rolcreaterole OR rolcreatedb OR rolreplication)) THEN
@@ -227,11 +228,17 @@ BEGIN
   IF EXISTS (SELECT 1 FROM pg_database d JOIN pg_roles r ON r.oid = d.datdba WHERE r.rolname = ANY(v_roles)) THEN
     RAISE EXCEPTION 'preflight operator: peran operator tidak boleh memiliki database';
   END IF;
+  -- Kepemilikan fungsi HANYA untuk tiga tanda tangan eksak milik
+  -- umnia_grant_exec (011 + 014): overload dengan nama sama tapi
+  -- tanda tangan lain tetap ditolak.
   IF EXISTS (SELECT 1 FROM pg_proc p
               JOIN pg_roles r ON r.oid = p.proowner
               JOIN pg_namespace n ON n.oid = p.pronamespace
              WHERE r.rolname = ANY(v_roles)
-               AND NOT (r.rolname = 'umnia_grant_exec' AND n.nspname = 'app' AND p.proname = 'grant_module_entitlement')) THEN
+               AND NOT (r.rolname = 'umnia_grant_exec' AND n.nspname = 'app'
+                        AND p.oid::regprocedure::text IN ('app.grant_module_entitlement(uuid,text,text,text)',
+                                                          'app.grant_finance_entitlement(uuid,text,text,text)',
+                                                          'app.revoke_finance_entitlement(uuid,text,text)'))) THEN
     RAISE EXCEPTION 'preflight operator: peran operator memiliki fungsi di luar rutin grant';
   END IF;
   IF EXISTS (SELECT 1 FROM pg_class c JOIN pg_roles r ON r.oid = c.relowner WHERE r.rolname = ANY(v_roles)) THEN
@@ -264,12 +271,49 @@ BEGIN
       RAISE EXCEPTION 'preflight operator: umnia_operator tidak boleh memiliki hak kolom';
     END IF;
   END IF;
+  -- DELETE terbatas 014 diizinkan hanya bila upgrade 014 valid:
+  -- marker ada, RLS AKTIF + FORCE atas module_entitlements, dan
+  -- SATU-SATUNYA jalur DELETE/ALL atas tabel itu adalah kebijakan
+  -- bernama 014 yang bentuknya persis disetujui (lihat bawah).
+  -- Tanpa itu, DELETE apa pun tetap ditolak seperti sebelum 014.
+  -- Penjaga pg_class di sini penting: preflight juga jalan di DB
+  -- yang tabelnya belum ada (klaster segar), dan acuan langsung ke
+  -- public.schema_migrations / 'public.module_entitlements'::regclass
+  -- akan galat bila tabelnya tidak ada.
+  v_finance_delete_ok := false;
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'umnia_grant_exec')
+     AND EXISTS (SELECT 1 FROM pg_class WHERE relname = 'schema_migrations' AND relnamespace = 'public'::regnamespace)
+     AND EXISTS (SELECT 1 FROM pg_class WHERE relname = 'module_entitlements' AND relnamespace = 'public'::regnamespace) THEN
+    -- DELETE atas module_entitlements diizinkan HANYA bila bentuknya
+    -- persis yang disetujui 014: marker 014 ada, RLS AKTIF (enabled)
+    -- DAN FORCE (DISABLE RLS saja membuat relforcerowsecurity tetap
+    -- true), dan SATU-SATUNYA jalur DELETE/ALL adalah kebijakan
+    -- bernama yang disetujui — polcmd 'd', permissive, peran
+    -- TEPAT {umnia_grant_exec} (bukan ANY — menolak PUBLIC {0} dan
+    -- campuran), predikat SAMA PERSIS dengan bentuk kanonis PG16
+    -- (bukan LIKE — menolak module_id <> 'finance.basic'), tanpa
+    -- WITH CHECK. Kebijakan DELETE/ALL lain apa pun (FOR ALL '*',
+    -- PUBLIC, peran campuran, restriktif tak dikenal) menolak.
+    v_finance_delete_ok := EXISTS (SELECT 1 FROM public.schema_migrations WHERE version = '014_finance_operator_entitlement')
+      AND EXISTS (SELECT 1 FROM pg_class WHERE relname = 'module_entitlements' AND relnamespace = 'public'::regnamespace AND relrowsecurity AND relforcerowsecurity)
+      AND EXISTS (SELECT 1 FROM pg_policy
+                   WHERE polrelid = 'public.module_entitlements'::regclass
+                     AND polname = 'entitlements_exec_owner_delete_finance'
+                     AND polcmd = 'd' AND polpermissive
+                     AND polroles = ARRAY['umnia_grant_exec'::regrole::oid]
+                     AND pg_get_expr(polqual, polrelid) = '((module_id = ''finance.basic''::text) AND (version = ''0.1.0''::text))'
+                     AND polwithcheck IS NULL)
+      AND NOT EXISTS (SELECT 1 FROM pg_policy
+                       WHERE polrelid = 'public.module_entitlements'::regclass AND polcmd IN ('d', '*')
+                         AND polname <> 'entitlements_exec_owner_delete_finance');
+  END IF;
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'umnia_grant_exec') THEN
     IF EXISTS (
       SELECT 1 FROM pg_class c
       JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = 'public'
       WHERE c.relkind IN ('r', 'p')
-        AND (has_table_privilege('umnia_grant_exec', c.oid, 'DELETE')
+        AND ((has_table_privilege('umnia_grant_exec', c.oid, 'DELETE')
+              AND NOT (c.relname = 'module_entitlements' AND v_finance_delete_ok))
              OR has_table_privilege('umnia_grant_exec', c.oid, 'TRUNCATE')
              OR (c.relname IN ('operator_audit_events', 'module_entitlements')
                  AND has_table_privilege('umnia_grant_exec', c.oid, 'UPDATE')))

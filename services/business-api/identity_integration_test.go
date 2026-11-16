@@ -444,7 +444,8 @@ func TestReadyzRequiresMigratedSchema(t *testing.T) {
 	}
 	// Database dengan keduabelas marker (001-010 + 012 + 013) + satu marker
 	// tambahan yang tidak dikenal tetap siap (F2-02-A). umnia_extra
-	// disediakan setup CI/lokal (001-010 + 012 + 013 + marker '999_future').
+	// disediakan setup CI/lokal (001-010 + 011 + 012 + 013 + 014 +
+	// marker '999_future'); 011/014 bukan marker wajib (F2-02-B).
 	u.Path = "/umnia_extra"
 	extraDB, err := sql.Open("pgx", u.String())
 	if err != nil {

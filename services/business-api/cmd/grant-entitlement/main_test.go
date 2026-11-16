@@ -92,6 +92,85 @@ func TestRun_MultibyteReasonBounds(t *testing.T) {
 	}
 }
 
+// TestRun_OperationValidation: --operation hanya grant/revoke;
+// revoke hanya finance.basic; versi Finance harus 0.1.0 untuk grant
+// maupun revoke; revoke tanpa --version lolos validasi (default
+// 0.1.0) dan mencapai kegagalan buka DB. Semua penolakan terjadi
+// SEBELUM akses DB (openDB nil = akan panic bila dipanggil).
+func TestRun_OperationValidation(t *testing.T) {
+	ws := "123e4567-e89b-12d3-a456-426614174000"
+	reason := "alasan tes"
+	cases := []struct {
+		name string
+		args []string
+	}{
+		{"operasi tidak dikenal", []string{"--operation", "hapus", "--workspace", ws, "--module", "finance.basic", "--version", "0.1.0", "--reason", reason}},
+		{"revoke rental", []string{"--operation", "revoke", "--workspace", ws, "--module", "rental.basic", "--version", "0.1.0", "--reason", reason}},
+		{"revoke modul tidak dikenal", []string{"--operation", "revoke", "--workspace", ws, "--module", "modul.tidak.ada", "--version", "0.1.0", "--reason", reason}},
+		{"grant finance versi 0.2.0", []string{"--workspace", ws, "--module", "finance.basic", "--version", "0.2.0", "--reason", reason}},
+		{"grant finance versi 9.9.9", []string{"--workspace", ws, "--module", "finance.basic", "--version", "9.9.9", "--reason", reason}},
+		{"revoke finance versi 0.2.0", []string{"--operation", "revoke", "--workspace", ws, "--module", "finance.basic", "--version", "0.2.0", "--reason", reason}},
+		{"revoke finance versi 9.9.9", []string{"--operation", "revoke", "--workspace", ws, "--module", "finance.basic", "--version", "9.9.9", "--reason", reason}},
+		// R1: modul tak dikenal harus ditolak SEBELUM akses DB.
+		// Sebelum perbaikan, grant finance.advanced lolos ke openDB
+		// dan keluar 1 unavailable (bukan 2 invalid).
+		{"grant finance.advanced", []string{"--workspace", ws, "--module", "finance.advanced", "--version", "0.1.0", "--reason", reason}},
+		{"grant spa.standard", []string{"--workspace", ws, "--module", "spa.standard", "--version", "0.1.0", "--reason", reason}},
+		{"grant modul tidak dikenal", []string{"--workspace", ws, "--module", "modul.tidak.ada", "--version", "0.1.0", "--reason", reason}},
+		{"revoke finance.advanced", []string{"--operation", "revoke", "--workspace", ws, "--module", "finance.advanced", "--version", "0.1.0", "--reason", reason}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var out, errBuf bytes.Buffer
+			code := run(c.args, func(string) string { return "postgres://x" }, nil, &out, &errBuf)
+			if code != exitInput {
+				t.Fatalf("want exit %d, got %d (out=%q err=%q)", exitInput, code, out.String(), errBuf.String())
+			}
+			if out.Len() != 0 {
+				t.Fatalf("stdout harus kosong, got %q", out.String())
+			}
+			if !strings.Contains(errBuf.String(), "invalid input") {
+				t.Fatalf("stderr harus berisi 'invalid input', got %q", errBuf.String())
+			}
+		})
+	}
+	// Revoke finance tanpa --version: lolos validasi (default 0.1.0),
+	// dibuktikan dengan mencapai kegagalan buka DB.
+	openFail := func(_ context.Context, _ string) (*sql.DB, error) { return nil, errors.New("boom") }
+	var out, errBuf bytes.Buffer
+	code := run([]string{"--operation", "revoke", "--workspace", ws, "--module", "finance.basic", "--reason", reason}, func(string) string { return "postgres://x" }, openFail, &out, &errBuf)
+	if code != exitUnavailable {
+		t.Fatalf("revoke tanpa --version: want exit %d (lolos validasi), got %d (err=%q)", exitUnavailable, code, errBuf.String())
+	}
+	if strings.Contains(errBuf.String(), "invalid input") {
+		t.Fatalf("revoke tanpa --version ditolak sebagai invalid: %q", errBuf.String())
+	}
+	// R1: grant modul tak dikenal dengan DSN valid dan hook openDB
+	// yang MENCATAT pemanggilan — hook TIDAK BOLEH berjalan.
+	// Sebelum perbaikan, validasi lolos dan run() memanggil openDB.
+	called := false
+	hook := func(_ context.Context, _ string) (*sql.DB, error) {
+		called = true
+		return nil, errors.New("openDB tidak boleh dipanggil")
+	}
+	out.Reset()
+	errBuf.Reset()
+	code = run([]string{"--workspace", ws, "--module", "finance.advanced", "--version", "0.1.0", "--reason", reason},
+		func(string) string {
+			return "postgres://umnia_op_test:ci-operator-only@localhost:5432/umnia_test?sslmode=disable"
+		},
+		hook, &out, &errBuf)
+	if code != exitInput {
+		t.Fatalf("grant finance.advanced + hook: want exit %d, got %d (err=%q)", exitInput, code, errBuf.String())
+	}
+	if called {
+		t.Fatalf("openDB dipanggil untuk modul tak dikenal (harus ditolak sebelum akses DB)")
+	}
+	if !strings.Contains(errBuf.String(), "invalid input") {
+		t.Fatalf("stderr harus berisi 'invalid input', got %q", errBuf.String())
+	}
+}
+
 func TestRun_MissingDSN(t *testing.T) {
 	var out, errBuf bytes.Buffer
 	args := []string{"--workspace", "123e4567-e89b-12d3-a456-426614174000", "--module", "rental.basic", "--version", "0.1.0", "--reason", "tes"}
@@ -116,6 +195,10 @@ func TestClassifyCallError(t *testing.T) {
 		{errInvalidCode, "invalid input", exitInput},
 		{errNotFoundCode, "not found", exitInput},
 		{errConflictCode, "conflict", exitConflict},
+		{errNotReadyCode14, "not ready", exitInput},
+		{errInvalidCode14, "invalid input", exitInput},
+		{errNotFoundCode14, "not found", exitInput},
+		{errConflictCode14, "conflict", exitConflict},
 		{"42501", "unavailable", exitUnavailable},
 		{"08006", "outcome unknown", exitUnavailable},
 		{"XX000", "unavailable", exitUnavailable},

@@ -960,6 +960,71 @@ pajak/deposit/denda/FX/gateway/ledger/UI/recovery di slice ini.
 nyata, pajak/deposit/denda, gateway/FX, ledger, UI pembayaran,
 dan recovery/kompensasi di luar pembalikan catatan penuh.
 
+## F2-02-B — grant/revoke Finance operator (migrasi 014)
+
+Migrasi `014_finance_operator_entitlement` menambah DUA rutin
+Finance — `app.grant_finance_entitlement(uuid, text, text, text)`
+dan `app.revoke_finance_entitlement(uuid, text, text)` — keduanya
+SECURITY DEFINER milik NOLOGIN `umnia_grant_exec`, EXECUTE hanya
+untuk grup NOLOGIN `umnia_operator` (roster/grup yang SAMA dengan
+Rental; otoritas operator yang sama sengaja diperluas ke
+penerbitan/pencabutan Finance). 011 TIDAK disentuh. Kedua rutin
+hanya mengizinkan `finance.basic/0.1.0` (kode galat U14NR/U14IV/
+U14NF/U14CF, dipetakan CLI seperti U11) dan memeriksa marker 011
+DAN 014 DI DALAM rutin sebelum mutasi. Grant mempertahankan
+hasil tujuh field + semantik `granted`/`already_granted`/
+`legacy_existing` dari 011; jam DB ditangkap sekali sesudah kunci
+workspace dan dibagikan eksplisit antara baris entitlement, event
+audit, dan hasil. Regrant sesudah revoke membuat baris + audit
+baru; event lama tetap ada.
+
+Revoke MENGHAPUS baris snapshot 0.1.0 (bukan menonaktifkan):
+deaktivasi owner saja tidak mencabut hak, karena re-aktivasi
+langsung lolos tanpa operator. Hasil: `revoked` (baris terhapus +
+audit `entitlement_revoked`, `revoked_by`/`revoked_at` terisi) atau
+`already_revoked` (tidak ada baris saat ini — ketidakhadiran, BUKAN
+bukti revoke historis — `revoked_by`/`revoked_at` NULL, tanpa
+tulis/audit). Versi lain yang ada (mis. legacy 0.2.0) = konflik
+U14CF tanpa tulis. Jumlah baris terhapus HARUS tepat 1; DELETE
+nol-baris (mis. tersaring RLS) tidak diam-diam sukses. 014 memberi
+DELETE hanya atas `module_entitlements` kepada pemilik rutin, plus
+kebijakan DELETE FORCE-RLS yang dibatasi `module_id =
+'finance.basic' AND version = '0.1.0'`; kebijakan SELECT/INSERT
+011 tidak disentuh. Preflight provisioning (Linux, PS Windows,
+initdb) kini mengizinkan kepemilikan fungsi HANYA untuk tiga tanda
+tangan eksak (011 + dua Finance) dan DELETE atas
+`module_entitlements` HANYA di DB upgrade-014 yang valid (marker +
+FORCE RLS + kebijakan terbatas); overload musuh, DELETE asing, dan
+DELETE tanpa 014 tetap ditolak.
+
+CLI: `--operation grant|revoke` (default grant). Dispatch tetap:
+grant+rental -> 011; grant+finance -> rutin grant Finance;
+revoke+finance -> rutin revoke Finance (tiga argumen); revoke
+rental dan kombinasi lain ditolak SEBELUM akses DB. `--version`
+wajib 0.1.0 untuk Finance (termasuk revoke; revoke boleh tanpa
+`--version` = default 0.1.0). Kode keluar sama: 0 sukses
+(`granted`/`already_granted`/`legacy_existing`/`revoked`/
+`already_revoked`); 2 invalid/tidak ditemukan/belum siap; 3
+konflik; 1 tidak tersedia/hasil tidak diketahui. **Retry adalah
+mutasi desired-state, bukan observasi read-only:** perintah lawan
+yang masuk di antaranya membuat retry menjadi transisi baru;
+rekonsiliasi state/audit yang sah dulu sebelum menjalankan ulang
+bila hasil tidak diketahui dan ada operator lain yang bersaing.
+Tidak ada deduplikasi seumur hidup tanpa operation ID.
+
+Lifecycle: revoke hanya mengubah entitlement. Instalasi aktif +
+entitlement dicabut: keempat tulis Finance (termasuk replay) 403,
+riwayat tetap bisa dibaca member/view, aktivasi owner yang cocok
+200/no-op tanpa perubahan audit/timestamp; owner tetap bisa
+deaktivasi. Instalasi nonaktif + dicabut: aktivasi 403. Grant segar
+sebelum aktivasi pertama: tulis 403 sampai owner aktivasi. Regrant
+saat instalasi tetap aktif memulihkan kelayakan tanpa aktivasi
+baru; regrant saat nonaktif tetap butuh aktivasi. Penerbitan/
+pencabutan TIDAK PERNAH menyetujui fakta finansial atau memindah
+uang; tidak ada second approver lifecycle; approval dua aktor
+tetap wajib per pembayaran/pembalikan. Readiness tidak berubah
+(12 marker; 014 BUKAN marker readiness).
+
 ## F1-OPERATOR-ENTITLEMENT-IMPLEMENT — grant operator lewat rutin (migrasi 011)
 
 Satu-satunya jalur grant operator adalah EXECUTE atas rutin
@@ -988,16 +1053,29 @@ go build -o grant-entitlement ./cmd/grant-entitlement
 UMNIA_OPERATOR_DATABASE_URL='postgres://umnia_op_test:<password>@localhost:5432/umnia_test?sslmode=disable' \
   ./grant-entitlement --workspace <uuid> --module rental.basic --version 0.1.0 --reason "<alasan>"
 # granted workspace=<uuid> module=rental.basic version=0.1.0 granted_by=operator:umnia_op_test granted_at=<RFC3339> audit_present=true
+# Finance (migrasi 014): --operation grant (default) atau revoke.
+  ./grant-entitlement --operation grant --workspace <uuid> --module finance.basic --version 0.1.0 --reason "<alasan>"
+  ./grant-entitlement --operation revoke --workspace <uuid> --module finance.basic --reason "<alasan>"
+# revoked workspace=<uuid> module=finance.basic version=0.1.0 revoked_by=operator:umnia_op_test revoked_at=<RFC3339> audit_present=true
+# already_revoked: revoked_by/revoked_at kosong, audit_present=false.
 ```
 
 Kode keluar: 0 sukses (`granted` / `already_granted` /
-`legacy_existing` — no-op mengembalikan aktor/waktu grant asli tanpa
-tulis ulang dan tanpa audit baru; `legacy_existing` tidak pernah
-memfabrikasi audit); 2 input tidak valid, workspace tidak ditemukan,
-atau skema belum siap; 3 konflik versi; 1 tidak tersedia/hasil tidak
-diketahui (jalankan ulang untuk mengamati state). CLI tidak mencetak
-DSN, alasan, atau galat mentah driver, dan tidak pernah retry tulis
-buta.
+`legacy_existing` / `revoked` / `already_revoked` — no-op
+mengembalikan aktor/waktu grant asli tanpa tulis ulang dan tanpa
+audit baru; `legacy_existing` tidak pernah memfabrikasi audit);
+2 input tidak valid, kombinasi tidak didukung, workspace tidak
+ditemukan, atau skema belum siap; 3 konflik versi; 1 tidak
+tersedia/hasil tidak diketahui (jalankan ulang untuk mengamati
+state — dengan catatan retry di bawah). CLI tidak mencetak DSN,
+alasan, atau galat mentah driver, dan tidak pernah retry tulis
+buta. **Retry adalah mutasi desired-state, bukan observasi
+read-only:** perintah lawan yang masuk di antaranya (mis. revoke
+sesudah grant yang hasilnya tidak diketahui) membuat retry menjadi
+transisi baru; rekonsiliasi state/audit yang sah dulu sebelum
+menjalankan ulang bila hasil tidak diketahui dan ada operator
+lain yang bersaing. Tidak ada deduplikasi seumur hidup tanpa
+operation ID.
 
 ### Provisioning lokal + tes
 

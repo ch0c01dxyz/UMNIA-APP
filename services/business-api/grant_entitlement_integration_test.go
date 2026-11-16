@@ -448,7 +448,6 @@ func TestGrantEntitlementCLI_NoOpLegacyConflict(t *testing.T) {
 	wsD := createWorkspace(t, env.srv, env.ownerToken, "Usaha Grant D")
 	t.Cleanup(func() { _, _ = boot.Exec(`DELETE FROM module_entitlements WHERE workspace_id = $1`, wsD) })
 	for _, mod := range []struct{ id, ver string }{
-		{"finance.basic", "0.1.0"},
 		{"spa.standard", "0.1.0"},
 		{"modul.tidak.ada", "9.9.9"},
 		{"rental.basic", "0.2.0"},
@@ -1841,6 +1840,54 @@ func TestConfigurePostgresPreflightRejectsUnsafeRoles(t *testing.T) {
 			t.Fatalf("drop parent: %v", err)
 		}
 	})
+	t.Run("hostile-overload", func(t *testing.T) {
+		// Overload musuh: nama rutin Finance sama, tanda tangan lain
+		// (satu argumen), pemilik umnia_grant_exec. Pemeriksaan lama
+		// (nama saja) lolos dari state ini; allowlist tanda tangan
+		// eksak (011 + 014) harus menolak.
+		if _, err := bizDB.Exec(`CREATE FUNCTION app.grant_finance_entitlement(uuid) RETURNS void LANGUAGE sql AS 'SELECT 1'`); err != nil {
+			t.Fatalf("buat overload musuh: %v", err)
+		}
+		if _, err := bizDB.Exec(`ALTER FUNCTION app.grant_finance_entitlement(uuid) OWNER TO umnia_grant_exec`); err != nil {
+			t.Fatalf("alihkan overload musuh: %v", err)
+		}
+		t.Cleanup(func() { _, _ = bizDB.Exec(`DROP FUNCTION IF EXISTS app.grant_finance_entitlement(uuid)`) })
+		before := snapshotOperatorState(t, bizDB)
+		verifiersBefore := captureVerifiers(t, boot)
+		code, out := run()
+		if code == 0 {
+			t.Fatalf("skrip LOLOS dengan overload musuh milik pemilik rutin (harus ditolak)")
+		}
+		if !strings.Contains(out, "preflight operator") {
+			t.Fatalf("skrip gagal tanpa pesan preflight: exit %d (%s)", code, out)
+		}
+		assertUnchanged(before, verifiersBefore)
+		if _, err := bizDB.Exec(`DROP FUNCTION app.grant_finance_entitlement(uuid)`); err != nil {
+			t.Fatalf("unseed overload: %v", err)
+		}
+	})
+	t.Run("foreign-delete", func(t *testing.T) {
+		// DELETE asing: pemilik rutin diberi DELETE atas workspaces
+		// (bukan module_entitlements, bukan 014). Harus ditolak
+		// meski tidak ada kebijakan RLS yang terlibat.
+		if _, err := bizDB.Exec(`GRANT DELETE ON workspaces TO umnia_grant_exec`); err != nil {
+			t.Fatalf("seed DELETE asing: %v", err)
+		}
+		t.Cleanup(func() { _, _ = bizDB.Exec(`REVOKE DELETE ON workspaces FROM umnia_grant_exec`) })
+		before := snapshotOperatorState(t, bizDB)
+		verifiersBefore := captureVerifiers(t, boot)
+		code, out := run()
+		if code == 0 {
+			t.Fatalf("skrip LOLOS dengan DELETE asing milik pemilik rutin (harus ditolak)")
+		}
+		if !strings.Contains(out, "preflight operator") {
+			t.Fatalf("skrip gagal tanpa pesan preflight: exit %d (%s)", code, out)
+		}
+		assertUnchanged(before, verifiersBefore)
+		if _, err := bizDB.Exec(`REVOKE DELETE ON workspaces FROM umnia_grant_exec`); err != nil {
+			t.Fatalf("unseed DELETE asing: %v", err)
+		}
+	})
 	// Catatan: tidak ada subtes "healthy" yang menjalankan skrip penuh
 	// di sini — skrip penuh akan memutar password bisnis/admin ke
 	// nilai sentinel env dan merusak klaster dev. Jalur sehat sudah
@@ -2025,6 +2072,67 @@ func TestInitdbPreflightRejectsUnsafeRoles(t *testing.T) {
 		}
 		if _, err := scratchBoot.Exec(`DROP TABLE preflight_parent_target`); err != nil {
 			t.Fatalf("drop tabel target: %v", err)
+		}
+	})
+	t.Run("hostile-overload", func(t *testing.T) {
+		// Overload musuh di scratch DB (skema app dibuat tes ini):
+		// nama rutin Finance sama, tanda tangan lain, pemilik
+		// umnia_grant_exec. Allowlist tanda tangan eksak harus menolak.
+		if _, err := scratchBoot.Exec(`CREATE SCHEMA IF NOT EXISTS app`); err != nil {
+			t.Fatalf("buat skema app: %v", err)
+		}
+		if _, err := scratchBoot.Exec(`CREATE FUNCTION app.grant_finance_entitlement(uuid) RETURNS void LANGUAGE sql AS 'SELECT 1'`); err != nil {
+			t.Fatalf("buat overload musuh: %v", err)
+		}
+		if _, err := scratchBoot.Exec(`ALTER FUNCTION app.grant_finance_entitlement(uuid) OWNER TO umnia_grant_exec`); err != nil {
+			t.Fatalf("alihkan overload musuh: %v", err)
+		}
+		t.Cleanup(func() {
+			_, _ = scratchBoot.Exec(`DROP FUNCTION IF EXISTS app.grant_finance_entitlement(uuid)`)
+			_, _ = scratchBoot.Exec(`DROP SCHEMA IF EXISTS app`)
+		})
+		before := snapshotOperatorState(t, scratchBoot)
+		verifiersBefore := captureVerifiers(t, scratchBoot)
+		code, out := run()
+		if code == 0 {
+			t.Fatalf("initdb LOLOS dengan overload musuh milik pemilik rutin (harus ditolak)")
+		}
+		if !strings.Contains(out, "preflight operator") {
+			t.Fatalf("initdb gagal tanpa pesan preflight: exit %d (%s)", code, out)
+		}
+		assertUnchanged(before, verifiersBefore)
+		if _, err := scratchBoot.Exec(`DROP FUNCTION app.grant_finance_entitlement(uuid)`); err != nil {
+			t.Fatalf("unseed overload: %v", err)
+		}
+	})
+	t.Run("foreign-delete", func(t *testing.T) {
+		// DELETE asing di scratch DB: pemilik rutin diberi DELETE
+		// atas tabel workspaces seed. Harus ditolak.
+		if _, err := scratchBoot.Exec(`CREATE TABLE workspaces (id int)`); err != nil {
+			t.Fatalf("buat tabel seed: %v", err)
+		}
+		if _, err := scratchBoot.Exec(`GRANT DELETE ON workspaces TO umnia_grant_exec`); err != nil {
+			t.Fatalf("seed DELETE asing: %v", err)
+		}
+		t.Cleanup(func() {
+			_, _ = scratchBoot.Exec(`REVOKE DELETE ON workspaces FROM umnia_grant_exec`)
+			_, _ = scratchBoot.Exec(`DROP TABLE IF EXISTS workspaces`)
+		})
+		before := snapshotOperatorState(t, scratchBoot)
+		verifiersBefore := captureVerifiers(t, scratchBoot)
+		code, out := run()
+		if code == 0 {
+			t.Fatalf("initdb LOLOS dengan DELETE asing milik pemilik rutin (harus ditolak)")
+		}
+		if !strings.Contains(out, "preflight operator") {
+			t.Fatalf("initdb gagal tanpa pesan preflight: exit %d (%s)", code, out)
+		}
+		assertUnchanged(before, verifiersBefore)
+		if _, err := scratchBoot.Exec(`REVOKE DELETE ON workspaces FROM umnia_grant_exec`); err != nil {
+			t.Fatalf("unseed DELETE asing: %v", err)
+		}
+		if _, err := scratchBoot.Exec(`DROP TABLE workspaces`); err != nil {
+			t.Fatalf("drop tabel seed: %v", err)
 		}
 	})
 }

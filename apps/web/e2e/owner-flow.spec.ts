@@ -1132,21 +1132,25 @@ test.describe.serial('alur pemilik', () => {
         expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width)
       }
     }
-    // Fokus keyboard terlihat: Tab sampai tautan nav pertama (Anggota).
+    // Fokus keyboard terlihat: dari tombol Keluar (tepat sebelum nav workspace
+    // dalam urutan Tab), satu Tab nyata harus mendarat di Anggota.
     await page.setViewportSize({ width: 360, height: 640 })
     await gotoAuthed(page, `/workspaces/${wsA}/customers`, ownerEmail)
-    let focusedName = ''
-    for (let i = 0; i < 10; i++) {
-      await page.keyboard.press('Tab')
-      focusedName = await page.evaluate(() => {
-        const el = document.activeElement as HTMLElement | null
-        return el?.closest('nav[aria-label="Navigasi workspace"]') ? (el.textContent ?? '') : ''
-      })
-      if (focusedName) break
-    }
-    expect(focusedName).toBe('Anggota')
-    const outline = await page.evaluate(() => getComputedStyle(document.activeElement as HTMLElement).outlineWidth)
-    expect(outline).toBe('2px')
+    const workspaceNav = page.getByRole('navigation', { name: 'Navigasi workspace' })
+    await expect(workspaceNav).toBeVisible()
+    const anggota = workspaceNav.getByRole('link', { name: 'Anggota', exact: true })
+    await expect(anggota).toBeVisible()
+    const keluar = page.getByRole('button', { name: 'Keluar', exact: true })
+    await keluar.focus()
+    await expect(keluar).toBeFocused()
+    await page.keyboard.press('Tab')
+    await expect(anggota).toBeFocused()
+    const outline = await page.evaluate(() => {
+      const cs = getComputedStyle(document.activeElement as HTMLElement)
+      return { width: cs.outlineWidth, style: cs.outlineStyle }
+    })
+    expect(outline.width).toBe('2px')
+    expect(outline.style).not.toBe('none')
     await page.setViewportSize({ width: 1440, height: 900 })
   })
 

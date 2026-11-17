@@ -121,9 +121,12 @@ async function activate() {
         <p><button type="button" class="btn btn-secondary" @click="load">Coba lagi</button></p>
       </div>
       <template v-else>
-        <p>
-          <NuxtLink :to="`/workspaces/${wsId}/members`">Kembali ke anggota workspace</NuxtLink>
-        </p>
+        <nav class="site-nav page-nav" aria-label="Navigasi workspace">
+          <NuxtLink :to="`/workspaces/${wsId}/members`">Anggota</NuxtLink>
+          <NuxtLink :to="`/workspaces/${wsId}/modules`">Fitur</NuxtLink>
+          <NuxtLink :to="`/workspaces/${wsId}/customers`">Pelanggan</NuxtLink>
+          <NuxtLink :to="`/workspaces/${wsId}/catalog`">Barang</NuxtLink>
+        </nav>
         <section class="card" aria-labelledby="rental-heading">
           <template v-if="rentalManifest && rentalState">
             <h2 id="rental-heading">{{ rentalManifest.display.name_id }}</h2>

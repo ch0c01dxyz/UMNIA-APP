@@ -1,0 +1,117 @@
+{
+  "generated_by": "owner-flow.spec.ts f2-ui-01",
+  "files": [
+    {
+      "file": "01-customers-360.png",
+      "viewport": "360",
+      "state": "populated-live",
+      "provenance": "live",
+      "sha256": "79aabc248fd598cea51e572b2e57e3d304d1233cb84b1f87681deb82b9499e7b"
+    },
+    {
+      "file": "02-catalog-360.png",
+      "viewport": "360",
+      "state": "populated-live",
+      "provenance": "live",
+      "sha256": "772c3a7d4ae68664364d55ea5ef00dc3561c5bbb17b8b850a2930df155b9edb2"
+    },
+    {
+      "file": "01-customers-768.png",
+      "viewport": "768",
+      "state": "populated-live",
+      "provenance": "live",
+      "sha256": "bad2652c669ff50d2eee55c81e32d75db29e483649555cc76ddddc3ce7d9ca7c"
+    },
+    {
+      "file": "02-catalog-768.png",
+      "viewport": "768",
+      "state": "populated-live",
+      "provenance": "live",
+      "sha256": "f6d9a669ff5c82a658e433117a19f17d8692e2fa00be4b52b41d9e467434f311"
+    },
+    {
+      "file": "01-customers-1440.png",
+      "viewport": "1440",
+      "state": "populated-live",
+      "provenance": "live",
+      "sha256": "51a07a1e9052ba933940fcbb194740eb84ed574d9978697c1555b29c6150a6e9"
+    },
+    {
+      "file": "02-catalog-1440.png",
+      "viewport": "1440",
+      "state": "populated-live",
+      "provenance": "live",
+      "sha256": "ef688acc09284f83e747b63892939ab9dbe7d9811547cd926e0f881035c1c746"
+    },
+    {
+      "file": "03-customers-empty-360.png",
+      "viewport": "360",
+      "state": "empty-live",
+      "provenance": "live",
+      "sha256": "6032cf5c9e5adf6bff0eae56616a3fbdaeac7c90b35a44e543f886bd30f79529"
+    },
+    {
+      "file": "04-catalog-empty-360.png",
+      "viewport": "360",
+      "state": "empty-live",
+      "provenance": "live",
+      "sha256": "868d9168cf3dc5eef054fec7bab0c6f269a155b4e39e0c9686b9602eb1b81d34"
+    },
+    {
+      "file": "05-customers-noperm-360.png",
+      "viewport": "360",
+      "state": "no-permission-live",
+      "provenance": "live",
+      "sha256": "457a4e6b2b20da7403bd177c792824304c62eda08ba4d342b79b9c576dc8559b"
+    },
+    {
+      "file": "06-catalog-noperm-360.png",
+      "viewport": "360",
+      "state": "no-permission-live",
+      "provenance": "live",
+      "sha256": "012fa251d897528dffbeed90fe722f7e5a065a8a59373a088133b193d9681e0e"
+    },
+    {
+      "file": "07-customers-error-360.png",
+      "viewport": "360",
+      "state": "error-mocked",
+      "provenance": "mocked-route",
+      "sha256": "7f79a5f31c851a6e2796c5160842ea9e2db2b1ccd7e3bd2c5f187ae5539cee1f"
+    },
+    {
+      "file": "08-catalog-error-360.png",
+      "viewport": "360",
+      "state": "error-mocked",
+      "provenance": "mocked-route",
+      "sha256": "6e72448c072ccb54063a704a06445740e34f0060927ff6ca5d584e273b80bf79"
+    },
+    {
+      "file": "09-customers-loading-360.png",
+      "viewport": "360",
+      "state": "loading-mocked",
+      "provenance": "mocked-route",
+      "sha256": "8fb986822b28d536916f0f4f302758e0874ecbd60196297db68a95b7ea3e90d9"
+    },
+    {
+      "file": "10-catalog-loading-360.png",
+      "viewport": "360",
+      "state": "loading-mocked",
+      "provenance": "mocked-route",
+      "sha256": "4ef5c2eef542f803b41eaa31ad3781e74d983a771dc8c026f138cfab8b6256d3"
+    },
+    {
+      "file": "11-members-nav-360.png",
+      "viewport": "360",
+      "state": "nav-live",
+      "provenance": "live",
+      "sha256": "de410f65f98657ff12201db37f78539bcf7b52a2e8194e073441afa66da1e6f2"
+    },
+    {
+      "file": "12-modules-nav-360.png",
+      "viewport": "360",
+      "state": "nav-live",
+      "provenance": "live",
+      "sha256": "ec9d88892d6a2af291bc7433efdf6cf2754add067832bf9b2ca380720389c234"
+    }
+  ]
+}

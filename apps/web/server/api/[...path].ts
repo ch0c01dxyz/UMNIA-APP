@@ -11,7 +11,7 @@ const UPSTREAM_TIMEOUT_MS = 10000
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const MODULE_RE = /^[a-z][a-z0-9]*(\.[a-z][a-z0-9]*)+$/
 
-type Route = { method: 'GET' | 'POST', segments: Array<string | 'uuid' | 'module'> }
+type Route = { method: 'GET' | 'POST', segments: Array<string | 'uuid' | 'module'>, query?: boolean }
 const ALLOWLIST: Route[] = [
   { method: 'GET', segments: ['healthz'] },
   { method: 'POST', segments: ['auth', 'register'] },
@@ -23,8 +23,46 @@ const ALLOWLIST: Route[] = [
   { method: 'POST', segments: ['invites', 'accept'] },
   { method: 'GET', segments: ['workspaces', 'uuid', 'modules'] },
   { method: 'GET', segments: ['workspaces', 'uuid', 'modules', 'module'] },
-  { method: 'POST', segments: ['workspaces', 'uuid', 'modules', 'module', 'activate'] }
+  { method: 'POST', segments: ['workspaces', 'uuid', 'modules', 'module', 'activate'] },
+  { method: 'GET', segments: ['workspaces', 'uuid', 'customers'], query: true },
+  { method: 'POST', segments: ['workspaces', 'uuid', 'customers'] },
+  { method: 'GET', segments: ['workspaces', 'uuid', 'catalog', 'items'], query: true },
+  { method: 'POST', segments: ['workspaces', 'uuid', 'catalog', 'items'] }
 ]
+
+// Validasi query daftar pelanggan/barang (F2-UI-01, satu-satunya query yang
+// diizinkan proxy): kosong, atau bagian limit=<n> dan/atau offset=<n>,
+// masing-masing sekali, urutan bebas. Hanya digit desimal kanonis:
+// limit 1-100; offset 0-9007199254740991. Tolak duplikat, nama tak
+// dikenal/berbeda kasus, nilai kosong/flag, nol di depan, tanda,
+// spasi, desimal, eksponen, persen-encoding/escape rusak, ';', '?'
+// tambahan, '#', dan '&' kosong/ganda/di akhir. Query yang lolos
+// diteruskan apa adanya, tanpa pembulatan/pengkodean ulang.
+const MAX_OFFSET = 9007199254740991n
+function validListQuery(query: string): boolean {
+  if (query === '' || query.includes('?') || query.includes('#') || query.includes(';') || query.includes('%')) return false
+  const parts = query.split('&')
+  const seen = new Set<string>()
+  for (const part of parts) {
+    if (part === '') return false
+    const eq = part.indexOf('=')
+    if (eq === -1) return false
+    const name = part.slice(0, eq)
+    const value = part.slice(eq + 1)
+    if (name !== 'limit' && name !== 'offset') return false
+    if (seen.has(name)) return false
+    seen.add(name)
+    if (value === '' || !/^[0-9]+$/.test(value)) return false
+    if (value.length > 1 && value.startsWith('0')) return false
+    if (name === 'limit') {
+      const n = Number(value)
+      if (!Number.isInteger(n) || n < 1 || n > 100) return false
+    } else if (BigInt(value) > MAX_OFFSET) {
+      return false
+    }
+  }
+  return parts.length > 0
+}
 
 function fail(event: H3Event, status: number, message: string) {
   setResponseStatus(event, status)
@@ -83,12 +121,20 @@ function readBodyBounded(req: IncomingMessage): Promise<BodyRead> {
 
 export default defineEventHandler(async (event) => {
   const raw = event.node.req.url || ''
-  // Tolak query string, backslash, dan path di luar /api/ sebelum validasi.
-  if (!raw.startsWith('/api/') || raw.includes('\\') || raw.includes('?')) {
+  // Tolak backslash dan '#' di mana pun sebelum validasi; '?' dipisah
+  // sekali di bawah (query hanya untuk dua rute GET daftar, lihat bawah).
+  if (!raw.startsWith('/api/') || raw.includes('\\') || raw.includes('#')) {
+    return fail(event, 400, 'permintaan tidak valid')
+  }
+  const qPos = raw.indexOf('?')
+  const pathPart = qPos === -1 ? raw : raw.slice(0, qPos)
+  const queryPart = qPos === -1 ? null : raw.slice(qPos + 1)
+  // '?' telanjang di akhir dan '?' tambahan ditolak lokal.
+  if (queryPart !== null && (queryPart === '' || queryPart.includes('?'))) {
     return fail(event, 400, 'permintaan tidak valid')
   }
   const segments: string[] = []
-  for (const part of raw.slice(5).split('/')) {
+  for (const part of pathPart.slice(5).split('/')) {
     if (part === '') return fail(event, 400, 'permintaan tidak valid')
     let decoded: string
     try {
@@ -96,7 +142,7 @@ export default defineEventHandler(async (event) => {
     } catch {
       return fail(event, 400, 'permintaan tidak valid')
     }
-    if (decoded === '' || decoded === '.' || decoded === '..' || decoded.includes('/') || decoded.includes('\\')) {
+    if (decoded === '' || decoded === '.' || decoded === '..' || decoded.includes('/') || decoded.includes('\\') || decoded.includes('#')) {
       return fail(event, 400, 'permintaan tidak valid')
     }
     segments.push(decoded)
@@ -109,6 +155,12 @@ export default defineEventHandler(async (event) => {
       want === 'uuid' ? UUID_RE.test(segments[i])
       : want === 'module' ? MODULE_RE.test(segments[i])
       : want === segments[i]))
+  // Query di luar dua rute GET daftar ditolak 400 SEBELUM upstream —
+  // termasuk pada path yang tidak dikenal; path tak dikenal TANPA query
+  // tetap 404. Query pada rute daftar yang dikenal divalidasi ketat.
+  if (queryPart !== null && (!matched || !matched.query || !validListQuery(queryPart))) {
+    return fail(event, 400, 'permintaan tidak valid')
+  }
   if (!matched) return fail(event, 404, 'tidak ditemukan')
 
   let body: Buffer | undefined
@@ -128,7 +180,7 @@ export default defineEventHandler(async (event) => {
   if (!/^https?:\/\/[A-Za-z0-9.-]+(:\d+)?$/.test(base)) {
     return fail(event, 502, 'layanan tidak tersedia')
   }
-  const upstreamPath = '/' + segments.map(s => UUID_RE.test(s) ? s.toLowerCase() : s).join('/')
+  const upstreamPath = '/' + segments.map(s => UUID_RE.test(s) ? s.toLowerCase() : s).join('/') + (queryPart !== null ? `?${queryPart}` : '')
   const headers: Record<string, string> = {}
   const contentType = event.node.req.headers['content-type']
   if (typeof contentType === 'string' && contentType !== '') headers['Content-Type'] = contentType

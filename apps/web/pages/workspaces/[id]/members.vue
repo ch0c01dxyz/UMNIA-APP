@@ -156,9 +156,12 @@ function closeInvite() {
       </div>
       <template v-else-if="workspace">
         <p class="tagline">Workspace: <strong>{{ workspace.name }}</strong></p>
-        <p>
-          <NuxtLink :to="`/workspaces/${wsId}/modules`">Lihat fitur workspace</NuxtLink>
-        </p>
+        <nav class="site-nav page-nav" aria-label="Navigasi workspace">
+          <NuxtLink :to="`/workspaces/${wsId}/members`">Anggota</NuxtLink>
+          <NuxtLink :to="`/workspaces/${wsId}/modules`">Fitur</NuxtLink>
+          <NuxtLink :to="`/workspaces/${wsId}/customers`">Pelanggan</NuxtLink>
+          <NuxtLink :to="`/workspaces/${wsId}/catalog`">Barang</NuxtLink>
+        </nav>
 
         <section class="card" aria-labelledby="members-heading">
           <h2 id="members-heading">Anggota</h2>

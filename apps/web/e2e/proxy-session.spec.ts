@@ -24,9 +24,23 @@ function psql(sql: string): string {
   return execFileSync('psql', [BOOTSTRAP_URL, '-v', 'ON_ERROR_STOP=1', '-tAc', sql], { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'] })
 }
 
-function rawGet(path: string, port = 3000): Promise<{ status: number, body: string }> {
+function rawGet(path: string, port = 3000, headers: Record<string, string> = {}): Promise<{ status: number, body: string }> {
   return new Promise((resolve, reject) => {
-    const req = http.request({ host: 'localhost', port, path, method: 'GET' }, (res) => {
+    const req = http.request({ host: 'localhost', port, path, method: 'GET', headers }, (res) => {
+      let body = ''
+      res.on('data', (c: Buffer) => { body += c.toString() })
+      res.on('end', () => resolve({ status: res.statusCode ?? 0, body }))
+    })
+    req.on('error', reject)
+    req.end()
+  })
+}
+
+// Method mentah apa pun (raw-wire): menguji penolakan proxy sebelum
+// normalisasi klien Playwright.
+function rawMethod(method: string, path: string, port = 3000): Promise<{ status: number, body: string }> {
+  return new Promise((resolve, reject) => {
+    const req = http.request({ host: 'localhost', port, path, method }, (res) => {
       let body = ''
       res.on('data', (c: Buffer) => { body += c.toString() })
       res.on('end', () => resolve({ status: res.statusCode ?? 0, body }))
@@ -105,6 +119,18 @@ test.describe.serial('proxy + sesi', () => {
     const login2 = await ctx.post('/api/auth/login', { data: { email: otherEmail, password: PASSWORD } })
     expect(login2.status()).toBe(200)
     otherToken = ((await login2.json()) as { token: string }).token
+    for (let i = 1; i <= 3; i++) {
+      const c = await ctx.post(`/api/workspaces/${wsId}/customers`, {
+        headers: { Authorization: `Bearer ${ownerToken}` },
+        data: { display_name: `Proxy Pelanggan ${i}` }
+      })
+      expect(c.status()).toBe(201)
+      const it = await ctx.post(`/api/workspaces/${wsId}/catalog/items`, {
+        headers: { Authorization: `Bearer ${ownerToken}` },
+        data: { sku: `PRX-${i}`, name: `Proxy Barang ${i}`, unit: 'pcs' }
+      })
+      expect(it.status()).toBe(201)
+    }
     await ctx.dispose()
   })
 
@@ -217,5 +243,109 @@ test.describe.serial('proxy + sesi', () => {
       headers: { Authorization: `Bearer ${ownerToken}` }
     })
     expect(own.status()).toBe(200)
+  })
+
+  test('proxy: query limit/offset valid diteruskan + paginasi nyata', async ({ request }) => {
+    const auth = { Authorization: `Bearer ${ownerToken}` }
+    for (const base of [`/api/workspaces/${wsId}/customers`, `/api/workspaces/${wsId}/catalog/items`]) {
+      const p2 = await request.get(`${base}?limit=2`, { headers: auth })
+      expect(p2.status()).toBe(200)
+      expect(((await p2.json()) as { items: unknown[] }).items.length).toBe(2)
+      const p2o2 = await request.get(`${base}?limit=2&offset=2`, { headers: auth })
+      expect(p2o2.status()).toBe(200)
+      expect(((await p2o2.json()) as { items: unknown[] }).items.length).toBe(1)
+      const o2l1 = await request.get(`${base}?offset=2&limit=1`, { headers: auth })
+      expect(o2l1.status()).toBe(200)
+      expect(((await o2l1.json()) as { items: unknown[] }).items.length).toBe(1)
+      const all = await request.get(`${base}?limit=100`, { headers: auth })
+      expect(((await all.json()) as { items: unknown[] }).items.length).toBe(3)
+      const o0 = await request.get(`${base}?offset=0`, { headers: auth })
+      expect(((await o0.json()) as { items: unknown[] }).items.length).toBe(3)
+      const far = await request.get(`${base}?offset=9007199254740991`, { headers: auth })
+      expect(far.status()).toBe(200)
+      expect(((await far.json()) as { items: unknown[] }).items.length).toBe(0)
+    }
+  })
+
+  test('proxy: query malformed ditolak lokal 400', async () => {
+    const badQueries = [
+      'limit=0', 'limit=101', 'limit=007', 'limit=+10', 'limit=10.5', 'limit=1e2',
+      'limit=', 'limit', 'LIMIT=10', 'Limit=10', 'offset=-1', 'offset=007',
+      'offset=9007199254740992', 'limit=10&limit=20', 'limit=10&foo=1',
+      'limit=10;', 'limit=10?', 'limit=10#', 'limit=10&', 'limit=10&&offset=0',
+      '&limit=10', 'limit=10%31', 'limit=%31%30', 'limit=10%20'
+    ]
+    for (const q of badQueries) {
+      const res = await rawGet(`/api/workspaces/${wsId}/customers?${q}`)
+      expect(res.status, `customers?${q}`).toBe(400)
+      expect(res.body).toContain('permintaan tidak valid')
+    }
+    // Query kosong (tanda ? tanpa isi) juga 400.
+    const bare = await rawGet(`/api/workspaces/${wsId}/customers?`)
+    expect(bare.status).toBe(400)
+    expect(bare.body).toContain('permintaan tidak valid')
+  })
+
+  test('proxy: query di rute lain 400; path tak dikenal 404', async ({ request }) => {
+    const denied: Array<[string, string, number]> = [
+      ['POST', `/api/workspaces/${wsId}/customers?limit=10`, 400],
+      ['GET', `/api/workspaces/${wsId}/members?limit=10`, 400],
+      ['GET', `/api/workspaces/${wsId}/modules?limit=10`, 400],
+      // R1-7: query pada path tak dikenal juga 400, bukan 404.
+      ['GET', '/api/admin?limit=10', 400]
+    ]
+    for (const [method, path, want] of denied) {
+      const res = method === 'GET'
+        ? await request.get(path)
+        : await request.fetch(path, { method })
+      expect(res.status(), `${method} ${path}`).toBe(want)
+    }
+    const unknown: Array<[string, number]> = [
+      [`/api/workspaces/${wsId}/customers/nope`, 404],
+      [`/api/workspaces/${wsId}/catalog/items/extra`, 404]
+    ]
+    for (const [path, want] of unknown) {
+      const res = await request.get(path)
+      expect(res.status(), `GET ${path}`).toBe(want)
+    }
+  })
+
+  test('proxy R1: query di luar rute daftar 400 sebelum upstream; tanpa query tetap 404', async () => {
+    // Raw-wire: method/path tak didukung, dengan dan tanpa query.
+    const cases: Array<[string, string, number]> = [
+      ['GET', '/api/not-allowed?limit=1', 400],
+      ['GET', '/api/not-allowed', 404],
+      ['PUT', `/api/workspaces/${wsId}/customers?limit=1`, 400],
+      ['PUT', `/api/workspaces/${wsId}/customers`, 404],
+      ['DELETE', `/api/workspaces/${wsId}/catalog/items?offset=0`, 400],
+      ['DELETE', `/api/workspaces/${wsId}/catalog/items`, 404],
+      ['POST', '/api/not-allowed?x=1', 400],
+      ['POST', '/api/not-allowed', 404],
+      ['GET', '/api/workspaces?limit=1', 400],
+      ['GET', '/api/auth/login?limit=1', 400]
+    ]
+    for (const [method, path, want] of cases) {
+      const res = await rawMethod(method, path)
+      expect(res.status, `${method} ${path}`).toBe(want)
+      if (want === 400) expect(res.body).toContain('permintaan tidak valid')
+      if (want === 404) expect(res.body).toContain('tidak ditemukan')
+    }
+    // 400 lokal bahkan saat upstream mati: tidak ada kontak upstream.
+    const dead400 = await rawGet('/api/not-allowed?limit=1', 3001)
+    expect(dead400.status).toBe(400)
+    const dead404 = await rawGet('/api/not-allowed', 3001)
+    expect(dead404.status).toBe(404)
+  })
+
+  test('proxy: pelanggan/katalog upstream mati 502; query invalid tetap 400 lokal', async () => {
+    const ok = await rawGet(`/api/workspaces/${wsId}/customers?limit=10`, 3001)
+    expect(ok.status).toBe(502)
+    expect(ok.body).toContain('layanan tidak tersedia')
+    expect(ok.body).not.toContain('127.0.0.1')
+    const bad = await rawGet(`/api/workspaces/${wsId}/customers?limit=0`, 3001)
+    expect(bad.status).toBe(400)
+    expect(bad.body).toContain('permintaan tidak valid')
+    const denied = await rawGet('/api/admin/users', 3001)
+    expect(denied.status).toBe(404)
   })
 })

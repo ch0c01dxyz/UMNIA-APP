@@ -58,6 +58,14 @@ select:focus-visible, summary:focus-visible {
 .site-header .brand { font-weight: 700; font-size: 1.25rem; color: #171717; text-decoration: none; }
 .site-nav { display: flex; gap: 1rem; align-items: center; flex-wrap: wrap; }
 .site-nav a, .site-nav button { font-size: 0.9375rem; }
+/* Navigasi workspace (F2-UI-01 R1/R2): keempat tautan minimal 44x44px agar
+   target sentuh memenuhi ambang; hanya nav workspace, bukan header. */
+.page-nav a {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  min-width: 44px;
+}
 .link-button {
   background: none;
   border: none;

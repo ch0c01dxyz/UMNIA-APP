@@ -28,7 +28,7 @@ export function resolveLoginTarget(raw: string | null | undefined): string {
     query = raw.slice(q + 1)
   }
   if (path === '/workspaces/new') return path
-  const m = path.match(/^\/workspaces\/([0-9a-f-]{36})\/(members|modules)$/)
+  const m = path.match(/^\/workspaces\/([0-9a-f-]{36})\/(members|modules|customers|catalog)$/)
   if (m && UUID_RE.test(m[1])) return path
   if (path === '/invites/accept') {
     const params = new URLSearchParams(query)

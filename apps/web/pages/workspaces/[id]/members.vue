@@ -161,6 +161,7 @@ function closeInvite() {
           <NuxtLink :to="`/workspaces/${wsId}/modules`">Fitur</NuxtLink>
           <NuxtLink :to="`/workspaces/${wsId}/customers`">Pelanggan</NuxtLink>
           <NuxtLink :to="`/workspaces/${wsId}/catalog`">Barang</NuxtLink>
+          <NuxtLink :to="`/workspaces/${wsId}/assets`">Unit</NuxtLink>
         </nav>
 
         <section class="card" aria-labelledby="members-heading">

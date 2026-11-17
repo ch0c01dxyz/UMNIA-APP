@@ -27,11 +27,13 @@ const ALLOWLIST: Route[] = [
   { method: 'GET', segments: ['workspaces', 'uuid', 'customers'], query: true },
   { method: 'POST', segments: ['workspaces', 'uuid', 'customers'] },
   { method: 'GET', segments: ['workspaces', 'uuid', 'catalog', 'items'], query: true },
-  { method: 'POST', segments: ['workspaces', 'uuid', 'catalog', 'items'] }
+  { method: 'POST', segments: ['workspaces', 'uuid', 'catalog', 'items'] },
+  { method: 'GET', segments: ['workspaces', 'uuid', 'assets'], query: true },
+  { method: 'POST', segments: ['workspaces', 'uuid', 'assets'] }
 ]
 
-// Validasi query daftar pelanggan/barang (F2-UI-01, satu-satunya query yang
-// diizinkan proxy): kosong, atau bagian limit=<n> dan/atau offset=<n>,
+// Validasi query daftar pelanggan/barang/unit (F2-UI-01/F2-UI-02,
+// satu-satunya query yang diizinkan proxy): kosong, atau bagian limit=<n> dan/atau offset=<n>,
 // masing-masing sekali, urutan bebas. Hanya digit desimal kanonis:
 // limit 1-100; offset 0-9007199254740991. Tolak duplikat, nama tak
 // dikenal/berbeda kasus, nilai kosong/flag, nol di depan, tanda,

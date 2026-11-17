@@ -119,6 +119,13 @@ test.describe.serial('proxy + sesi', () => {
     const login2 = await ctx.post('/api/auth/login', { data: { email: otherEmail, password: PASSWORD } })
     expect(login2.status()).toBe(200)
     otherToken = ((await login2.json()) as { token: string }).token
+    // Terima undangan: otherToken adalah kasir anggota workspace, bukan
+    // nonanggota (tanpa ini, GET aset sebagai kasir 403 dengan benar).
+    const accept = await ctx.post('/api/invites/accept', {
+      headers: { Authorization: `Bearer ${otherToken}` },
+      data: { workspace_id: wsId, token: inviteCode }
+    })
+    expect(accept.status()).toBe(200)
     for (let i = 1; i <= 3; i++) {
       const c = await ctx.post(`/api/workspaces/${wsId}/customers`, {
         headers: { Authorization: `Bearer ${ownerToken}` },
@@ -347,5 +354,89 @@ test.describe.serial('proxy + sesi', () => {
     expect(bad.body).toContain('permintaan tidak valid')
     const denied = await rawGet('/api/admin/users', 3001)
     expect(denied.status).toBe(404)
+  })
+
+  test('proxy: aset GET/POST diteruskan + paginasi nyata', async ({ request }) => {
+    const auth = { Authorization: `Bearer ${ownerToken}` }
+    const item = await request.post(`/api/workspaces/${wsId}/catalog/items`, {
+      headers: auth,
+      data: { sku: 'PRX-AST', name: 'Proxy Unit Barang', unit: 'pcs' }
+    })
+    expect(item.status()).toBe(201)
+    const itemId = ((await item.json()) as { id: string }).id
+    for (let i = 1; i <= 3; i++) {
+      const a = await request.post(`/api/workspaces/${wsId}/assets`, {
+        headers: auth,
+        data: { catalog_item_id: itemId, serial: `PRX-UNIT-${i}` }
+      })
+      expect(a.status()).toBe(201)
+      expect(((await a.json()) as { serial: string }).serial).toBe(`PRX-UNIT-${i}`)
+    }
+    const p2 = await request.get(`/api/workspaces/${wsId}/assets?limit=2`, { headers: auth })
+    expect(p2.status()).toBe(200)
+    expect(((await p2.json()) as { items: unknown[] }).items.length).toBe(2)
+    const p2o2 = await request.get(`/api/workspaces/${wsId}/assets?limit=2&offset=2`, { headers: auth })
+    expect(p2o2.status()).toBe(200)
+    expect(((await p2o2.json()) as { items: unknown[] }).items.length).toBe(1)
+    const all = await request.get(`/api/workspaces/${wsId}/assets?limit=100`, { headers: auth })
+    expect(((await all.json()) as { items: unknown[] }).items.length).toBe(3)
+    const far = await request.get(`/api/workspaces/${wsId}/assets?offset=9007199254740991`, { headers: auth })
+    expect(far.status()).toBe(200)
+    expect(((await far.json()) as { items: unknown[] }).items.length).toBe(0)
+    // Kasir baca 200; nonanggota 403.
+    const cashier = await request.get(`/api/workspaces/${wsId}/assets?limit=100`, {
+      headers: { Authorization: `Bearer ${otherToken}` }
+    })
+    expect(cashier.status()).toBe(200)
+    const nomemberEmail = `proxy-nomember-${RUN}@e2e.umnia.local`
+    const reg3 = await request.post('/api/auth/register', { data: { email: nomemberEmail, password: PASSWORD } })
+    expect(reg3.status()).toBe(201)
+    const login3 = await request.post('/api/auth/login', { data: { email: nomemberEmail, password: PASSWORD } })
+    expect(login3.status()).toBe(200)
+    const nomember = await request.get(`/api/workspaces/${wsId}/assets?limit=100`, {
+      headers: { Authorization: `Bearer ${((await login3.json()) as { token: string }).token}` }
+    })
+    expect(nomember.status()).toBe(403)
+  })
+
+  test('proxy: query aset malformed 400; query di POST aset 400; availability/detail di luar allowlist', async ({ request }) => {
+    const auth = { Authorization: `Bearer ${ownerToken}` }
+    for (const q of ['limit=0', 'limit=101', 'limit=007', 'offset=-1', 'limit=10&foo=1', 'limit=10;']) {
+      const res = await rawGet(`/api/workspaces/${wsId}/assets?${q}`)
+      expect(res.status, `assets?${q}`).toBe(400)
+      expect(res.body).toContain('permintaan tidak valid')
+    }
+    const bare = await rawGet(`/api/workspaces/${wsId}/assets?`)
+    expect(bare.status).toBe(400)
+    const postQ = await request.post(`/api/workspaces/${wsId}/assets?limit=10`, {
+      headers: auth,
+      data: { catalog_item_id: '00000000-0000-4000-8000-000000000001', serial: 'X-1' }
+    })
+    expect(postQ.status()).toBe(400)
+    // Availability dan detail aset TIDAK ada di allowlist proxy: query
+    // di luar rute daftar ditolak 400 SEBELUM pencocokan rute, jadi
+    // availability ber-query 400; tanpa query jalurnya tak dikenal (404).
+    const avail = await request.get(
+      `/api/workspaces/${wsId}/assets/00000000-0000-4000-8000-000000000001/availability?starts_at=2026-11-17T00:00:00Z&ends_at=2026-11-18T00:00:00Z`,
+      { headers: auth }
+    )
+    expect(avail.status()).toBe(400)
+    const availBare = await request.get(
+      `/api/workspaces/${wsId}/assets/00000000-0000-4000-8000-000000000001/availability`,
+      { headers: auth }
+    )
+    expect(availBare.status()).toBe(404)
+    const detail = await request.get(`/api/workspaces/${wsId}/assets/00000000-0000-4000-8000-000000000001`, { headers: auth })
+    expect(detail.status()).toBe(404)
+  })
+
+  test('proxy: aset upstream mati 502; query invalid tetap 400 lokal', async () => {
+    const ok = await rawGet(`/api/workspaces/${wsId}/assets?limit=10`, 3001)
+    expect(ok.status).toBe(502)
+    expect(ok.body).toContain('layanan tidak tersedia')
+    expect(ok.body).not.toContain('127.0.0.1')
+    const bad = await rawGet(`/api/workspaces/${wsId}/assets?limit=0`, 3001)
+    expect(bad.status).toBe(400)
+    expect(bad.body).toContain('permintaan tidak valid')
   })
 })

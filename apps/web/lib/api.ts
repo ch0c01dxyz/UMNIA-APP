@@ -28,7 +28,7 @@ export function resolveLoginTarget(raw: string | null | undefined): string {
     query = raw.slice(q + 1)
   }
   if (path === '/workspaces/new') return path
-  const m = path.match(/^\/workspaces\/([0-9a-f-]{36})\/(members|modules|customers|catalog|assets)$/)
+  const m = path.match(/^\/workspaces\/([0-9a-f-]{36})\/(members|modules|customers|catalog|assets|prices)$/)
   if (m && UUID_RE.test(m[1])) return path
   if (path === '/invites/accept') {
     const params = new URLSearchParams(query)
@@ -53,10 +53,13 @@ export function redirectToLogin(session: SessionState, currentPath: string): voi
 export async function apiFetch<T>(
   session: SessionState | null,
   path: string,
-  opts: { method?: 'GET' | 'POST', body?: unknown } = {}
+  opts: { method?: 'GET' | 'POST', body?: unknown, idempotencyKey?: string } = {}
 ): Promise<{ status: number, data: T }> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' }
   if (session?.token.value) headers.Authorization = `Bearer ${session.token.value}`
+  // Kunci idempotency hanya untuk panggilan yang memintanya secara
+  // eksplisit (F2-UI-03); pemanggil lama tidak mengirim header ini.
+  if (opts.idempotencyKey) headers['Idempotency-Key'] = opts.idempotencyKey
   let res: Response
   try {
     res = await fetch(path, {

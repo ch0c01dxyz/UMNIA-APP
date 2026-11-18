@@ -5,7 +5,7 @@
 // Rahasia (kata sandi, token, kode undangan, DSN operator) tidak pernah
 // di-log; kode undangan hanya hidup di memori tes ini.
 import { execFileSync } from 'node:child_process'
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -18,6 +18,7 @@ const BOOTSTRAP_URL = process.env.E2E_BOOTSTRAP_URL ||
 const SHOTS = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'design', 'screenshots', 'owner-flow')
 const SHOTS_UI01 = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'design', 'screenshots', 'f2-ui-01')
 const SHOTS_UI02 = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'design', 'screenshots', 'f2-ui-02')
+const SHOTS_UI03 = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'design', 'screenshots', 'f2-ui-03')
 
 const ownerEmail = `pemilik-${RUN}@e2e.umnia.local`
 const staffEmail = `staf-${RUN}@e2e.umnia.local`
@@ -35,6 +36,7 @@ let wsFresh = ''
 let wsAssets = ''
 let wsAssetsB = ''
 let wsCat = ''
+let wsPrices = ''
 let inviteCode = ''
 let inviteCode2 = ''
 let inviteCode3 = ''
@@ -233,8 +235,8 @@ async function listAssetRows(page: Page, ws: string): Promise<Array<{ id: string
 
 // Cari satu item katalog berdasarkan SKU; halaman API dipaginasi 100
 // baris, jadi telusuri offset 0/100/200 sampai halaman pendek.
-async function catalogItemBySku(page: Page, ws: string, sku: string): Promise<{ id: string, sku: string, name: string, status: string }> {
-  const token = await apiToken(page.request, ownerEmail)
+async function catalogItemBySku(page: Page, ws: string, sku: string, email: string = ownerEmail): Promise<{ id: string, sku: string, name: string, status: string }> {
+  const token = await apiToken(page.request, email)
   for (const offset of [0, 100, 200]) {
     const res = await page.request.get(`/api/workspaces/${ws}/catalog/items?limit=100&offset=${offset}`, {
       headers: { Authorization: `Bearer ${token}` }
@@ -246,6 +248,45 @@ async function catalogItemBySku(page: Page, ws: string, sku: string): Promise<{ 
     if (body.items.length < 100) break
   }
   throw new Error(`item ${sku} tidak ditemukan di katalog ${ws}`)
+}
+
+interface PriceRow { id: string, workspace_id: string, catalog_item_id: string, price_list_id: string, client_request_id: string, valid_from: string, valid_to: string, amount_minor: string, currency: string }
+
+async function listPriceRows(page: Page, ws: string, itemId: string, email: string = ownerEmail): Promise<PriceRow[]> {
+  const res = await page.request.get(`/api/workspaces/${ws}/catalog/items/${itemId}/prices?limit=100`, {
+    headers: { Authorization: `Bearer ${await apiToken(page.request, email)}` }
+  })
+  expect(res.status()).toBe(200)
+  const body = await res.json() as { items: PriceRow[] }
+  return body.items
+}
+
+// Buat N tarif bulanan berurutan lewat API nyata, masing-masing dengan
+// kunci baru; interval ke-i: 2040-MM-01 s.d. bulan berikut (tanpa tumpang).
+async function seedPrices(req: APIRequestContext, ws: string, token: string, itemId: string, count: number, amountPrefix = 1000): Promise<void> {
+  for (let i = 0; i < count; i++) {
+    const y = 2040 + Math.floor(i / 12)
+    const m = (i % 12) + 1
+    const m2 = m === 12 ? 1 : m + 1
+    const y2 = m === 12 ? y + 1 : y
+    const from = `${y}-${String(m).padStart(2, '0')}-01T00:00:00Z`
+    const to = `${y2}-${String(m2).padStart(2, '0')}-01T00:00:00Z`
+    const res = await req.post(`/api/workspaces/${ws}/catalog/items/${itemId}/prices`, {
+      headers: { Authorization: `Bearer ${token}`, 'Idempotency-Key': randomUUID() },
+      data: { valid_from: from, valid_to: to, amount_minor: String(amountPrefix + i), currency: 'IDR' }
+    })
+    expect(res.status(), `seed harga ${i}`).toBe(201)
+  }
+}
+
+// R1: workspace + pemilik mandiri per tes regresi (tanpa wsPrices bersama)
+// supaya tiap tes R1 bisa jalan sendiri lewat --grep.
+async function r1Setup(page: Page, tag: string): Promise<{ email: string, ws: string, token: string }> {
+  const email = `r1-${tag}-${RUN}@e2e.umnia.local`
+  await uiRegister(page, email)
+  const ws = await uiCreateWorkspace(page, `Toko R1 ${tag} ${RUN}`, email)
+  const token = await apiToken(page.request, email)
+  return { email, ws, token }
 }
 
 test.describe.serial('alur pemilik', () => {
@@ -1156,14 +1197,17 @@ test.describe.serial('alur pemilik', () => {
   })
 
   test('navigasi workspace R2: tautan 44x44, fokus terlihat, bungkus di 360/768/1440', async ({ page }) => {
+    // F2-UI-03: 6 URL (Tarif ikut) x 3 lebar + probe fokus = 19 gotoAuthed
+    // dengan login ulang tiap reload; batas 120 dtk bawaan mepet — 180 dtk.
+    test.setTimeout(180_000)
     await uiLogin(page, ownerEmail)
     for (const width of [360, 768, 1440]) {
       await page.setViewportSize({ width, height: 900 })
-      for (const url of [`/workspaces/${wsA}/customers`, `/workspaces/${wsA}/catalog`, `/workspaces/${wsA}/members`, `/workspaces/${wsA}/modules`, `/workspaces/${wsA}/assets`]) {
+      for (const url of [`/workspaces/${wsA}/customers`, `/workspaces/${wsA}/catalog`, `/workspaces/${wsA}/members`, `/workspaces/${wsA}/modules`, `/workspaces/${wsA}/assets`, `/workspaces/${wsA}/prices`]) {
         await gotoAuthed(page, url, ownerEmail)
         const nav = page.getByRole('navigation', { name: 'Navigasi workspace' })
         await expect(nav).toBeVisible()
-        for (const name of ['Anggota', 'Fitur', 'Pelanggan', 'Barang', 'Unit']) {
+        for (const name of ['Anggota', 'Fitur', 'Pelanggan', 'Barang', 'Unit', 'Tarif']) {
           const box = await nav.getByRole('link', { name, exact: true }).boundingBox()
           expect(box, `tautan ${name} di ${width}px`).not.toBeNull()
           // R2: lebar DAN tinggi minimal 44px (Fitur sempat 29,75px lebar).
@@ -2287,6 +2331,1034 @@ test.describe.serial('alur pemilik', () => {
     await page.unrouteAll({ behavior: 'wait' })
   })
 
+  test('tarif: daftar kosong, buat 201, tampil + persist', async ({ page }) => {
+    wsPrices = await uiCreateWorkspace(page, `Toko Tarif ${RUN}`, ownerEmail)
+    const token = await apiToken(page.request, ownerEmail)
+    await seedItems(page.request, wsPrices, token, 1, 'TRF')
+    const item = await catalogItemBySku(page, wsPrices, 'TRF-1')
+    await gotoAuthed(page, `/workspaces/${wsPrices}/prices`, ownerEmail)
+    await expect(page.getByRole('heading', { name: 'Tarif', exact: true })).toBeVisible()
+    // Tanpa pilihan barang: ajakan memilih, bukan riwayat kosong.
+    await expect(page.getByText('Pilih barang dulu untuk melihat tarif.')).toBeVisible()
+    await expect(page.getByText('Belum ada tarif.')).toHaveCount(0)
+    await page.getByLabel('Barang').selectOption(item.id)
+    await expect(page.getByText('Belum ada tarif.')).toBeVisible()
+    await page.getByLabel('Mulai (UTC)').fill('2032-01-01T00:00')
+    await page.getByLabel('Berakhir (UTC)').fill('2032-02-01T00:00')
+    await page.getByLabel('Nilai tarif (unit tersimpan)').fill('150000')
+    await page.getByLabel('Mata uang').fill('IDR')
+    await page.getByRole('button', { name: 'Simpan tarif' }).click()
+    await expect(page.getByRole('heading', { name: 'Tarif tersimpan' })).toBeVisible()
+    expect(await page.evaluate(() => document.activeElement?.id)).toBe('saved-heading')
+    await expect(listItems(page)).toHaveCount(1)
+    await expect(listItems(page).first()).toContainText('150000 unit tarif · IDR')
+    await expect(listItems(page).first()).toContainText('2032-01-01T00:00:00Z')
+    await expect(listItems(page).first()).toContainText('2032-02-01T00:00:00Z')
+    await gotoAuthed(page, `/workspaces/${wsPrices}/prices`, ownerEmail)
+    await page.getByLabel('Barang').selectOption(item.id)
+    await expect(listItems(page)).toHaveCount(1)
+    const rows = await listPriceRows(page, wsPrices, item.id)
+    expect(rows.length).toBe(1)
+    expect(rows[0].price_list_id).toBe('standard')
+    expect(rows[0].amount_minor).toBe('150000')
+    expect(rows[0].currency).toBe('IDR')
+    expect(rows[0].valid_from).toBe('2032-01-01T00:00:00Z')
+    expect(rows[0].valid_to).toBe('2032-02-01T00:00:00Z')
+    expect(rows[0].client_request_id).not.toBe('')
+  })
+
+  test('tarif: validasi 400 per-field + batas amount/currency', async ({ page, request }) => {
+    const item = await catalogItemBySku(page, wsPrices, 'TRF-1')
+    await gotoAuthed(page, `/workspaces/${wsPrices}/prices`, ownerEmail)
+    await page.getByRole('button', { name: 'Simpan tarif' }).click()
+    await expect(page.locator('#price-item-error')).toContainText('Pilih barang dulu')
+    expect(await page.evaluate(() => document.activeElement?.id)).toBe('price-item')
+    await page.getByLabel('Barang').selectOption(item.id)
+    // Jumlah: kosong, nol di depan, negatif, pecahan, eksponen, spasi.
+    await page.getByRole('button', { name: 'Simpan tarif' }).click()
+    await expect(page.locator('#price-amount-error')).toContainText('wajib diisi')
+    for (const bad of ['01', '-5', '1.5', '1e3', ' 150']) {
+      await page.getByLabel('Nilai tarif (unit tersimpan)').fill(bad)
+      await page.getByRole('button', { name: 'Simpan tarif' }).click()
+      await expect(page.locator('#price-amount-error')).toContainText('bilangan bulat')
+    }
+    await page.getByLabel('Nilai tarif (unit tersimpan)').fill('9223372036854775808')
+    await page.getByRole('button', { name: 'Simpan tarif' }).click()
+    await expect(page.locator('#price-amount-error')).toContainText('paling besar')
+    // Mata uang: huruf kecil, terlalu pendek/panjang.
+    await page.getByLabel('Nilai tarif (unit tersimpan)').fill('150000')
+    for (const bad of ['idr', 'ID', 'IDRR']) {
+      await page.getByLabel('Mata uang').fill(bad)
+      await page.getByRole('button', { name: 'Simpan tarif' }).click()
+      await expect(page.locator('#price-currency-error')).toContainText('3 huruf kapital')
+    }
+    await page.getByLabel('Mata uang').fill('IDR')
+    // Waktu: akhir sebelum awal, akhir sama dengan awal.
+    await page.getByLabel('Mulai (UTC)').fill('2032-03-01T00:00')
+    await page.getByLabel('Berakhir (UTC)').fill('2032-02-01T00:00')
+    await page.getByRole('button', { name: 'Simpan tarif' }).click()
+    await expect(page.locator('#price-to-error')).toContainText('sesudah tanggal mulai')
+    await page.getByLabel('Berakhir (UTC)').fill('2032-03-01T00:00')
+    await page.getByRole('button', { name: 'Simpan tarif' }).click()
+    await expect(page.locator('#price-to-error')).toContainText('sesudah tanggal mulai')
+    // Koreksi menjadi valid: 201.
+    await page.getByLabel('Berakhir (UTC)').fill('2032-04-01T00:00')
+    await page.getByRole('button', { name: 'Simpan tarif' }).click()
+    await expect(page.getByRole('heading', { name: 'Tarif tersimpan' })).toBeVisible()
+    // Server menolak langsung (bukan lewat UI): overflow, angka JSON,
+    // mata uang huruf kecil — masing-masing 400.
+    const token = await apiToken(request, ownerEmail)
+    const badAmount = await request.post(`/api/workspaces/${wsPrices}/catalog/items/${item.id}/prices`, {
+      headers: { Authorization: `Bearer ${token}`, 'Idempotency-Key': randomUUID() },
+      data: { valid_from: '2032-05-01T00:00:00Z', valid_to: '2032-06-01T00:00:00Z', amount_minor: '9223372036854775808', currency: 'IDR' }
+    })
+    expect(badAmount.status()).toBe(400)
+    const jsonNumber = await request.post(`/api/workspaces/${wsPrices}/catalog/items/${item.id}/prices`, {
+      headers: { Authorization: `Bearer ${token}`, 'Idempotency-Key': randomUUID(), 'Content-Type': 'application/json' },
+      data: '{"valid_from":"2032-05-01T00:00:00Z","valid_to":"2032-06-01T00:00:00Z","amount_minor":150,"currency":"IDR"}'
+    })
+    expect(jsonNumber.status()).toBe(400)
+    const lowerCurrency = await request.post(`/api/workspaces/${wsPrices}/catalog/items/${item.id}/prices`, {
+      headers: { Authorization: `Bearer ${token}`, 'Idempotency-Key': randomUUID() },
+      data: { valid_from: '2032-05-01T00:00:00Z', valid_to: '2032-06-01T00:00:00Z', amount_minor: '150', currency: 'idr' }
+    })
+    expect(lowerCurrency.status()).toBe(400)
+    // Nilai di atas 2^53 tetap eksak sebagai string lewat API.
+    const big = await request.post(`/api/workspaces/${wsPrices}/catalog/items/${item.id}/prices`, {
+      headers: { Authorization: `Bearer ${token}`, 'Idempotency-Key': randomUUID() },
+      data: { valid_from: '2032-05-01T00:00:00Z', valid_to: '2032-06-01T00:00:00Z', amount_minor: '9007199254740993', currency: 'IDR' }
+    })
+    expect(big.status()).toBe(201)
+    expect(((await big.json()) as { amount_minor: string }).amount_minor).toBe('9007199254740993')
+  })
+
+  test('tarif: UTC + presisi — zona browser, tahun, menit, riwayat submenit', async ({ page, request }) => {
+    const item = await catalogItemBySku(page, wsPrices, 'TRF-1')
+    // Zona browser di VM ini bukan UTC; nilai yang dikirim harus tetap
+    // UTC persis seperti yang dimasukkan (tanpa geser zona lokal).
+    const zone = await page.evaluate(() => Intl.DateTimeFormat().resolvedOptions().timeZone)
+    expect(zone).not.toBe('UTC')
+    await gotoAuthed(page, `/workspaces/${wsPrices}/prices`, ownerEmail)
+    await page.getByLabel('Barang').selectOption(item.id)
+    await page.getByLabel('Mulai (UTC)').fill('2033-03-15T10:30')
+    await page.getByLabel('Berakhir (UTC)').fill('2033-04-15T10:30')
+    await page.getByLabel('Nilai tarif (unit tersimpan)').fill('250000')
+    await page.getByLabel('Mata uang').fill('IDR')
+    await page.getByRole('button', { name: 'Simpan tarif' }).click()
+    await expect(page.getByRole('heading', { name: 'Tarif tersimpan' })).toBeVisible()
+    const rows = await listPriceRows(page, wsPrices, item.id)
+    const row = rows.find(r => r.amount_minor === '250000')
+    expect(row?.valid_from).toBe('2033-03-15T10:30:00Z')
+    expect(row?.valid_to).toBe('2033-04-15T10:30:00Z')
+    // Tahun 9999 diterima; tahun kecil yang sudah lewat ditolak server
+    // tanpa clamp (isian dipertahankan, bukan digeser).
+    await page.getByLabel('Mulai (UTC)').fill('9999-01-01T00:00')
+    await page.getByLabel('Berakhir (UTC)').fill('9999-02-01T00:00')
+    await page.getByLabel('Nilai tarif (unit tersimpan)').fill('1')
+    await page.getByRole('button', { name: 'Simpan tarif' }).click()
+    await expect(page.getByRole('heading', { name: 'Tarif tersimpan' })).toBeVisible()
+    await page.getByLabel('Mulai (UTC)').fill('0026-01-01T00:00')
+    await page.getByLabel('Berakhir (UTC)').fill('0026-02-01T00:00')
+    await page.getByLabel('Nilai tarif (unit tersimpan)').fill('1')
+    await page.getByRole('button', { name: 'Simpan tarif' }).click()
+    await expect(page.locator('#price-from-error')).toContainText('tidak boleh di masa lalu')
+    expect(await page.getByLabel('Mulai (UTC)').inputValue()).toBe('0026-01-01T00:00')
+    // Detik dalam nilai mentah ditolak, bukan dipotong diam-diam: set
+    // lewat JS lalu kirim — tidak ada POST, ada galat field.
+    let posts = 0
+    await page.route((url) => url.pathname.endsWith('/prices'), async (route) => {
+      if (route.request().method() === 'POST') posts++
+      await route.continue()
+    })
+    await page.evaluate(() => {
+      const el = document.getElementById('price-from') as HTMLInputElement
+      el.value = '2033-05-01T00:00:30'
+      el.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    await page.getByLabel('Berakhir (UTC)').fill('2033-06-01T00:00')
+    await page.getByLabel('Nilai tarif (unit tersimpan)').fill('1')
+    await page.getByRole('button', { name: 'Simpan tarif' }).click()
+    await expect(page.locator('#price-from-error')).toBeVisible()
+    expect(posts).toBe(0)
+    await page.unrouteAll({ behavior: 'wait' })
+    // Riwayat submenit dari API: tampil persis, tidak dibulatkan ke menit.
+    const token = await apiToken(request, ownerEmail)
+    const sub = await request.post(`/api/workspaces/${wsPrices}/catalog/items/${item.id}/prices`, {
+      headers: { Authorization: `Bearer ${token}`, 'Idempotency-Key': randomUUID() },
+      data: { valid_from: '2033-06-01T10:30:45.123456Z', valid_to: '2033-07-01T10:30:45.123456Z', amount_minor: '777', currency: 'IDR' }
+    })
+    expect(sub.status()).toBe(201)
+    await gotoAuthed(page, `/workspaces/${wsPrices}/prices`, ownerEmail)
+    await page.getByLabel('Barang').selectOption(item.id)
+    await expect(listItems(page).filter({ hasText: '777 unit tarif' }).first()).toContainText('2033-06-01T10:30:45.123456Z')
+    await expect(listItems(page).filter({ hasText: '777 unit tarif' }).first()).toContainText('2033-07-01T10:30:45.123456Z')
+  })
+
+  test('tarif: adjacency 201 + overlap 409 + no-backdate 400 tanpa clamp', async ({ page }) => {
+    const item = await catalogItemBySku(page, wsPrices, 'TRF-1')
+    const before = (await listPriceRows(page, wsPrices, item.id)).length
+    await gotoAuthed(page, `/workspaces/${wsPrices}/prices`, ownerEmail)
+    await page.getByLabel('Barang').selectOption(item.id)
+    const create = async (from: string, to: string, amount: string) => {
+      await page.getByLabel('Mulai (UTC)').fill(from)
+      await page.getByLabel('Berakhir (UTC)').fill(to)
+      await page.getByLabel('Nilai tarif (unit tersimpan)').fill(amount)
+      await page.getByLabel('Mata uang').fill('IDR')
+      await page.getByRole('button', { name: 'Simpan tarif' }).click()
+    }
+    await create('2035-01-01T00:00', '2035-02-01T00:00', '100')
+    await expect(page.getByRole('heading', { name: 'Tarif tersimpan' })).toBeVisible()
+    // Berdampingan persis di ujung interval lama: legal, 201.
+    await create('2035-02-01T00:00', '2035-03-01T00:00', '200')
+    await expect(page.getByRole('heading', { name: 'Tarif tersimpan' })).toBeVisible()
+    // Tumpang tindih: 409 interval, isian dipertahankan, tanpa baris baru.
+    await create('2035-01-15T00:00', '2035-03-01T00:00', '300')
+    await expect(page.getByRole('alert')).toContainText('interval harga bertabrakan')
+    expect(await page.getByLabel('Nilai tarif (unit tersimpan)').inputValue()).toBe('300')
+    expect((await listPriceRows(page, wsPrices, item.id)).length).toBe(before + 2)
+    // Masa lalu: 400 tanpa clamp — nilai tidak digeser ke masa kini.
+    await create('2020-01-01T00:00', '2020-02-01T00:00', '400')
+    await expect(page.locator('#price-from-error')).toContainText('tidak boleh di masa lalu')
+    expect(await page.getByLabel('Mulai (UTC)').inputValue()).toBe('2020-01-01T00:00')
+    expect((await listPriceRows(page, wsPrices, item.id)).length).toBe(before + 2)
+  })
+
+  test('tarif: tulis-terkomit/respons-hilang — kirim lagi kunci sama 200, tanpa tulis kedua', async ({ page }) => {
+    const item = await catalogItemBySku(page, wsPrices, 'TRF-1')
+    const before = await listPriceRows(page, wsPrices, item.id)
+    await uiLogin(page, ownerEmail)
+    await gotoAuthed(page, `/workspaces/${wsPrices}/prices`, ownerEmail)
+    let postAttempts = 0
+    await page.route(
+      (url) => url.pathname.startsWith('/api/'),
+      async (route) => {
+        const u = new URL(route.request().url())
+        if (route.request().method() === 'POST' && u.pathname.endsWith('/prices')) {
+          postAttempts++
+          if (postAttempts === 1) {
+            // Tulis sungguhan sampai ke API nyata lalu responsnya hilang
+            // (injeksi kegagalan browser-mocked, bukan bukti database/RLS).
+            await route.fetch()
+            await route.abort()
+            return
+          }
+        }
+        await route.continue()
+      }
+    )
+    await page.getByLabel('Barang').selectOption(item.id)
+    await page.getByLabel('Mulai (UTC)').fill('2036-01-01T00:00')
+    await page.getByLabel('Berakhir (UTC)').fill('2036-02-01T00:00')
+    await page.getByLabel('Nilai tarif (unit tersimpan)').fill('500')
+    await page.getByLabel('Mata uang').fill('IDR')
+    await page.getByRole('button', { name: 'Simpan tarif' }).click()
+    await expect(page.getByRole('heading', { name: 'Hasil penyimpanan tidak diketahui' })).toBeVisible()
+    await expect(page.getByRole('alert')).toContainText('mungkin sudah tersimpan')
+    // Isian + ringkasan beku dipertahankan; field/picker terkunci.
+    await expect(page.getByLabel('Nilai tarif (unit tersimpan)')).toHaveValue('500')
+    await expect(page.getByLabel('Nilai tarif (unit tersimpan)')).toBeDisabled()
+    await expect(page.getByLabel('Barang')).toBeDisabled()
+    await expect(page.getByRole('button', { name: 'Simpan tarif' })).toBeDisabled()
+    await expect(page.getByRole('button', { name: 'Kirim lagi (permintaan sama)' })).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Mulai jadwal baru' })).toBeVisible()
+    // Tulis pertama SUDAH terkomit di server meski responsnya hilang.
+    const committed = await listPriceRows(page, wsPrices, item.id)
+    expect(committed.length).toBe(before.length + 1)
+    const committedRow = committed.find(r => r.amount_minor === '500')
+    expect(committedRow).toBeDefined()
+    // Enter dan submit biasa tidak mengirim ulang.
+    await page.getByLabel('Mata uang').focus()
+    await page.keyboard.press('Enter')
+    await page.waitForTimeout(500)
+    expect(postAttempts).toBe(1)
+    await page.evaluate(() => {
+      document.querySelector('form')?.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
+    })
+    await page.waitForTimeout(500)
+    expect(postAttempts).toBe(1)
+    // GET-only refresh membuktikan baris ada tanpa POST baru.
+    await page.locator('section[aria-labelledby="add-heading"]').getByRole('button', { name: 'Muat ulang daftar' }).click()
+    await expect(listItems(page).filter({ hasText: '500 unit tarif' })).toHaveCount(1)
+    expect(postAttempts).toBe(1)
+    // Kirim lagi dengan kunci SAMA: replay 200 mengonfirmasi baris yang
+    // sama, tanpa tulis kedua.
+    await page.getByRole('button', { name: 'Kirim lagi (permintaan sama)' }).click()
+    await expect(page.getByRole('heading', { name: 'Tarif tersimpan' })).toBeVisible()
+    expect(postAttempts).toBe(2)
+    const after = await listPriceRows(page, wsPrices, item.id)
+    expect(after.length).toBe(before.length + 1)
+    expect(after.find(r => r.amount_minor === '500')?.id).toBe(committedRow!.id)
+    await page.unrouteAll({ behavior: 'wait' })
+  })
+
+  test('tarif: 200/202 dan 201 cacat bukan sukses', async ({ page }) => {
+    const item = await catalogItemBySku(page, wsPrices, 'TRF-1')
+    const before = (await listPriceRows(page, wsPrices, item.id)).length
+    await uiLogin(page, ownerEmail)
+    await gotoAuthed(page, `/workspaces/${wsPrices}/prices`, ownerEmail)
+    const goodRow = {
+      id: '00000000-0000-4000-8000-000000000001',
+      workspace_id: wsPrices,
+      catalog_item_id: item.id,
+      price_list_id: 'standard',
+      client_request_id: 'kunci-yang-benar',
+      valid_from: '2037-01-01T00:00:00Z',
+      valid_to: '2037-02-01T00:00:00Z',
+      amount_minor: '600',
+      currency: 'IDR'
+    }
+    let attempt = 0
+    await page.route(
+      (url) => url.pathname.startsWith('/api/'),
+      async (route) => {
+        const u = new URL(route.request().url())
+        if (route.request().method() === 'POST' && u.pathname.endsWith('/prices')) {
+          attempt++
+          if (attempt === 1) {
+            // 200 dengan kunci yang salah: bukan konfirmasi.
+            await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ ...goodRow, client_request_id: 'kunci-salah' }) })
+            return
+          }
+          if (attempt === 2) {
+            // 202 bukan sukses.
+            await route.fulfill({ status: 202, contentType: 'application/json', body: JSON.stringify(goodRow) })
+            return
+          }
+          if (attempt === 3) {
+            // 201 dengan jumlah berbeda: bukan konfirmasi.
+            await route.fulfill({ status: 201, contentType: 'application/json', body: JSON.stringify({ ...goodRow, amount_minor: '999' }) })
+            return
+          }
+        }
+        await route.continue()
+      }
+    )
+    await page.getByLabel('Barang').selectOption(item.id)
+    await page.getByLabel('Mulai (UTC)').fill('2037-01-01T00:00')
+    await page.getByLabel('Berakhir (UTC)').fill('2037-02-01T00:00')
+    await page.getByLabel('Nilai tarif (unit tersimpan)').fill('600')
+    await page.getByLabel('Mata uang').fill('IDR')
+    for (let i = 1; i <= 3; i++) {
+      await page.getByRole('button', { name: 'Simpan tarif' }).click()
+      await expect(page.getByRole('heading', { name: 'Hasil penyimpanan tidak diketahui' })).toBeVisible()
+      await expect(page.getByRole('heading', { name: 'Tarif tersimpan' })).toHaveCount(0)
+      expect((await listPriceRows(page, wsPrices, item.id)).length).toBe(before)
+      // Aksi baru menebus snapshot yang dicurigai; kiriman berikutnya
+      // memakai kunci baru.
+      await page.getByRole('button', { name: 'Mulai jadwal baru' }).click()
+      await expect(page.getByLabel('Nilai tarif (unit tersimpan)')).toBeEnabled()
+    }
+    // Percobaan keempat sampai ke API nyata: 201 sungguhan.
+    await page.getByRole('button', { name: 'Simpan tarif' }).click()
+    await expect(page.getByRole('heading', { name: 'Tarif tersimpan' })).toBeVisible()
+    expect(attempt).toBe(4)
+    expect((await listPriceRows(page, wsPrices, item.id)).length).toBe(before + 1)
+    await page.unrouteAll({ behavior: 'wait' })
+  })
+
+  test('tarif: kunci salah 409 — hanya Mulai jadwal baru yang menebus', async ({ page }) => {
+    const item = await catalogItemBySku(page, wsPrices, 'TRF-1')
+    const before = (await listPriceRows(page, wsPrices, item.id)).length
+    await uiLogin(page, ownerEmail)
+    await gotoAuthed(page, `/workspaces/${wsPrices}/prices`, ownerEmail)
+    await page.route(
+      (url) => url.pathname.startsWith('/api/'),
+      async (route) => {
+        const u = new URL(route.request().url())
+        if (route.request().method() === 'POST' && u.pathname.endsWith('/prices')) {
+          await route.fulfill({ status: 409, contentType: 'application/json', body: JSON.stringify({ error: 'kunci idempotency sudah dipakai untuk permintaan yang berbeda' }) })
+          return
+        }
+        await route.continue()
+      }
+    )
+    await page.getByLabel('Barang').selectOption(item.id)
+    await page.getByLabel('Mulai (UTC)').fill('2038-01-01T00:00')
+    await page.getByLabel('Berakhir (UTC)').fill('2038-02-01T00:00')
+    await page.getByLabel('Nilai tarif (unit tersimpan)').fill('700')
+    await page.getByLabel('Mata uang').fill('IDR')
+    await page.getByRole('button', { name: 'Simpan tarif' }).click()
+    await expect(page.getByRole('alert')).toContainText('kunci idempotency sudah dipakai untuk permintaan yang berbeda')
+    await expect(page.getByRole('heading', { name: 'Tarif tersimpan' })).toHaveCount(0)
+    // Kunci tercemar: tidak ada kirim-ulang buta; hanya aksi baru.
+    await expect(page.getByRole('button', { name: 'Kirim lagi (permintaan sama)' })).toHaveCount(0)
+    await expect(page.getByRole('button', { name: 'Simpan tarif' })).toBeDisabled()
+    expect((await listPriceRows(page, wsPrices, item.id)).length).toBe(before)
+    await page.unrouteAll({ behavior: 'wait' })
+    await page.getByRole('button', { name: 'Mulai jadwal baru' }).click()
+    await expect(page.getByLabel('Nilai tarif (unit tersimpan)')).toBeEnabled()
+    await page.getByRole('button', { name: 'Simpan tarif' }).click()
+    await expect(page.getByRole('heading', { name: 'Tarif tersimpan' })).toBeVisible()
+    expect((await listPriceRows(page, wsPrices, item.id)).length).toBe(before + 1)
+  })
+
+  test('tarif: Mulai jadwal baru membatalkan pemulihan; jadwal lama tetap ada', async ({ page }) => {
+    const item = await catalogItemBySku(page, wsPrices, 'TRF-1')
+    const before = (await listPriceRows(page, wsPrices, item.id)).length
+    await uiLogin(page, ownerEmail)
+    await gotoAuthed(page, `/workspaces/${wsPrices}/prices`, ownerEmail)
+    let postAttempts = 0
+    await page.route(
+      (url) => url.pathname.startsWith('/api/'),
+      async (route) => {
+        const u = new URL(route.request().url())
+        if (route.request().method() === 'POST' && u.pathname.endsWith('/prices')) {
+          postAttempts++
+          if (postAttempts === 1) {
+            await route.fetch()
+            await route.abort()
+            return
+          }
+        }
+        await route.continue()
+      }
+    )
+    await page.getByLabel('Barang').selectOption(item.id)
+    await page.getByLabel('Mulai (UTC)').fill('2039-01-01T00:00')
+    await page.getByLabel('Berakhir (UTC)').fill('2039-02-01T00:00')
+    await page.getByLabel('Nilai tarif (unit tersimpan)').fill('800')
+    await page.getByLabel('Mata uang').fill('IDR')
+    await page.getByRole('button', { name: 'Simpan tarif' }).click()
+    await expect(page.getByRole('heading', { name: 'Hasil penyimpanan tidak diketahui' })).toBeVisible()
+    // Peringatan aksi baru terlihat sebelum diklik: jadwal lama mungkin
+    // sudah tersimpan dan tidak dibatalkan.
+    await expect(page.getByText('mungkin sudah tersimpan dan tidak dibatalkan')).toBeVisible()
+    await page.getByRole('button', { name: 'Mulai jadwal baru' }).click()
+    await expect(page.getByLabel('Nilai tarif (unit tersimpan)')).toBeEnabled()
+    expect(postAttempts).toBe(1)
+    // Jadwal lain (interval berbeda) dengan kunci baru: 201.
+    await page.getByLabel('Mulai (UTC)').fill('2039-03-01T00:00')
+    await page.getByLabel('Berakhir (UTC)').fill('2039-04-01T00:00')
+    await page.getByLabel('Nilai tarif (unit tersimpan)').fill('801')
+    await page.getByRole('button', { name: 'Simpan tarif' }).click()
+    await expect(page.getByRole('heading', { name: 'Tarif tersimpan' })).toBeVisible()
+    const rows = await listPriceRows(page, wsPrices, item.id)
+    expect(rows.length).toBe(before + 2)
+    expect(rows.some(r => r.amount_minor === '800')).toBe(true)
+    expect(rows.some(r => r.amount_minor === '801')).toBe(true)
+    await page.unrouteAll({ behavior: 'wait' })
+  })
+
+  test('tarif: barang arsip dipilih untuk riwayat; jadwal baru diblokir; pemulihan kunci-sama tetap jalan', async ({ page }) => {
+    const token = await apiToken(page.request, ownerEmail)
+    await seedItems(page.request, wsPrices, token, 1, 'ARS-T')
+    const ars = await catalogItemBySku(page, wsPrices, 'ARS-T-1')
+    await gotoAuthed(page, `/workspaces/${wsPrices}/prices`, ownerEmail)
+    await page.getByLabel('Barang').selectOption(ars.id)
+    await page.getByLabel('Mulai (UTC)').fill('2045-01-01T00:00')
+    await page.getByLabel('Berakhir (UTC)').fill('2045-02-01T00:00')
+    await page.getByLabel('Nilai tarif (unit tersimpan)').fill('900')
+    await page.getByLabel('Mata uang').fill('IDR')
+    await page.getByRole('button', { name: 'Simpan tarif' }).click()
+    await expect(page.getByRole('heading', { name: 'Tarif tersimpan' })).toBeVisible()
+    psql(`UPDATE catalog_items SET status='archived' WHERE workspace_id='${wsPrices}' AND sku='ARS-T-1'`)
+    // Sesudah reload: arsip tetap ditawarkan untuk RIWAYAT.
+    await gotoAuthed(page, `/workspaces/${wsPrices}/prices`, ownerEmail)
+    const options = await page.getByLabel('Barang').locator('option').allTextContents()
+    expect(options.some(t => t.includes('ARS-T-1') && t.includes('(arsip — riwayat)')), 'item arsip harus ditawarkan untuk riwayat').toBe(true)
+    await page.getByLabel('Barang').selectOption(ars.id)
+    await expect(listItems(page)).toHaveCount(1)
+    await expect(page.getByText('Barang diarsipkan — riwayat tarif tetap dapat dibaca; jadwal baru tidak dapat dibuat.')).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Simpan tarif' })).toHaveCount(0)
+    // Pemulihan kunci-sama sesudah pengarsipan: replay 200, bukan 409.
+    await seedItems(page.request, wsPrices, token, 1, 'ARS-R')
+    const arsR = await catalogItemBySku(page, wsPrices, 'ARS-R-1')
+    // Katalog dimuat sekali per halaman: barang yang baru dibuat baru
+    // muncul di pemilih sesudah muat ulang halaman.
+    await gotoAuthed(page, `/workspaces/${wsPrices}/prices`, ownerEmail)
+    const beforeR = (await listPriceRows(page, wsPrices, arsR.id)).length
+    let postAttempts = 0
+    await page.route(
+      (url) => url.pathname.startsWith('/api/'),
+      async (route) => {
+        const u = new URL(route.request().url())
+        if (route.request().method() === 'POST' && u.pathname.endsWith('/prices')) {
+          postAttempts++
+          if (postAttempts === 1) {
+            await route.fetch()
+            await route.abort()
+            return
+          }
+        }
+        await route.continue()
+      }
+    )
+    await page.getByLabel('Barang').selectOption(arsR.id)
+    await page.getByLabel('Mulai (UTC)').fill('2045-03-01T00:00')
+    await page.getByLabel('Berakhir (UTC)').fill('2045-04-01T00:00')
+    await page.getByLabel('Nilai tarif (unit tersimpan)').fill('901')
+    await page.getByLabel('Mata uang').fill('IDR')
+    await page.getByRole('button', { name: 'Simpan tarif' }).click()
+    await expect(page.getByRole('heading', { name: 'Hasil penyimpanan tidak diketahui' })).toBeVisible()
+    psql(`UPDATE catalog_items SET status='archived' WHERE workspace_id='${wsPrices}' AND sku='ARS-R-1'`)
+    expect((await listPriceRows(page, wsPrices, arsR.id)).length).toBe(beforeR + 1)
+    // Panel pemulihan tetap terlihat meski barang kini diarsipkan.
+    await expect(page.getByRole('button', { name: 'Kirim lagi (permintaan sama)' })).toBeVisible()
+    await page.getByRole('button', { name: 'Kirim lagi (permintaan sama)' }).click()
+    await expect(page.getByRole('heading', { name: 'Tarif tersimpan' })).toBeVisible()
+    expect(postAttempts).toBe(2)
+    expect((await listPriceRows(page, wsPrices, arsR.id)).length).toBe(beforeR + 1)
+    await page.unrouteAll({ behavior: 'wait' })
+    // Percobaan BARU pada barang arsip tetap 409 'barang tidak aktif'.
+    await gotoAuthed(page, `/workspaces/${wsPrices}/prices`, ownerEmail)
+    await page.getByLabel('Barang').selectOption(ars.id)
+    await expect(page.getByRole('button', { name: 'Simpan tarif' })).toHaveCount(0)
+  })
+
+  test('tarif: kasir baca 200 + simpan 403, nonanggota 403, 401 lanjut ke prices', async ({ page }) => {
+    const item = await catalogItemBySku(page, wsPrices, 'TRF-1')
+    const code = await uiInvite(page, wsPrices, staff3Email, 'cashier', ownerEmail)
+    // staff3 sudah terdaftar pada tes undangan kedaluwarsa; langsung
+    // masuk dan terima undangan workspace ini.
+    await uiLogin(page, staff3Email)
+    await gotoAuthed(page, `/invites/accept?workspace_id=${wsPrices}`, staff3Email)
+    await page.getByLabel('Kode undangan').fill(code)
+    await page.locator('form button[type="submit"]').click()
+    await expect(page).toHaveURL(`/workspaces/${wsPrices}/members`)
+    await uiLogin(page, staff3Email)
+    await gotoAuthed(page, `/workspaces/${wsPrices}/prices`, staff3Email)
+    await page.getByLabel('Barang').selectOption(item.id)
+    await expect(listItems(page).first()).toBeVisible()
+    await page.getByLabel('Mulai (UTC)').fill('2046-01-01T00:00')
+    await page.getByLabel('Berakhir (UTC)').fill('2046-02-01T00:00')
+    await page.getByLabel('Nilai tarif (unit tersimpan)').fill('1100')
+    await page.getByLabel('Mata uang').fill('IDR')
+    await page.getByRole('button', { name: 'Simpan tarif' }).click()
+    await expect(page.getByRole('alert')).toContainText('tidak punya izin mengelola data usaha')
+    await expect(page.getByLabel('Nilai tarif (unit tersimpan)')).toHaveValue('1100')
+    await expect(listItems(page).first()).toBeVisible()
+    // Nonanggota: GET 403 menyembunyikan halaman, sesi dipertahankan.
+    await uiLogin(page, otherEmail)
+    await gotoAuthed(page, `/workspaces/${wsPrices}/prices`, otherEmail)
+    await expect(page.getByRole('alert')).toContainText('bukan anggota workspace ini')
+    // 401 menghapus sesi dan minta masuk lewat rute prices yang sama.
+    await uiLogin(page, ownerEmail)
+    await gotoAuthed(page, `/workspaces/${wsPrices}/prices`, ownerEmail)
+    psql(`DELETE FROM sessions WHERE subject_id = (SELECT id FROM identity_subjects WHERE email = '${ownerEmail}')`)
+    await page.getByRole('link', { name: 'Pelanggan' }).click()
+    await expect(page).toHaveURL(/\/login\?next=/)
+    await page.getByLabel('Email').fill(ownerEmail)
+    await page.getByLabel('Kata sandi').fill(PASSWORD)
+    await page.locator('form button[type="submit"]').click()
+    await expect(page).toHaveURL(`/workspaces/${wsPrices}/customers`)
+    // Lanjut login langsung ke prices (resolveLoginTarget 'prices').
+    await page.getByRole('link', { name: 'Tarif' }).click()
+    await expect(page).toHaveURL(`/workspaces/${wsPrices}/prices`)
+    await page.reload()
+    await expect(page).toHaveURL(/\/login\?next=/)
+    await page.getByLabel('Email').fill(ownerEmail)
+    await page.getByLabel('Kata sandi').fill(PASSWORD)
+    await page.locator('form button[type="submit"]').click()
+    await expect(page).toHaveURL(`/workspaces/${wsPrices}/prices`)
+  })
+
+  test('tarif: respons basi lintas barang/workspace/sesi tidak menyentuh halaman pengganti', async ({ page }) => {
+    const token = await apiToken(page.request, ownerEmail)
+    await seedItems(page.request, wsPrices, token, 1, 'BAS')
+    const bas = await catalogItemBySku(page, wsPrices, 'BAS-1')
+    const trf = await catalogItemBySku(page, wsPrices, 'TRF-1')
+    await uiLogin(page, ownerEmail)
+    await gotoAuthed(page, `/workspaces/${wsPrices}/prices`, ownerEmail)
+    // GET riwayat barang pertama ditahan; pindah pilihan barang sebelum
+    // respons tiba — respons basi tidak boleh mengisi daftar barang kedua.
+    let releaseFirst!: () => void
+    const firstHeld = new Promise<void>((resolve) => { releaseFirst = resolve })
+    await page.route(
+      (url) => url.pathname.startsWith('/api/'),
+      async (route) => {
+        const u = new URL(route.request().url())
+        if (route.request().method() === 'GET' && u.pathname.endsWith('/prices') && u.searchParams.get('offset') === null) {
+          await firstHeld
+        }
+        await route.continue()
+      }
+    )
+    await page.getByLabel('Barang').selectOption(trf.id)
+    await page.waitForTimeout(300)
+    await page.getByLabel('Barang').selectOption(bas.id)
+    // GET barang kedua masih tertunda: daftar menunjukkan status muat,
+    // bukan klaim kosong palsu dan bukan baris barang pertama.
+    await expect(page.getByText('Memuat daftar…')).toBeVisible()
+    releaseFirst()
+    await page.waitForTimeout(300)
+    // Respons basi barang pertama dibuang; GET barang kedua (0 baris)
+    // yang mengisi daftar — kini benar-benar kosong.
+    await expect(page.getByText('Belum ada tarif.')).toBeVisible()
+    await page.unrouteAll({ behavior: 'wait' })
+    // GET awal basi sesudah pindah workspace: tidak mulai GET katalog
+    // untuk workspace lama dan tidak menyentuh sesi pengganti.
+    await page.route(
+      (url) => url.pathname.startsWith('/api/'),
+      async (route) => {
+        const u = new URL(route.request().url())
+        if (route.request().method() === 'GET' && u.pathname.includes('/catalog/items') && !u.searchParams.has('offset')) {
+          await new Promise(r => setTimeout(r, 1500))
+        }
+        await route.continue()
+      }
+    )
+    await gotoAuthed(page, `/workspaces/${wsPrices}/prices`, ownerEmail)
+    await page.getByRole('link', { name: 'Anggota' }).click()
+    await expect(page).toHaveURL(`/workspaces/${wsPrices}/members`)
+    await expect(page.getByRole('heading', { name: 'Anggota', exact: true })).toBeVisible()
+    await page.unrouteAll({ behavior: 'wait' })
+  })
+
+  test('tarif: 51 baris riwayat + simpan dan replay reset ke halaman 1 + muat semua', async ({ page }) => {
+    const token = await apiToken(page.request, ownerEmail)
+    await seedItems(page.request, wsPrices, token, 1, 'TRF-51')
+    const item = await catalogItemBySku(page, wsPrices, 'TRF-51-1')
+    await seedPrices(page.request, wsPrices, token, item.id, 51)
+    await gotoAuthed(page, `/workspaces/${wsPrices}/prices`, ownerEmail)
+    await page.getByLabel('Barang').selectOption(item.id)
+    await expect(listItems(page)).toHaveCount(50)
+    await expect(listItems(page).first()).toContainText('2040-01-01T00:00:00Z')
+    await page.getByRole('button', { name: 'Muat lebih', exact: true }).click()
+    await expect(listItems(page)).toHaveCount(51)
+    const ids = await page.evaluate(() => Array.from(document.querySelectorAll('section[aria-labelledby="list-heading"] li')).map(li => li.textContent))
+    expect(new Set(ids).size).toBe(51)
+    // Simpan baru mereset ke halaman 1; baris tersimpan tampil di
+    // wilayah tersimpan, daftar menunjukkan 50 pertama tanpa duplikat.
+    await page.getByLabel('Mulai (UTC)').fill('2044-04-01T00:00')
+    await page.getByLabel('Berakhir (UTC)').fill('2044-05-01T00:00')
+    await page.getByLabel('Nilai tarif (unit tersimpan)').fill('5151')
+    await page.getByLabel('Mata uang').fill('IDR')
+    await page.getByRole('button', { name: 'Simpan tarif' }).click()
+    await expect(page.getByRole('heading', { name: 'Tarif tersimpan' })).toBeVisible()
+    await expect(listItems(page)).toHaveCount(50)
+    await expect(listItems(page).first()).toContainText('2040-01-01T00:00:00Z')
+    await page.getByRole('button', { name: 'Muat lebih', exact: true }).click()
+    await expect(listItems(page)).toHaveCount(52)
+    // Replay sesudah tulis tak diketahui juga mereset ke halaman 1.
+    let postAttempts = 0
+    await page.route(
+      (url) => url.pathname.startsWith('/api/'),
+      async (route) => {
+        const u = new URL(route.request().url())
+        if (route.request().method() === 'POST' && u.pathname.endsWith('/prices')) {
+          postAttempts++
+          if (postAttempts === 1) {
+            await route.fetch()
+            await route.abort()
+            return
+          }
+        }
+        await route.continue()
+      }
+    )
+    await page.getByLabel('Mulai (UTC)').fill('2044-05-01T00:00')
+    await page.getByLabel('Berakhir (UTC)').fill('2044-06-01T00:00')
+    await page.getByLabel('Nilai tarif (unit tersimpan)').fill('5152')
+    await page.getByLabel('Mata uang').fill('IDR')
+    await page.getByRole('button', { name: 'Simpan tarif' }).click()
+    await expect(page.getByRole('heading', { name: 'Hasil penyimpanan tidak diketahui' })).toBeVisible()
+    await page.getByRole('button', { name: 'Kirim lagi (permintaan sama)' }).click()
+    await expect(page.getByRole('heading', { name: 'Tarif tersimpan' })).toBeVisible()
+    expect(postAttempts).toBe(2)
+    await expect(listItems(page)).toHaveCount(50)
+    await page.getByRole('button', { name: 'Muat lebih', exact: true }).click()
+    await expect(listItems(page)).toHaveCount(53)
+    await page.unrouteAll({ behavior: 'wait' })
+  })
+
+  test('tarif: katalog 101 barang — halaman 2, jumlah mentah termasuk arsip, pilihan stabil, retry galat, tanpa N+1', async ({ page }) => {
+    const wsCatT = await uiCreateWorkspace(page, `Toko Katalog Tarif ${RUN}`, ownerEmail)
+    const token = await apiToken(page.request, ownerEmail)
+    await seedItems(page.request, wsCatT, token, 101, 'KTT')
+    psql(`UPDATE catalog_items SET status='archived' WHERE workspace_id='${wsCatT}' AND sku='KTT-50'`)
+    await uiLogin(page, ownerEmail)
+    let catalogGets = 0
+    let failNext = false
+    await page.route(
+      (url) => url.pathname.startsWith('/api/'),
+      async (route) => {
+        const u = new URL(route.request().url())
+        if (route.request().method() === 'GET' && u.pathname.includes('/catalog/items')) {
+          catalogGets++
+          if (failNext && u.searchParams.get('offset') === '100') {
+            failNext = false
+            await route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: 'gagal' }) })
+            return
+          }
+        }
+        await route.continue()
+      }
+    )
+    await gotoAuthed(page, `/workspaces/${wsCatT}/prices`, ownerEmail)
+    await expect(page.getByLabel('Barang').locator('option')).toHaveCount(101)
+    await expect(page.getByText('100 barang dimuat sejauh ini')).toBeVisible()
+    expect(catalogGets).toBe(1)
+    // Halaman kedua gagal sekali: pilihan/kursor dipertahankan, tanpa
+    // rantai otomatis; retry memakai offset yang sama.
+    failNext = true
+    await page.getByRole('button', { name: 'Muat lebih banyak barang' }).click()
+    await expect(page.getByRole('alert')).toContainText('gagal')
+    await expect(page.getByLabel('Barang').locator('option')).toHaveCount(101)
+    expect(catalogGets).toBe(2)
+    await page.getByRole('button', { name: 'Muat lebih banyak barang' }).click()
+    await expect(page.getByLabel('Barang').locator('option')).toHaveCount(102)
+    expect(catalogGets).toBe(3)
+    await expect(page.getByText('barang dimuat sejauh ini')).toHaveCount(0)
+    // Arsip di halaman pertama berlabel riwayat dan tetap bisa dipilih;
+    // barang halaman kedua juga bisa dipilih.
+    const options = await page.getByLabel('Barang').locator('option').allTextContents()
+    expect(options.some(t => t.includes('KTT-50') && t.includes('(arsip — riwayat)'))).toBe(true)
+    const item101 = await catalogItemBySku(page, wsCatT, 'KTT-101')
+    await page.getByLabel('Barang').selectOption(item101.id)
+    expect(await page.getByLabel('Barang').inputValue()).toBe(item101.id)
+    await expect(page.getByText('Belum ada tarif.')).toBeVisible()
+    const item50 = await catalogItemBySku(page, wsCatT, 'KTT-50')
+    await page.getByLabel('Barang').selectOption(item50.id)
+    await expect(page.getByText('Barang diarsipkan — riwayat tarif tetap dapat dibaca; jadwal baru tidak dapat dibuat.')).toBeVisible()
+    await page.unrouteAll({ behavior: 'wait' })
+  })
+
+  test('tarif: pending/error/kosong + retry GET-only', async ({ page }) => {
+    const wsEmpty = await uiCreateWorkspace(page, `Toko Tarif Kosong ${RUN}`, ownerEmail)
+    const token = await apiToken(page.request, ownerEmail)
+    await seedItems(page.request, wsEmpty, token, 1, 'EMP-T')
+    const item = await catalogItemBySku(page, wsEmpty, 'EMP-T-1')
+    await uiLogin(page, ownerEmail)
+    let holdGets!: () => void
+    const held = new Promise<void>((resolve) => { holdGets = resolve })
+    await page.route(
+      (url) => url.pathname.startsWith('/api/'),
+      async (route) => {
+        const u = new URL(route.request().url())
+        if (route.request().method() === 'GET' && (u.pathname.endsWith('/prices') || u.pathname.includes('/catalog/items'))) {
+          await held
+        }
+        await route.continue()
+      }
+    )
+    await gotoAuthed(page, `/workspaces/${wsEmpty}/prices`, ownerEmail)
+    await expect(page.getByText('Memuat…')).toBeVisible()
+    holdGets()
+    await expect(page.getByText('Pilih barang dulu untuk melihat tarif.')).toBeVisible()
+    await page.unrouteAll({ behavior: 'wait' })
+    // Refresh riwayat gagal 500: galat tampil, tanpa klaim kosong.
+    let failOnce = true
+    await page.route(
+      (url) => url.pathname.startsWith('/api/'),
+      async (route) => {
+        const u = new URL(route.request().url())
+        if (failOnce && route.request().method() === 'GET' && u.pathname.endsWith('/prices') && !u.searchParams.has('offset')) {
+          failOnce = false
+          await route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: 'gagal' }) })
+          return
+        }
+        await route.continue()
+      }
+    )
+    await page.getByLabel('Barang').selectOption(item.id)
+    await expect(page.locator('section[aria-labelledby="list-heading"]').getByRole('alert')).toContainText('Daftar gagal dimuat ulang')
+    await expect(page.getByText('Belum ada tarif.')).toHaveCount(0)
+    await page.locator('section[aria-labelledby="list-heading"]').getByRole('button', { name: 'Muat ulang daftar' }).click()
+    await expect(page.getByText('Belum ada tarif.')).toBeVisible()
+    await page.unrouteAll({ behavior: 'wait' })
+  })
+
+  test('tarif R1-A: kirim-ulang 403 mempertahankan snapshot + ketidakpastian; kunci sama replay 200', async ({ page }) => {
+    const { email, ws, token } = await r1Setup(page, 'a')
+    await seedItems(page.request, ws, token, 1, 'R1A')
+    const item = await catalogItemBySku(page, ws, 'R1A-1', email)
+    const before = (await listPriceRows(page, ws, item.id, email)).length
+    await uiLogin(page, email)
+    await gotoAuthed(page, `/workspaces/${ws}/prices`, email)
+    let postAttempts = 0
+    let firstKey = ''
+    let firstBody: unknown = null
+    let replayKey = ''
+    let replayBody: unknown = null
+    let denyReplay = true
+    await page.route(
+      (url) => url.pathname.startsWith('/api/'),
+      async (route) => {
+        const u = new URL(route.request().url())
+        if (route.request().method() === 'POST' && u.pathname.endsWith('/prices')) {
+          postAttempts++
+          if (postAttempts === 1) {
+            firstKey = route.request().headers()['idempotency-key'] ?? ''
+            firstBody = route.request().postDataJSON()
+            // Tulis sungguhan sampai ke API nyata lalu responsnya hilang
+            // (injeksi kegagalan browser-mocked, bukan bukti database/RLS).
+            await route.fetch()
+            await route.abort()
+            return
+          }
+          if (postAttempts === 2 && denyReplay) {
+            // Kirim-ulang ditolak 403: pemeriksaan izin server mendahului
+            // replay, jadi penolakan ini TIDAK membuktikan tulis awal gagal.
+            await route.fulfill({ status: 403, contentType: 'application/json', body: JSON.stringify({ error: 'tidak punya izin mengelola data usaha' }) })
+            return
+          }
+          if (postAttempts === 3) {
+            replayKey = route.request().headers()['idempotency-key'] ?? ''
+            replayBody = route.request().postDataJSON()
+          }
+        }
+        await route.continue()
+      }
+    )
+    await page.getByLabel('Barang').selectOption(item.id)
+    await page.getByLabel('Mulai (UTC)').fill('2047-01-01T00:00')
+    await page.getByLabel('Berakhir (UTC)').fill('2047-02-01T00:00')
+    await page.getByLabel('Nilai tarif (unit tersimpan)').fill('1300')
+    await page.getByLabel('Mata uang').fill('IDR')
+    await page.getByRole('button', { name: 'Simpan tarif' }).click()
+    await expect(page.getByRole('heading', { name: 'Hasil penyimpanan tidak diketahui' })).toBeVisible()
+    expect(firstKey.length).toBeGreaterThan(0)
+    // Tulis pertama SUDAH terkomit di server meski responsnya hilang.
+    const committed = await listPriceRows(page, ws, item.id, email)
+    expect(committed.length).toBe(before + 1)
+    const committedRow = committed.find(r => r.amount_minor === '1300')
+    expect(committedRow).toBeDefined()
+    // Kirim-ulang ditolak 403: snapshot + ketidakpastian dipertahankan,
+    // kirim biasa tetap terkunci, bukan kunci baru diam-diam.
+    await page.getByRole('button', { name: 'Kirim lagi (permintaan sama)' }).click()
+    await expect(page.getByRole('heading', { name: 'Hasil penyimpanan tidak diketahui' })).toBeVisible()
+    await expect(page.locator('section[aria-labelledby="add-heading"]').getByText('Kirim ulang ditolak')).toBeVisible()
+    await expect(page.locator('section[aria-labelledby="add-heading"]').getByText('tidak punya izin mengelola data usaha')).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Kirim lagi (permintaan sama)' })).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Simpan tarif' })).toBeDisabled()
+    await expect(page.getByLabel('Nilai tarif (unit tersimpan)')).toHaveValue('1300')
+    expect(postAttempts).toBe(2)
+    // Endpoint dipulihkan: kirim-ulang kunci SAMA mengonfirmasi baris
+    // yang sama, tanpa tulis kedua.
+    denyReplay = false
+    await page.getByRole('button', { name: 'Kirim lagi (permintaan sama)' }).click()
+    await expect(page.getByRole('heading', { name: 'Tarif tersimpan' })).toBeVisible()
+    expect(postAttempts).toBe(3)
+    expect(replayKey).toBe(firstKey)
+    expect(replayBody).toEqual(firstBody)
+    const after = await listPriceRows(page, ws, item.id, email)
+    expect(after.length).toBe(before + 1)
+    expect(after.find(r => r.amount_minor === '1300')?.id).toBe(committedRow!.id)
+    await page.unrouteAll({ behavior: 'wait' })
+  })
+
+  test('tarif R1-B: kirim-ulang 409 mismatch — satu status koheren, tanpa kirim-ulang', async ({ page }) => {
+    const { email, ws, token } = await r1Setup(page, 'b')
+    await seedItems(page.request, ws, token, 1, 'R1B')
+    const item = await catalogItemBySku(page, ws, 'R1B-1', email)
+    const before = (await listPriceRows(page, ws, item.id, email)).length
+    await uiLogin(page, email)
+    await gotoAuthed(page, `/workspaces/${ws}/prices`, email)
+    let postAttempts = 0
+    let firstKey = ''
+    let newKey = ''
+    await page.route(
+      (url) => url.pathname.startsWith('/api/'),
+      async (route) => {
+        const u = new URL(route.request().url())
+        if (route.request().method() === 'POST' && u.pathname.endsWith('/prices')) {
+          postAttempts++
+          if (postAttempts === 1) {
+            firstKey = route.request().headers()['idempotency-key'] ?? ''
+            await route.fetch()
+            await route.abort()
+            return
+          }
+          if (postAttempts === 2) {
+            await route.fulfill({ status: 409, contentType: 'application/json', body: JSON.stringify({ error: 'kunci idempotency sudah dipakai untuk permintaan yang berbeda' }) })
+            return
+          }
+          if (postAttempts === 3) {
+            newKey = route.request().headers()['idempotency-key'] ?? ''
+          }
+        }
+        await route.continue()
+      }
+    )
+    await page.getByLabel('Barang').selectOption(item.id)
+    await page.getByLabel('Mulai (UTC)').fill('2047-03-01T00:00')
+    await page.getByLabel('Berakhir (UTC)').fill('2047-04-01T00:00')
+    await page.getByLabel('Nilai tarif (unit tersimpan)').fill('1400')
+    await page.getByLabel('Mata uang').fill('IDR')
+    await page.getByRole('button', { name: 'Simpan tarif' }).click()
+    await expect(page.getByRole('heading', { name: 'Hasil penyimpanan tidak diketahui' })).toBeVisible()
+    await page.getByRole('button', { name: 'Kirim lagi (permintaan sama)' }).click()
+    // Satu status mismatch yang koheren: ringkasan snapshot dipertahankan,
+    // panel tak diketahui + kirim-ulang hilang.
+    await expect(page.getByRole('heading', { name: 'Kunci idempotency sudah dipakai' })).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'Hasil penyimpanan tidak diketahui' })).toHaveCount(0)
+    await expect(page.getByRole('button', { name: 'Kirim lagi (permintaan sama)' })).toHaveCount(0)
+    await expect(page.locator('section[aria-labelledby="add-heading"]').getByText('Permintaan yang belum pasti:')).toBeVisible()
+    await expect(page.locator('section[aria-labelledby="add-heading"]').getByText('1400 unit tarif · IDR')).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Simpan tarif' })).toBeDisabled()
+    // Submit biasa dari status mismatch tidak boleh POST lagi.
+    await page.evaluate(() => {
+      document.querySelector('form')?.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
+    })
+    await page.waitForTimeout(500)
+    expect(postAttempts).toBe(2)
+    expect(firstKey.length).toBeGreaterThan(0)
+    // Hanya Mulai jadwal baru yang menebus, dengan kunci baru + interval
+    // baru (interval lama sudah terkomit dari tulis pertama).
+    await page.getByRole('button', { name: 'Mulai jadwal baru' }).click()
+    await expect(page.getByLabel('Nilai tarif (unit tersimpan)')).toBeEnabled()
+    await page.getByLabel('Mulai (UTC)').fill('2047-05-01T00:00')
+    await page.getByLabel('Berakhir (UTC)').fill('2047-06-01T00:00')
+    await page.getByRole('button', { name: 'Simpan tarif' }).click()
+    await expect(page.getByRole('heading', { name: 'Tarif tersimpan' })).toBeVisible()
+    expect(postAttempts).toBe(3)
+    expect(newKey.length).toBeGreaterThan(0)
+    expect(newKey).not.toBe(firstKey)
+    const after = await listPriceRows(page, ws, item.id, email)
+    expect(after.length).toBe(before + 2)
+    await page.unrouteAll({ behavior: 'wait' })
+  })
+
+  test('tarif R1-C: Mulai jadwal baru terkunci selama POST kirim-ulang berjalan', async ({ page }) => {
+    const { email, ws, token } = await r1Setup(page, 'c')
+    await seedItems(page.request, ws, token, 1, 'R1C')
+    const item = await catalogItemBySku(page, ws, 'R1C-1', email)
+    const before = (await listPriceRows(page, ws, item.id, email)).length
+    await uiLogin(page, email)
+    await gotoAuthed(page, `/workspaces/${ws}/prices`, email)
+    let postAttempts = 0
+    let releaseReplay!: () => void
+    const replayHeld = new Promise<void>((resolve) => { releaseReplay = resolve })
+    await page.route(
+      (url) => url.pathname.startsWith('/api/'),
+      async (route) => {
+        const u = new URL(route.request().url())
+        if (route.request().method() === 'POST' && u.pathname.endsWith('/prices')) {
+          postAttempts++
+          if (postAttempts === 1) {
+            await route.fetch()
+            await route.abort()
+            return
+          }
+          // Kirim-ulang ditahan: POST tertunda di browser.
+          await replayHeld
+        }
+        await route.continue()
+      }
+    )
+    await page.getByLabel('Barang').selectOption(item.id)
+    await page.getByLabel('Mulai (UTC)').fill('2047-07-01T00:00')
+    await page.getByLabel('Berakhir (UTC)').fill('2047-08-01T00:00')
+    await page.getByLabel('Nilai tarif (unit tersimpan)').fill('1500')
+    await page.getByLabel('Mata uang').fill('IDR')
+    await page.getByRole('button', { name: 'Simpan tarif' }).click()
+    await expect(page.getByRole('heading', { name: 'Hasil penyimpanan tidak diketahui' })).toBeVisible()
+    await page.getByRole('button', { name: 'Kirim lagi (permintaan sama)' }).click()
+    await page.waitForTimeout(500)
+    expect(postAttempts).toBe(2)
+    // Selama kirim-ulang berjalan, Mulai jadwal baru terkunci sehingga
+    // kelanjutan lama tidak bisa menghapus draf baru atau mengumumkan
+    // simpan untuknya.
+    await expect(page.getByRole('button', { name: 'Mulai jadwal baru' })).toBeDisabled()
+    releaseReplay()
+    await expect(page.getByRole('heading', { name: 'Tarif tersimpan' })).toBeVisible()
+    expect(postAttempts).toBe(2)
+    const after = await listPriceRows(page, ws, item.id, email)
+    expect(after.length).toBe(before + 1)
+    await page.unrouteAll({ behavior: 'wait' })
+  })
+
+  test('tarif R1-D: arsip — pemilih tetap ada saat ganti aktif→arsip→aktif→arsip lain tanpa reload', async ({ page }) => {
+    const { email, ws, token } = await r1Setup(page, 'd')
+    await seedItems(page.request, ws, token, 3, 'R1D')
+    const itemA = await catalogItemBySku(page, ws, 'R1D-1', email)
+    const itemB = await catalogItemBySku(page, ws, 'R1D-2', email)
+    const itemC = await catalogItemBySku(page, ws, 'R1D-3', email)
+    // Satu tarif untuk barang arsip supaya riwayatnya terisi.
+    await seedPrices(page.request, ws, token, itemB.id, 1)
+    psql(`UPDATE catalog_items SET status='archived' WHERE workspace_id='${ws}' AND sku IN ('R1D-2', 'R1D-3')`)
+    await uiLogin(page, email)
+    await gotoAuthed(page, `/workspaces/${ws}/prices`, email)
+    // Aktif: formulir tampil.
+    await page.getByLabel('Barang').selectOption(itemA.id)
+    await expect(page.getByRole('button', { name: 'Simpan tarif' })).toHaveCount(1)
+    // Arsip: pemberitahuan tampil, pemilih TETAP ada, formulir hilang.
+    await page.getByLabel('Barang').selectOption(itemB.id)
+    await expect(page.getByText('Barang diarsipkan — riwayat tarif tetap dapat dibaca; jadwal baru tidak dapat dibuat.')).toBeVisible()
+    await expect(page.getByLabel('Barang')).toBeVisible()
+    await expect(listItems(page)).toHaveCount(1)
+    await expect(page.getByRole('button', { name: 'Simpan tarif' })).toHaveCount(0)
+    // Kembali aktif tanpa reload: formulir kembali.
+    await page.getByLabel('Barang').selectOption(itemA.id)
+    await expect(page.getByRole('button', { name: 'Simpan tarif' })).toHaveCount(1)
+    await expect(page.getByText('Barang diarsipkan — riwayat tarif tetap dapat dibaca; jadwal baru tidak dapat dibuat.')).toHaveCount(0)
+    // Arsip lain tanpa reload: pemilih tetap, formulir hilang.
+    await page.getByLabel('Barang').selectOption(itemC.id)
+    await expect(page.getByText('Barang diarsipkan — riwayat tarif tetap dapat dibaca; jadwal baru tidak dapat dibuat.')).toBeVisible()
+    await expect(page.getByLabel('Barang')).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Simpan tarif' })).toHaveCount(0)
+  })
+
+  test('tarif R1-E: GET 404 — draf barang lama disembunyikan, pemilih tetap, draf kembali sesudah pilih ulang', async ({ page }) => {
+    const { email, ws, token } = await r1Setup(page, 'e')
+    await seedItems(page.request, ws, token, 2, 'R1E')
+    const itemA = await catalogItemBySku(page, ws, 'R1E-1', email)
+    const itemB = await catalogItemBySku(page, ws, 'R1E-2', email)
+    await uiLogin(page, email)
+    await gotoAuthed(page, `/workspaces/${ws}/prices`, email)
+    await page.getByLabel('Barang').selectOption(itemA.id)
+    await expect(page.getByText('Belum ada tarif.')).toBeVisible()
+    await page.getByLabel('Mulai (UTC)').fill('2047-09-01T00:00')
+    await page.getByLabel('Berakhir (UTC)').fill('2047-10-01T00:00')
+    await page.getByLabel('Nilai tarif (unit tersimpan)').fill('1200')
+    await page.getByLabel('Mata uang').fill('IDR')
+    // GET riwayat barang berikutnya dijawab 404.
+    await page.route(
+      (url) => url.pathname.startsWith('/api/'),
+      async (route) => {
+        const u = new URL(route.request().url())
+        if (route.request().method() === 'GET' && u.pathname.endsWith('/prices')) {
+          await route.fulfill({ status: 404, contentType: 'application/json', body: JSON.stringify({ error: 'barang tidak ditemukan' }) })
+          return
+        }
+        await route.continue()
+      }
+    )
+    await page.getByLabel('Barang').selectOption(itemB.id)
+    await expect(page.getByText('Barang tidak ditemukan di workspace ini.')).toBeVisible()
+    // Formulir jadwal lama tidak lagi ditampilkan sebagai bisa dipakai;
+    // pemilih tetap tersedia untuk koreksi; tidak ada panel pemulihan baru.
+    await expect(page.getByText('Barang yang dipilih tidak ada di workspace ini.')).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Simpan tarif' })).toHaveCount(0)
+    await expect(page.getByLabel('Mulai (UTC)')).toHaveCount(0)
+    await expect(page.getByLabel('Barang')).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'Hasil penyimpanan tidak diketahui' })).toHaveCount(0)
+    await page.unrouteAll({ behavior: 'wait' })
+    // Pilih ulang barang pertama: formulir kembali dengan draf yang sama.
+    await page.getByLabel('Barang').selectOption(itemA.id)
+    await expect(page.getByRole('button', { name: 'Simpan tarif' })).toHaveCount(1)
+    await expect(page.getByLabel('Nilai tarif (unit tersimpan)')).toHaveValue('1200')
+    await expect(page.getByLabel('Mata uang')).toHaveValue('IDR')
+  })
+
+  test('tarif R1-F: katalog awal 403 — penolakan tampil, Memuat… hilang, sesi dipertahankan', async ({ page }) => {
+    const { email, ws, token } = await r1Setup(page, 'f')
+    await seedItems(page.request, ws, token, 1, 'R1F')
+    // GET katalog awal ditolak 403; workspace GET tetap 200.
+    await page.route(
+      (url) => url.pathname.startsWith('/api/'),
+      async (route) => {
+        const u = new URL(route.request().url())
+        if (route.request().method() === 'GET' && u.pathname.includes('/catalog/items')) {
+          await route.fulfill({ status: 403, contentType: 'application/json', body: JSON.stringify({ error: 'bukan anggota workspace ini' }) })
+          return
+        }
+        await route.continue()
+      }
+    )
+    await uiLogin(page, email)
+    await gotoAuthed(page, `/workspaces/${ws}/prices`, email)
+    // Penolakan tampil; loader global selesai; formulir tersembunyi.
+    await expect(page.getByRole('heading', { name: 'Tidak ada izin' })).toBeVisible()
+    await expect(page.getByText('bukan anggota workspace ini')).toBeVisible()
+    await expect(page.getByText('Memuat…')).toHaveCount(0)
+    await expect(page.getByRole('heading', { name: 'Jadwalkan tarif' })).toHaveCount(0)
+    await expect(page.getByLabel('Barang')).toHaveCount(0)
+    // Sesi dipertahankan (bukan 401): tombol Keluar tetap ada.
+    await expect(page.getByRole('button', { name: 'Keluar' })).toBeVisible()
+    await page.unrouteAll({ behavior: 'wait' })
+  })
+
   test('screenshot f2-ui-02: tiga utama + kosong + tanpa-izin + galat + muat + picker + manifest', async ({ page }) => {
     mkdirSync(SHOTS_UI02, { recursive: true })
     const manifest: Array<{ file: string, viewport: string, state: string, provenance: string }> = []
@@ -2358,5 +3430,107 @@ test.describe.serial('alur pemilik', () => {
     const withSums = manifest.map(m => ({ ...m, sha256: sha(m.file) }))
     writeFileSync(path.join(SHOTS_UI02, 'manifest.json'), JSON.stringify({ generated_by: 'owner-flow.spec.ts f2-ui-02', files: withSums }, null, 2) + '\n')
     expect(withSums.length).toBe(8)
+  })
+
+  test('screenshot f2-ui-03: tiga utama + kosong + tanpa-izin + picker + tak-diketahui + muat + galat + manifest', async ({ page }) => {
+    mkdirSync(SHOTS_UI03, { recursive: true })
+    const manifest: Array<{ file: string, viewport: string, state: string, provenance: string }> = []
+    const shot = async (name: string, state: string, provenance: string, width: number) => {
+      const file = `${name}-${width}.png`
+      await page.screenshot({ path: path.join(SHOTS_UI03, file), fullPage: true })
+      manifest.push({ file, viewport: `${width}`, state, provenance })
+    }
+    const sha = (name: string) => createHash('sha256').update(readFileSync(path.join(SHOTS_UI03, name))).digest('hex')
+    const token = await apiToken(page.request, ownerEmail)
+    const item = await catalogItemBySku(page, wsPrices, 'TRF-1')
+    const sizes = [
+      { width: 360, height: 640 },
+      { width: 768, height: 1024 },
+      { width: 1440, height: 900 }
+    ]
+    for (const size of sizes) {
+      await page.setViewportSize(size)
+      await uiLogin(page, ownerEmail)
+      await gotoAuthed(page, `/workspaces/${wsPrices}/prices`, ownerEmail)
+      await page.getByLabel('Barang').selectOption(item.id)
+      await expect(listItems(page).first()).toBeVisible()
+      await shot('01-prices', 'populated-live', 'live', size.width)
+    }
+    await page.setViewportSize({ width: 360, height: 640 })
+    // owner4Email sudah terdaftar di tes screenshot f2-ui-02 (:3076);
+    // registrasi ulang akan 409, jadi langsung masuk saja.
+    await uiLogin(page, owner4Email)
+    const wsEmpty = await uiCreateWorkspace(page, `Toko Kosong Tarif ${RUN}`, owner4Email)
+    const token4 = await apiToken(page.request, owner4Email)
+    await seedItems(page.request, wsEmpty, token4, 1, 'SHT')
+    const shotItem = await catalogItemBySku(page, wsEmpty, 'SHT-1', owner4Email)
+    await gotoAuthed(page, `/workspaces/${wsEmpty}/prices`, owner4Email)
+    await page.getByLabel('Barang').selectOption(shotItem.id)
+    await expect(page.getByText('Belum ada tarif.')).toBeVisible()
+    await shot('04-prices-empty', 'empty-live', 'live', 360)
+    await uiLogin(page, otherEmail)
+    await gotoAuthed(page, `/workspaces/${wsPrices}/prices`, otherEmail)
+    await expect(page.getByRole('alert')).toContainText('bukan anggota workspace ini')
+    await shot('05-prices-noperm', 'no-permission-live', 'live', 360)
+    await uiLogin(page, ownerEmail)
+    // Picker: barang halaman kedua sesudah >100 barang + catatan muat
+    // sebagian (workspace katalog UI02 yang sudah berisi 201 barang).
+    await gotoAuthed(page, `/workspaces/${wsCat}/prices`, ownerEmail)
+    await page.getByRole('button', { name: 'Muat lebih banyak barang' }).click()
+    await expect(page.getByText('barang dimuat sejauh ini')).toBeVisible()
+    const item150 = await catalogItemBySku(page, wsCat, 'KAT-150')
+    await page.getByLabel('Barang').selectOption(item150.id)
+    expect(await page.getByLabel('Barang').inputValue()).toBe(item150.id)
+    await shot('06-prices-picker', 'picker-live', 'live', 360)
+    // Tak diketahui: POST sampai ke API nyata lalu responsnya hilang;
+    // panel membeku + tombol kirim-ulang permintaan sama terlihat.
+    await gotoAuthed(page, `/workspaces/${wsEmpty}/prices`, owner4Email)
+    await page.route(
+      (url) => url.pathname.startsWith('/api/'),
+      async (route) => {
+        const u = new URL(route.request().url())
+        if (route.request().method() === 'POST' && u.pathname.endsWith('/prices')) {
+          await route.fetch()
+          await route.abort()
+          return
+        }
+        await route.continue()
+      }
+    )
+    await page.getByLabel('Barang').selectOption(shotItem.id)
+    await page.getByLabel('Mulai (UTC)').fill('2047-01-01T00:00')
+    await page.getByLabel('Berakhir (UTC)').fill('2047-02-01T00:00')
+    await page.getByLabel('Nilai tarif (unit tersimpan)').fill('123456')
+    await page.getByLabel('Mata uang').fill('IDR')
+    await page.getByRole('button', { name: 'Simpan tarif' }).click()
+    await expect(page.getByRole('heading', { name: 'Hasil penyimpanan tidak diketahui' })).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Kirim lagi (permintaan sama)' })).toBeVisible()
+    await shot('07-prices-unknown', 'unknown-mocked', 'mocked-route', 360)
+    await page.unrouteAll({ behavior: 'wait' })
+    // Muat: respons ditahan 2,5 dtk, tangkap status memuat.
+    await page.route(
+      (url) => url.pathname.startsWith('/api/') && (url.pathname.endsWith('/prices') || url.pathname.includes('/catalog/items')),
+      async (route) => {
+        await new Promise(r => setTimeout(r, 2500))
+        await route.continue()
+      }
+    )
+    await gotoAuthed(page, `/workspaces/${wsEmpty}/prices`, owner4Email)
+    await expect(page.getByText('Memuat…')).toBeVisible()
+    await shot('08-prices-loading', 'loading-mocked', 'mocked-route', 360)
+    await page.unrouteAll({ behavior: 'wait' })
+    await expect(page.getByText('Pilih barang dulu untuk melihat tarif.')).toBeVisible()
+    // Galat: respons dibatalkan, tangkap halaman galat.
+    await page.route(
+      (url) => url.pathname.startsWith('/api/') && (url.pathname.endsWith('/prices') || url.pathname.includes('/catalog/items')),
+      async (route) => { await route.abort() }
+    )
+    await gotoAuthed(page, `/workspaces/${wsEmpty}/prices`, owner4Email)
+    await expect(page.getByText('Layanan tidak tersedia').first()).toBeVisible()
+    await shot('09-prices-error', 'error-mocked', 'mocked-route', 360)
+    await page.unrouteAll({ behavior: 'wait' })
+    const withSums = manifest.map(m => ({ ...m, sha256: sha(m.file) }))
+    writeFileSync(path.join(SHOTS_UI03, 'manifest.json'), JSON.stringify({ generated_by: 'owner-flow.spec.ts f2-ui-03', files: withSums }, null, 2) + '\n')
+    expect(withSums.length).toBe(9)
   })
 })

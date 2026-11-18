@@ -1,0 +1,68 @@
+{
+  "generated_by": "owner-flow.spec.ts f2-ui-03",
+  "files": [
+    {
+      "file": "01-prices-360.png",
+      "viewport": "360",
+      "state": "populated-live",
+      "provenance": "live",
+      "sha256": "887484d5078b1795d5dce703109e80947a7c177dfdf8beae44ee2ff842d20788"
+    },
+    {
+      "file": "01-prices-768.png",
+      "viewport": "768",
+      "state": "populated-live",
+      "provenance": "live",
+      "sha256": "0d712371bb0350dc1d9c8484bf4dc12ba2bcbf4c86c59e829b1b9a4c1ccfadbe"
+    },
+    {
+      "file": "01-prices-1440.png",
+      "viewport": "1440",
+      "state": "populated-live",
+      "provenance": "live",
+      "sha256": "53d61cccf7ac437727a0c0329c8c9dc001cf6bc8b640e397bcaa5ab916120663"
+    },
+    {
+      "file": "04-prices-empty-360.png",
+      "viewport": "360",
+      "state": "empty-live",
+      "provenance": "live",
+      "sha256": "ecb7aa8c2eb7ea097c9ef674a59e7badd0a700eb19e73424e0f40d498b9e6593"
+    },
+    {
+      "file": "05-prices-noperm-360.png",
+      "viewport": "360",
+      "state": "no-permission-live",
+      "provenance": "live",
+      "sha256": "32845534c9a5390419714edf56c439dc87f75fb4190640e80a75148a56d50ed2"
+    },
+    {
+      "file": "06-prices-picker-360.png",
+      "viewport": "360",
+      "state": "picker-live",
+      "provenance": "live",
+      "sha256": "2a0f4d67d05c519418c881776c86f89db942420f38c2cb40a1abceef60ca16f2"
+    },
+    {
+      "file": "07-prices-unknown-360.png",
+      "viewport": "360",
+      "state": "unknown-mocked",
+      "provenance": "mocked-route",
+      "sha256": "d277c212635eafb36d3ecbb34488821feb81140d248e36412e42fc1eb0550c56"
+    },
+    {
+      "file": "08-prices-loading-360.png",
+      "viewport": "360",
+      "state": "loading-mocked",
+      "provenance": "mocked-route",
+      "sha256": "1b3e7580128fe006e5847e0901ceb501150fa6460f1047469559a5f4ad8d1469"
+    },
+    {
+      "file": "09-prices-error-360.png",
+      "viewport": "360",
+      "state": "error-mocked",
+      "provenance": "mocked-route",
+      "sha256": "da674571f62d2eb5a714d43b1e0e67933e223825cc4f0f499b2c3cbde50a0021"
+    }
+  ]
+}

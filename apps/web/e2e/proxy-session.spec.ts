@@ -439,4 +439,126 @@ test.describe.serial('proxy + sesi', () => {
     expect(bad.status).toBe(400)
     expect(bad.body).toContain('permintaan tidak valid')
   })
+
+  test('proxy: tarif GET/POST diteruskan + kunci per panggilan + paginasi nyata', async ({ request }) => {
+    const auth = { Authorization: `Bearer ${ownerToken}` }
+    const item = await request.post(`/api/workspaces/${wsId}/catalog/items`, {
+      headers: auth,
+      data: { sku: 'PRX-TRF', name: 'Proxy Tarif Barang', unit: 'pcs' }
+    })
+    expect(item.status()).toBe(201)
+    const itemId = ((await item.json()) as { id: string }).id
+    const key = `prx-key-${RUN}`
+    const payload = { valid_from: '2048-01-01T00:00:00Z', valid_to: '2048-02-01T00:00:00Z', amount_minor: '12345', currency: 'IDR' }
+    const first = await request.post(`/api/workspaces/${wsId}/catalog/items/${itemId}/prices`, {
+      headers: { ...auth, 'Idempotency-Key': key },
+      data: payload
+    })
+    expect(first.status()).toBe(201)
+    const firstId = ((await first.json()) as { id: string }).id
+    // Kunci yang sama + payload sama diteruskan ke backend: replay 200
+    // dengan baris yang sama, tanpa tulis kedua.
+    const replay = await request.post(`/api/workspaces/${wsId}/catalog/items/${itemId}/prices`, {
+      headers: { ...auth, 'Idempotency-Key': key },
+      data: payload
+    })
+    expect(replay.status()).toBe(200)
+    expect(((await replay.json()) as { id: string }).id).toBe(firstId)
+    // Kunci sama + payload berbeda: 409 mismatch dari backend.
+    const mismatch = await request.post(`/api/workspaces/${wsId}/catalog/items/${itemId}/prices`, {
+      headers: { ...auth, 'Idempotency-Key': key },
+      data: { ...payload, amount_minor: '999' }
+    })
+    expect(mismatch.status()).toBe(409)
+    // Tanpa kunci: backend menolak 400 — proxy tidak membuat kunci.
+    const noKey = await request.post(`/api/workspaces/${wsId}/catalog/items/${itemId}/prices`, {
+      headers: auth,
+      data: { ...payload, valid_from: '2048-03-01T00:00:00Z', valid_to: '2048-04-01T00:00:00Z' }
+    })
+    expect(noKey.status()).toBe(400)
+    // Paginasi nyata: dua interval lagi, lalu limit/offset.
+    for (const [from, to] of [['2048-03-01T00:00:00Z', '2048-04-01T00:00:00Z'], ['2048-04-01T00:00:00Z', '2048-05-01T00:00:00Z']] as const) {
+      const p = await request.post(`/api/workspaces/${wsId}/catalog/items/${itemId}/prices`, {
+        headers: { ...auth, 'Idempotency-Key': `prx-key-${RUN}-${from}` },
+        data: { valid_from: from, valid_to: to, amount_minor: '100', currency: 'IDR' }
+      })
+      expect(p.status()).toBe(201)
+    }
+    const p2 = await request.get(`/api/workspaces/${wsId}/catalog/items/${itemId}/prices?limit=2`, { headers: auth })
+    expect(p2.status()).toBe(200)
+    expect(((await p2.json()) as { items: unknown[] }).items.length).toBe(2)
+    const p2o2 = await request.get(`/api/workspaces/${wsId}/catalog/items/${itemId}/prices?limit=2&offset=2`, { headers: auth })
+    expect(((await p2o2.json()) as { items: unknown[] }).items.length).toBe(1)
+    // Kasir baca 200; nonanggota 403.
+    const cashier = await request.get(`/api/workspaces/${wsId}/catalog/items/${itemId}/prices?limit=100`, {
+      headers: { Authorization: `Bearer ${otherToken}` }
+    })
+    expect(cashier.status()).toBe(200)
+    const nomemberEmail = `proxy-nomember-trf-${RUN}@e2e.umnia.local`
+    const reg3 = await request.post('/api/auth/register', { data: { email: nomemberEmail, password: PASSWORD } })
+    expect(reg3.status()).toBe(201)
+    const login3 = await request.post('/api/auth/login', { data: { email: nomemberEmail, password: PASSWORD } })
+    expect(login3.status()).toBe(200)
+    const nomember = await request.get(`/api/workspaces/${wsId}/catalog/items/${itemId}/prices?limit=100`, {
+      headers: { Authorization: `Bearer ${((await login3.json()) as { token: string }).token}` }
+    })
+    expect(nomember.status()).toBe(403)
+    // Pemanggil lama tanpa kunci tetap jalan (POST pelanggan tanpa kunci).
+    const old = await request.post(`/api/workspaces/${wsId}/customers`, {
+      headers: auth,
+      data: { display_name: `Proxy Tanpa Kunci ${RUN}` }
+    })
+    expect(old.status()).toBe(201)
+  })
+
+  test('proxy: query tarif malformed 400; query di POST tarif 400; quote di luar allowlist', async ({ request }) => {
+    const auth = { Authorization: `Bearer ${ownerToken}` }
+    const item = await request.post(`/api/workspaces/${wsId}/catalog/items`, {
+      headers: auth,
+      data: { sku: 'PRX-TRF-Q', name: 'Proxy Tarif Query', unit: 'pcs' }
+    })
+    expect(item.status()).toBe(201)
+    const itemId = ((await item.json()) as { id: string }).id
+    for (const q of ['limit=0', 'limit=101', 'limit=007', 'offset=-1', 'limit=10&foo=1', 'limit=10;']) {
+      const res = await rawGet(`/api/workspaces/${wsId}/catalog/items/${itemId}/prices?${q}`)
+      expect(res.status, `prices?${q}`).toBe(400)
+      expect(res.body).toContain('permintaan tidak valid')
+    }
+    const bare = await rawGet(`/api/workspaces/${wsId}/catalog/items/${itemId}/prices?`)
+    expect(bare.status).toBe(400)
+    const postQ = await request.post(`/api/workspaces/${wsId}/catalog/items/${itemId}/prices?limit=10`, {
+      headers: { ...auth, 'Idempotency-Key': `prx-q-${RUN}` },
+      data: { valid_from: '2048-01-01T00:00:00Z', valid_to: '2048-02-01T00:00:00Z', amount_minor: '100', currency: 'IDR' }
+    })
+    expect(postQ.status()).toBe(400)
+    // Quote TIDAK ada di allowlist proxy: ber-query 400 sebelum rute,
+    // tanpa query jalurnya tak dikenal (404).
+    const quote = await request.get(
+      `/api/workspaces/${wsId}/catalog/items/${itemId}/prices/quote?starts_at=2048-01-01T00:00:00Z&ends_at=2048-01-02T00:00:00Z`,
+      { headers: auth }
+    )
+    expect(quote.status()).toBe(400)
+    const quoteBare = await request.get(
+      `/api/workspaces/${wsId}/catalog/items/${itemId}/prices/quote`,
+      { headers: auth }
+    )
+    expect(quoteBare.status()).toBe(404)
+    // UUID tidak valid pada segmen barang DENGAN query: query di luar rute
+    // daftar yang dikenal ditolak 400 SEBELUM pencocokan rute (proxy:162-166).
+    const badUuid = await request.get(`/api/workspaces/${wsId}/catalog/items/bukan-uuid/prices?limit=10`, { headers: auth })
+    expect(badUuid.status()).toBe(400)
+    // Path tak dikenal TANPA query tetap 404.
+    const badUuidNoQuery = await request.get(`/api/workspaces/${wsId}/catalog/items/bukan-uuid/prices`, { headers: auth })
+    expect(badUuidNoQuery.status()).toBe(404)
+  })
+
+  test('proxy: tarif upstream mati 502; query invalid tetap 400 lokal', async () => {
+    const ok = await rawGet(`/api/workspaces/${wsId}/catalog/items/00000000-0000-4000-8000-000000000001/prices?limit=10`, 3001)
+    expect(ok.status).toBe(502)
+    expect(ok.body).toContain('layanan tidak tersedia')
+    expect(ok.body).not.toContain('127.0.0.1')
+    const bad = await rawGet(`/api/workspaces/${wsId}/catalog/items/00000000-0000-4000-8000-000000000001/prices?limit=0`, 3001)
+    expect(bad.status).toBe(400)
+    expect(bad.body).toContain('permintaan tidak valid')
+  })
 })

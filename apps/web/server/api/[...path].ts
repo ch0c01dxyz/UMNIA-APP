@@ -29,10 +29,12 @@ const ALLOWLIST: Route[] = [
   { method: 'GET', segments: ['workspaces', 'uuid', 'catalog', 'items'], query: true },
   { method: 'POST', segments: ['workspaces', 'uuid', 'catalog', 'items'] },
   { method: 'GET', segments: ['workspaces', 'uuid', 'assets'], query: true },
-  { method: 'POST', segments: ['workspaces', 'uuid', 'assets'] }
+  { method: 'POST', segments: ['workspaces', 'uuid', 'assets'] },
+  { method: 'GET', segments: ['workspaces', 'uuid', 'catalog', 'items', 'uuid', 'prices'], query: true },
+  { method: 'POST', segments: ['workspaces', 'uuid', 'catalog', 'items', 'uuid', 'prices'] }
 ]
 
-// Validasi query daftar pelanggan/barang/unit (F2-UI-01/F2-UI-02,
+// Validasi query daftar pelanggan/barang/unit/tarif (F2-UI-01/F2-UI-02/F2-UI-03,
 // satu-satunya query yang diizinkan proxy): kosong, atau bagian limit=<n> dan/atau offset=<n>,
 // masing-masing sekali, urutan bebas. Hanya digit desimal kanonis:
 // limit 1-100; offset 0-9007199254740991. Tolak duplikat, nama tak
@@ -157,7 +159,7 @@ export default defineEventHandler(async (event) => {
       want === 'uuid' ? UUID_RE.test(segments[i])
       : want === 'module' ? MODULE_RE.test(segments[i])
       : want === segments[i]))
-  // Query di luar dua rute GET daftar ditolak 400 SEBELUM upstream —
+  // Query di luar rute GET daftar ditolak 400 SEBELUM upstream —
   // termasuk pada path yang tidak dikenal; path tak dikenal TANPA query
   // tetap 404. Query pada rute daftar yang dikenal divalidasi ketat.
   if (queryPart !== null && (!matched || !matched.query || !validListQuery(queryPart))) {

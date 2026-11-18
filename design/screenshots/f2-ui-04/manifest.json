@@ -1,0 +1,68 @@
+{
+  "generated_by": "owner-flow.spec.ts f2-ui-04",
+  "files": [
+    {
+      "file": "01-rentals-360.png",
+      "viewport": "360",
+      "state": "populated-live",
+      "provenance": "live",
+      "sha256": "f059b9929db4e2ea30bd7b7e13db36c51e425a48484f6d967831243252c4f828"
+    },
+    {
+      "file": "01-rentals-768.png",
+      "viewport": "768",
+      "state": "populated-live",
+      "provenance": "live",
+      "sha256": "256b5a9e29c570f098e4341c0942c6073be74ccbd95c3c1c3491d3bf0fae9a49"
+    },
+    {
+      "file": "01-rentals-1440.png",
+      "viewport": "1440",
+      "state": "populated-live",
+      "provenance": "live",
+      "sha256": "93348397832a8cbbd953aad3e012dd6bf864857d795ecd82d784d0a2f0d8d42f"
+    },
+    {
+      "file": "04-rentals-empty-360.png",
+      "viewport": "360",
+      "state": "empty-live",
+      "provenance": "live",
+      "sha256": "4bf48e14be4656a85b60afb5672d559dbad33c2a5f10bc72c84ef665c9ddf07b"
+    },
+    {
+      "file": "05-rentals-noperm-360.png",
+      "viewport": "360",
+      "state": "no-permission-live",
+      "provenance": "live",
+      "sha256": "9acfe464874615bc2cf8350186b1d0acf5441887f6c9b7dc3c47464ce5bfbb0f"
+    },
+    {
+      "file": "06-rentals-pickers-360.png",
+      "viewport": "360",
+      "state": "picker-live",
+      "provenance": "live",
+      "sha256": "924ae517e1e1a6a0662b6b94afed17a785847d444e4ed8b3544c7647d4166d77"
+    },
+    {
+      "file": "07-rentals-unknown-360.png",
+      "viewport": "360",
+      "state": "unknown-mocked",
+      "provenance": "mocked-route",
+      "sha256": "e8f1bac396c5518465c0458158ccb3e1dcdaf82e859ec145de6d4382a342c476"
+    },
+    {
+      "file": "08-rentals-loading-360.png",
+      "viewport": "360",
+      "state": "loading-mocked",
+      "provenance": "mocked-route",
+      "sha256": "b8de7793d57a23d8780794ae3b07863d5362f018ea8cf35284713a0528abb2b3"
+    },
+    {
+      "file": "09-rentals-error-360.png",
+      "viewport": "360",
+      "state": "error-mocked",
+      "provenance": "mocked-route",
+      "sha256": "22389bbae24d17bd0a5d0e969de4f917317a28f8e31dfe68f510fc1808d08247"
+    }
+  ]
+}

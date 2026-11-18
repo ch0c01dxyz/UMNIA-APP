@@ -31,10 +31,12 @@ const ALLOWLIST: Route[] = [
   { method: 'GET', segments: ['workspaces', 'uuid', 'assets'], query: true },
   { method: 'POST', segments: ['workspaces', 'uuid', 'assets'] },
   { method: 'GET', segments: ['workspaces', 'uuid', 'catalog', 'items', 'uuid', 'prices'], query: true },
-  { method: 'POST', segments: ['workspaces', 'uuid', 'catalog', 'items', 'uuid', 'prices'] }
+  { method: 'POST', segments: ['workspaces', 'uuid', 'catalog', 'items', 'uuid', 'prices'] },
+  { method: 'GET', segments: ['workspaces', 'uuid', 'rental', 'contracts'], query: true },
+  { method: 'POST', segments: ['workspaces', 'uuid', 'rental', 'contracts'] }
 ]
 
-// Validasi query daftar pelanggan/barang/unit/tarif (F2-UI-01/F2-UI-02/F2-UI-03,
+// Validasi query daftar pelanggan/barang/unit/tarif/draf sewa (F2-UI-01/F2-UI-02/F2-UI-03/F2-UI-04,
 // satu-satunya query yang diizinkan proxy): kosong, atau bagian limit=<n> dan/atau offset=<n>,
 // masing-masing sekali, urutan bebas. Hanya digit desimal kanonis:
 // limit 1-100; offset 0-9007199254740991. Tolak duplikat, nama tak

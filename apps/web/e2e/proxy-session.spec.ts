@@ -561,4 +561,122 @@ test.describe.serial('proxy + sesi', () => {
     expect(bad.status).toBe(400)
     expect(bad.body).toContain('permintaan tidak valid')
   })
+
+  test('proxy: draf sewa GET/POST diteruskan + kunci per panggilan + paginasi nyata', async ({ request }) => {
+    // Rental butuh entitlement + aktivasi (CLI operator sungguhan, seperti
+    // grantRental di owner-flow); tanpa keduanya POST 403 dari backend.
+    const grantCli = process.env.E2E_GRANT_CLI || ''
+    const operatorUrl = process.env.E2E_OPERATOR_DATABASE_URL || ''
+    expect(grantCli.length).toBeGreaterThan(0)
+    expect(operatorUrl.length).toBeGreaterThan(0)
+    const out = execFileSync(grantCli, ['--workspace', wsId, '--module', 'rental.basic', '--version', '0.1.0', '--reason', 'tes E2E proxy'], {
+      encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env, UMNIA_OPERATOR_DATABASE_URL: operatorUrl },
+    })
+    expect(out.startsWith('granted ')).toBe(true)
+    const auth = { Authorization: `Bearer ${ownerToken}` }
+    const act = await request.post(`/api/workspaces/${wsId}/modules/rental.basic/activate`, {
+      headers: auth, data: { version: '0.1.0' }
+    })
+    expect(act.status()).toBe(200)
+    const customer = await request.post(`/api/workspaces/${wsId}/customers`, {
+      headers: auth, data: { display_name: `Proxy Draf Pelanggan ${RUN}` }
+    })
+    expect(customer.status()).toBe(201)
+    const customerId = ((await customer.json()) as { id: string }).id
+    const item = await request.post(`/api/workspaces/${wsId}/catalog/items`, {
+      headers: auth, data: { sku: 'PRX-DRF', name: 'Proxy Draf Barang', unit: 'pcs' }
+    })
+    expect(item.status()).toBe(201)
+    const itemId = ((await item.json()) as { id: string }).id
+    const key = `prx-draft-key-${RUN}`
+    const payload = { customer_id: customerId, catalog_item_id: itemId, starts_at: '2048-01-01T00:00:00Z', ends_at: '2048-02-01T00:00:00Z' }
+    const first = await request.post(`/api/workspaces/${wsId}/rental/contracts`, {
+      headers: { ...auth, 'Idempotency-Key': key }, data: payload
+    })
+    expect(first.status()).toBe(201)
+    const firstId = ((await first.json()) as { id: string }).id
+    // Kunci yang sama + payload sama diteruskan ke backend: replay 200
+    // dengan baris yang sama, tanpa tulis kedua.
+    const replay = await request.post(`/api/workspaces/${wsId}/rental/contracts`, {
+      headers: { ...auth, 'Idempotency-Key': key }, data: payload
+    })
+    expect(replay.status()).toBe(200)
+    expect(((await replay.json()) as { id: string }).id).toBe(firstId)
+    // Kunci sama + payload berbeda: 409 mismatch dari backend.
+    const mismatch = await request.post(`/api/workspaces/${wsId}/rental/contracts`, {
+      headers: { ...auth, 'Idempotency-Key': key },
+      data: { ...payload, starts_at: '2048-03-01T00:00:00Z', ends_at: '2048-04-01T00:00:00Z' }
+    })
+    expect(mismatch.status()).toBe(409)
+    // Tanpa kunci: backend menolak 400 — proxy tidak membuat kunci.
+    const noKey = await request.post(`/api/workspaces/${wsId}/rental/contracts`, {
+      headers: auth,
+      data: { ...payload, starts_at: '2048-05-01T00:00:00Z', ends_at: '2048-06-01T00:00:00Z' }
+    })
+    expect(noKey.status()).toBe(400)
+    // Paginasi nyata: satu draf lagi, lalu limit/offset.
+    const second = await request.post(`/api/workspaces/${wsId}/rental/contracts`, {
+      headers: { ...auth, 'Idempotency-Key': `prx-draft-key-${RUN}-2` },
+      data: { ...payload, starts_at: '2048-03-01T00:00:00Z', ends_at: '2048-04-01T00:00:00Z' }
+    })
+    expect(second.status()).toBe(201)
+    const p1 = await request.get(`/api/workspaces/${wsId}/rental/contracts?limit=1`, { headers: auth })
+    expect(p1.status()).toBe(200)
+    expect(((await p1.json()) as { items: unknown[] }).items.length).toBe(1)
+    const p1o1 = await request.get(`/api/workspaces/${wsId}/rental/contracts?limit=1&offset=1`, { headers: auth })
+    expect(((await p1o1.json()) as { items: unknown[] }).items.length).toBe(1)
+    // Kasir baca 200; nonanggota 403.
+    const cashier = await request.get(`/api/workspaces/${wsId}/rental/contracts?limit=100`, {
+      headers: { Authorization: `Bearer ${otherToken}` }
+    })
+    expect(cashier.status()).toBe(200)
+    const nomemberEmail = `proxy-nomember-drf-${RUN}@e2e.umnia.local`
+    const reg3 = await request.post('/api/auth/register', { data: { email: nomemberEmail, password: PASSWORD } })
+    expect(reg3.status()).toBe(201)
+    const login3 = await request.post('/api/auth/login', { data: { email: nomemberEmail, password: PASSWORD } })
+    expect(login3.status()).toBe(200)
+    const nomember = await request.get(`/api/workspaces/${wsId}/rental/contracts?limit=100`, {
+      headers: { Authorization: `Bearer ${((await login3.json()) as { token: string }).token}` }
+    })
+    expect(nomember.status()).toBe(403)
+  })
+
+  test('proxy: query draf sewa malformed 400; query di POST draf 400; detail di luar allowlist', async ({ request }) => {
+    const auth = { Authorization: `Bearer ${ownerToken}` }
+    for (const q of ['limit=0', 'limit=101', 'limit=007', 'offset=-1', 'limit=10&foo=1', 'limit=10;']) {
+      const res = await rawGet(`/api/workspaces/${wsId}/rental/contracts?${q}`)
+      expect(res.status, `rental/contracts?${q}`).toBe(400)
+      expect(res.body).toContain('permintaan tidak valid')
+    }
+    const bare = await rawGet(`/api/workspaces/${wsId}/rental/contracts?`)
+    expect(bare.status).toBe(400)
+    const postQ = await request.post(`/api/workspaces/${wsId}/rental/contracts?limit=10`, {
+      headers: { ...auth, 'Idempotency-Key': `prx-draft-q-${RUN}` },
+      data: { customer_id: '00000000-0000-4000-8000-000000000001', catalog_item_id: '00000000-0000-4000-8000-000000000002', starts_at: '2048-01-01T00:00:00Z', ends_at: '2048-02-01T00:00:00Z' }
+    })
+    expect(postQ.status()).toBe(400)
+    // Detail kontrak TIDAK ada di allowlist proxy: ber-query 400 sebelum
+    // rute, tanpa query jalurnya tak dikenal (404).
+    const detail = await request.get(
+      `/api/workspaces/${wsId}/rental/contracts/00000000-0000-4000-8000-000000000001?limit=10`,
+      { headers: auth }
+    )
+    expect(detail.status()).toBe(400)
+    const detailBare = await request.get(
+      `/api/workspaces/${wsId}/rental/contracts/00000000-0000-4000-8000-000000000001`,
+      { headers: auth }
+    )
+    expect(detailBare.status()).toBe(404)
+  })
+
+  test('proxy: draf sewa upstream mati 502; query invalid tetap 400 lokal', async () => {
+    const ok = await rawGet(`/api/workspaces/${wsId}/rental/contracts?limit=10`, 3001)
+    expect(ok.status).toBe(502)
+    expect(ok.body).toContain('layanan tidak tersedia')
+    expect(ok.body).not.toContain('127.0.0.1')
+    const bad = await rawGet(`/api/workspaces/${wsId}/rental/contracts?limit=0`, 3001)
+    expect(bad.status).toBe(400)
+    expect(bad.body).toContain('permintaan tidak valid')
+  })
 })

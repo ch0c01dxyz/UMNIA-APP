@@ -376,6 +376,7 @@ async function resendCreate() {
           <NuxtLink :to="`/workspaces/${wsId}/catalog`">Barang</NuxtLink>
           <NuxtLink :to="`/workspaces/${wsId}/assets`">Unit</NuxtLink>
           <NuxtLink :to="`/workspaces/${wsId}/prices`">Tarif</NuxtLink>
+          <NuxtLink :to="`/workspaces/${wsId}/rentals`">Draf sewa</NuxtLink>
         </nav>
 
         <section class="card" aria-labelledby="add-heading">

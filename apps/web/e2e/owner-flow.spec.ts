@@ -19,6 +19,7 @@ const SHOTS = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..'
 const SHOTS_UI01 = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'design', 'screenshots', 'f2-ui-01')
 const SHOTS_UI02 = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'design', 'screenshots', 'f2-ui-02')
 const SHOTS_UI03 = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'design', 'screenshots', 'f2-ui-03')
+const SHOTS_UI04 = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'design', 'screenshots', 'f2-ui-04')
 
 const ownerEmail = `pemilik-${RUN}@e2e.umnia.local`
 const staffEmail = `staf-${RUN}@e2e.umnia.local`
@@ -286,6 +287,70 @@ async function r1Setup(page: Page, tag: string): Promise<{ email: string, ws: st
   await uiRegister(page, email)
   const ws = await uiCreateWorkspace(page, `Toko R1 ${tag} ${RUN}`, email)
   const token = await apiToken(page.request, email)
+  return { email, ws, token }
+}
+
+interface DraftRow { id: string, workspace_id: string, customer_id: string, catalog_item_id: string, client_request_id: string, status: string, starts_at: string, ends_at: string, created_at: string, updated_at: string }
+
+async function listDraftRows(page: Page, ws: string, email: string = ownerEmail): Promise<DraftRow[]> {
+  const res = await page.request.get(`/api/workspaces/${ws}/rental/contracts?limit=100`, {
+    headers: { Authorization: `Bearer ${await apiToken(page.request, email)}` }
+  })
+  expect(res.status()).toBe(200)
+  const body = await res.json() as { items: DraftRow[] }
+  return body.items
+}
+
+// Buat N draf bulanan berurutan lewat API nyata, masing-masing dengan
+// kunci baru; interval ke-i: 2040-MM-01 s.d. bulan berikut.
+async function seedDrafts(req: APIRequestContext, ws: string, token: string, customerId: string, itemId: string, count: number): Promise<void> {
+  for (let i = 0; i < count; i++) {
+    const y = 2040 + Math.floor(i / 12)
+    const m = (i % 12) + 1
+    const m2 = m === 12 ? 1 : m + 1
+    const y2 = m === 12 ? y + 1 : y
+    const from = `${y}-${String(m).padStart(2, '0')}-01T00:00:00Z`
+    const to = `${y2}-${String(m2).padStart(2, '0')}-01T00:00:00Z`
+    const res = await req.post(`/api/workspaces/${ws}/rental/contracts`, {
+      headers: { Authorization: `Bearer ${token}`, 'Idempotency-Key': randomUUID() },
+      data: { customer_id: customerId, catalog_item_id: itemId, starts_at: from, ends_at: to }
+    })
+    expect(res.status(), `seed draf ${i}`).toBe(201)
+  }
+}
+
+// Cari satu pelanggan berdasarkan display_name; halaman API dipaginasi
+// 100 baris, jadi telusuri offset 0/100/200 sampai halaman pendek.
+async function customerByName(page: Page, ws: string, name: string, email: string = ownerEmail): Promise<{ id: string, display_name: string }> {
+  const token = await apiToken(page.request, email)
+  for (const offset of [0, 100, 200]) {
+    const res = await page.request.get(`/api/workspaces/${ws}/customers?limit=100&offset=${offset}`, {
+      headers: { Authorization: `Bearer ${token}` }
+    })
+    expect(res.status()).toBe(200)
+    const body = await res.json() as { items: Array<{ id: string, display_name: string }> }
+    const found = body.items.find(c => c.display_name === name)
+    if (found) return found
+    if (body.items.length < 100) break
+  }
+  throw new Error(`pelanggan ${name} tidak ditemukan di workspace ${ws}`)
+}
+
+// F2-UI-04: workspace + pemilik mandiri per tes draf (tanpa ws bersama)
+// supaya tiap tes draf bisa jalan sendiri lewat --grep. Rental di-grant
+// lewat CLI sungguhan lalu diaktifkan lewat API (alur aktivasi UI sendiri
+// sudah tercakup tes 'grant operator lewat CLI lalu aktivasi 200').
+async function draftSetup(page: Page, tag: string): Promise<{ email: string, ws: string, token: string }> {
+  const email = `d4-${tag}-${RUN}@e2e.umnia.local`
+  await uiRegister(page, email)
+  const ws = await uiCreateWorkspace(page, `Toko D4 ${tag} ${RUN}`, email)
+  grantRental(ws)
+  const token = await apiToken(page.request, email)
+  const act = await page.request.post(`/api/workspaces/${ws}/modules/rental.basic/activate`, {
+    headers: { Authorization: `Bearer ${token}` },
+    data: { version: '0.1.0' }
+  })
+  expect(act.status()).toBe(200)
   return { email, ws, token }
 }
 
@@ -3531,6 +3596,805 @@ test.describe.serial('alur pemilik', () => {
     await page.unrouteAll({ behavior: 'wait' })
     const withSums = manifest.map(m => ({ ...m, sha256: sha(m.file) }))
     writeFileSync(path.join(SHOTS_UI03, 'manifest.json'), JSON.stringify({ generated_by: 'owner-flow.spec.ts f2-ui-03', files: withSums }, null, 2) + '\n')
+    expect(withSums.length).toBe(9)
+  })
+
+  test('draf sewa: buat 201, tampil + persist + label pelanggan/barang', async ({ page }) => {
+    const { email, ws, token } = await draftSetup(page, 'a')
+    await seedCustomers(page.request, ws, token, 1, 'D4A')
+    await seedItems(page.request, ws, token, 1, 'D4A')
+    const customer = await customerByName(page, ws, 'D4A 1', email)
+    const item = await catalogItemBySku(page, ws, 'D4A-1', email)
+    await uiLogin(page, email)
+    await gotoAuthed(page, `/workspaces/${ws}/rentals`, email)
+    await expect(page.getByText('Draf ini tidak mereservasi barang, tidak menjamin ketersediaan, tidak memilih unit fisik, dan tidak mengunci harga.')).toBeVisible()
+    await page.getByLabel('Pelanggan').selectOption(customer.id)
+    await page.getByLabel('Barang').selectOption(item.id)
+    await page.getByLabel('Mulai (UTC)').fill('2047-01-01T00:00')
+    await page.getByLabel('Berakhir (UTC)').fill('2047-02-01T00:00')
+    await page.getByRole('button', { name: 'Simpan draf sewa' }).click()
+    await expect(page.getByRole('heading', { name: 'Draf tersimpan' })).toBeVisible()
+    await expect(page.locator('section[aria-labelledby="list-heading"]').getByText('D4A 1')).toBeVisible()
+    await expect(page.locator('section[aria-labelledby="list-heading"]').getByText('D4A-1 — Barang D4A 1')).toBeVisible()
+    await expect(page.locator('section[aria-labelledby="list-heading"]').getByText('2047-01-01T00:00:00Z')).toBeVisible()
+    await expect(page.locator('section[aria-labelledby="list-heading"]').getByText('2047-02-01T00:00:00Z')).toBeVisible()
+    const rows = await listDraftRows(page, ws, email)
+    expect(rows.length).toBe(1)
+    expect(rows[0].status).toBe('draft')
+    expect(rows[0].customer_id).toBe(customer.id)
+    expect(rows[0].catalog_item_id).toBe(item.id)
+  })
+
+  test('draf sewa: validasi 400 per-field + berakhir harus sesudah mulai', async ({ page }) => {
+    const { email, ws, token } = await draftSetup(page, 'b')
+    await seedCustomers(page.request, ws, token, 1, 'D4B')
+    await seedItems(page.request, ws, token, 1, 'D4B')
+    const customer = await customerByName(page, ws, 'D4B 1', email)
+    const item = await catalogItemBySku(page, ws, 'D4B-1', email)
+    await uiLogin(page, email)
+    await gotoAuthed(page, `/workspaces/${ws}/rentals`, email)
+    await page.getByRole('button', { name: 'Simpan draf sewa' }).click()
+    await expect(page.getByText('Pilih pelanggan dulu')).toBeVisible()
+    await expect(page.getByText('Pilih barang dulu')).toBeVisible()
+    await expect(page.getByText('Tanggal mulai wajib diisi')).toBeVisible()
+    await expect(page.getByText('Tanggal berakhir wajib diisi')).toBeVisible()
+    await page.getByLabel('Pelanggan').selectOption(customer.id)
+    await page.getByLabel('Barang').selectOption(item.id)
+    await page.getByLabel('Mulai (UTC)').fill('2047-02-01T00:00')
+    await page.getByLabel('Berakhir (UTC)').fill('2047-01-01T00:00')
+    await page.getByRole('button', { name: 'Simpan draf sewa' }).click()
+    await expect(page.getByText('Tanggal berakhir harus sesudah tanggal mulai')).toBeVisible()
+    expect((await listDraftRows(page, ws, email)).length).toBe(0)
+    await expect(page.getByRole('heading', { name: 'Draf tersimpan' })).toHaveCount(0)
+  })
+
+  test('draf sewa: kirim-ulang 200 baris sama sesudah respons hilang', async ({ page }) => {
+    const { email, ws, token } = await draftSetup(page, 'c')
+    await seedCustomers(page.request, ws, token, 1, 'D4C')
+    await seedItems(page.request, ws, token, 1, 'D4C')
+    const customer = await customerByName(page, ws, 'D4C 1', email)
+    const item = await catalogItemBySku(page, ws, 'D4C-1', email)
+    await uiLogin(page, email)
+    await gotoAuthed(page, `/workspaces/${ws}/rentals`, email)
+    let postAttempts = 0
+    let firstKey = ''
+    await page.route(
+      (url) => url.pathname.startsWith('/api/'),
+      async (route) => {
+        const u = new URL(route.request().url())
+        if (route.request().method() === 'POST' && u.pathname.endsWith('/rental/contracts')) {
+          postAttempts++
+          if (postAttempts === 1) {
+            firstKey = route.request().headers()['idempotency-key'] ?? ''
+            // Tulis sungguhan sampai ke API nyata lalu responsnya hilang
+            // (injeksi kegagalan browser-mocked, bukan bukti database/RLS).
+            await route.fetch()
+            await route.abort()
+            return
+          }
+        }
+        await route.continue()
+      }
+    )
+    await page.getByLabel('Pelanggan').selectOption(customer.id)
+    await page.getByLabel('Barang').selectOption(item.id)
+    await page.getByLabel('Mulai (UTC)').fill('2047-01-01T00:00')
+    await page.getByLabel('Berakhir (UTC)').fill('2047-02-01T00:00')
+    await page.getByRole('button', { name: 'Simpan draf sewa' }).click()
+    await expect(page.getByRole('heading', { name: 'Hasil penyimpanan tidak diketahui' })).toBeVisible()
+    expect(firstKey.length).toBeGreaterThan(0)
+    // Tulis pertama SUDAH terkomit di server meski responsnya hilang.
+    const committed = await listDraftRows(page, ws, email)
+    expect(committed.length).toBe(1)
+    const committedId = committed[0].id
+    await page.getByRole('button', { name: 'Kirim lagi (permintaan sama)' }).click()
+    await expect(page.getByRole('heading', { name: 'Draf tersimpan' })).toBeVisible()
+    expect(postAttempts).toBe(2)
+    const after = await listDraftRows(page, ws, email)
+    expect(after.length).toBe(1)
+    expect(after[0].id).toBe(committedId)
+    await page.unrouteAll({ behavior: 'wait' })
+  })
+
+  test('draf sewa: kirim-ulang 403 mempertahankan snapshot; kunci sama replay 200', async ({ page }) => {
+    const { email, ws, token } = await draftSetup(page, 'd')
+    await seedCustomers(page.request, ws, token, 1, 'D4D')
+    await seedItems(page.request, ws, token, 1, 'D4D')
+    const customer = await customerByName(page, ws, 'D4D 1', email)
+    const item = await catalogItemBySku(page, ws, 'D4D-1', email)
+    await uiLogin(page, email)
+    await gotoAuthed(page, `/workspaces/${ws}/rentals`, email)
+    let postAttempts = 0
+    let firstKey = ''
+    let firstBody: unknown = null
+    let replayKey = ''
+    let replayBody: unknown = null
+    let denyReplay = true
+    await page.route(
+      (url) => url.pathname.startsWith('/api/'),
+      async (route) => {
+        const u = new URL(route.request().url())
+        if (route.request().method() === 'POST' && u.pathname.endsWith('/rental/contracts')) {
+          postAttempts++
+          if (postAttempts === 1) {
+            firstKey = route.request().headers()['idempotency-key'] ?? ''
+            firstBody = route.request().postDataJSON()
+            await route.fetch()
+            await route.abort()
+            return
+          }
+          if (postAttempts === 2 && denyReplay) {
+            // Kirim-ulang ditolak 403: pemeriksaan izin server mendahului
+            // replay, jadi penolakan ini TIDAK membuktikan tulis awal gagal.
+            await route.fulfill({ status: 403, contentType: 'application/json', body: JSON.stringify({ error: 'tidak punya izin mengelola data usaha' }) })
+            return
+          }
+          if (postAttempts === 3) {
+            replayKey = route.request().headers()['idempotency-key'] ?? ''
+            replayBody = route.request().postDataJSON()
+          }
+        }
+        await route.continue()
+      }
+    )
+    await page.getByLabel('Pelanggan').selectOption(customer.id)
+    await page.getByLabel('Barang').selectOption(item.id)
+    await page.getByLabel('Mulai (UTC)').fill('2047-01-01T00:00')
+    await page.getByLabel('Berakhir (UTC)').fill('2047-02-01T00:00')
+    await page.getByRole('button', { name: 'Simpan draf sewa' }).click()
+    await expect(page.getByRole('heading', { name: 'Hasil penyimpanan tidak diketahui' })).toBeVisible()
+    expect(firstKey.length).toBeGreaterThan(0)
+    const committed = await listDraftRows(page, ws, email)
+    expect(committed.length).toBe(1)
+    const committedId = committed[0].id
+    await page.getByRole('button', { name: 'Kirim lagi (permintaan sama)' }).click()
+    await expect(page.getByRole('heading', { name: 'Hasil penyimpanan tidak diketahui' })).toBeVisible()
+    await expect(page.locator('section[aria-labelledby="add-heading"]').getByText('Kirim ulang ditolak')).toBeVisible()
+    await expect(page.locator('section[aria-labelledby="add-heading"]').getByText('tidak punya izin mengelola data usaha')).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Kirim lagi (permintaan sama)' })).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Simpan draf sewa' })).toBeDisabled()
+    await expect(page.getByLabel('Berakhir (UTC)')).toHaveValue('2047-02-01T00:00')
+    expect(postAttempts).toBe(2)
+    denyReplay = false
+    await page.getByRole('button', { name: 'Kirim lagi (permintaan sama)' }).click()
+    await expect(page.getByRole('heading', { name: 'Draf tersimpan' })).toBeVisible()
+    expect(postAttempts).toBe(3)
+    expect(replayKey).toBe(firstKey)
+    expect(replayBody).toEqual(firstBody)
+    const after = await listDraftRows(page, ws, email)
+    expect(after.length).toBe(1)
+    expect(after[0].id).toBe(committedId)
+    await page.unrouteAll({ behavior: 'wait' })
+  })
+
+  test('draf sewa: kirim-ulang 409 mismatch — satu status koheren, tanpa kirim-ulang', async ({ page }) => {
+    const { email, ws, token } = await draftSetup(page, 'e')
+    await seedCustomers(page.request, ws, token, 1, 'D4E')
+    await seedItems(page.request, ws, token, 1, 'D4E')
+    const customer = await customerByName(page, ws, 'D4E 1', email)
+    const item = await catalogItemBySku(page, ws, 'D4E-1', email)
+    await uiLogin(page, email)
+    await gotoAuthed(page, `/workspaces/${ws}/rentals`, email)
+    let postAttempts = 0
+    let firstKey = ''
+    await page.route(
+      (url) => url.pathname.startsWith('/api/'),
+      async (route) => {
+        const u = new URL(route.request().url())
+        if (route.request().method() === 'POST' && u.pathname.endsWith('/rental/contracts')) {
+          postAttempts++
+          if (postAttempts === 1) {
+            firstKey = route.request().headers()['idempotency-key'] ?? ''
+            await route.fetch()
+            await route.abort()
+            return
+          }
+          if (postAttempts === 2) {
+            await route.fulfill({ status: 409, contentType: 'application/json', body: JSON.stringify({ error: 'kunci idempotency sudah dipakai untuk permintaan yang berbeda' }) })
+            return
+          }
+        }
+        await route.continue()
+      }
+    )
+    await page.getByLabel('Pelanggan').selectOption(customer.id)
+    await page.getByLabel('Barang').selectOption(item.id)
+    await page.getByLabel('Mulai (UTC)').fill('2047-01-01T00:00')
+    await page.getByLabel('Berakhir (UTC)').fill('2047-02-01T00:00')
+    await page.getByRole('button', { name: 'Simpan draf sewa' }).click()
+    await expect(page.getByRole('heading', { name: 'Hasil penyimpanan tidak diketahui' })).toBeVisible()
+    await page.getByRole('button', { name: 'Kirim lagi (permintaan sama)' }).click()
+    await expect(page.getByRole('heading', { name: 'Kunci idempotency sudah dipakai' })).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'Hasil penyimpanan tidak diketahui' })).toHaveCount(0)
+    await expect(page.getByRole('button', { name: 'Kirim lagi (permintaan sama)' })).toHaveCount(0)
+    await expect(page.locator('section[aria-labelledby="add-heading"]').getByText('Permintaan yang belum pasti:')).toBeVisible()
+    await expect(page.locator('section[aria-labelledby="add-heading"]').getByText('Periode yang dicatat: mulai 2047-01-01T00:00:00Z; berakhir 2047-02-01T00:00:00Z (UTC).')).toBeVisible()
+    await expect(page.getByText('sampai sebelum')).toHaveCount(0)
+    // Submit biasa yang dikirim paksa tidak boleh POST lagi.
+    await page.locator('section[aria-labelledby="add-heading"] form').dispatchEvent('submit')
+    await page.waitForTimeout(500)
+    expect(postAttempts).toBe(2)
+    // Tindakan baru yang eksplisit memakai kunci baru dan berhasil.
+    await page.getByRole('button', { name: 'Mulai draf baru' }).click()
+    await page.getByLabel('Mulai (UTC)').fill('2047-03-01T00:00')
+    await page.getByLabel('Berakhir (UTC)').fill('2047-04-01T00:00')
+    await page.getByRole('button', { name: 'Simpan draf sewa' }).click()
+    await expect(page.getByRole('heading', { name: 'Draf tersimpan' })).toBeVisible()
+    expect(postAttempts).toBe(3)
+    const rows = await listDraftRows(page, ws, email)
+    expect(rows.length).toBe(2)
+    await page.unrouteAll({ behavior: 'wait' })
+  })
+
+  test('draf sewa: Mulai draf baru terkunci selama POST kirim-ulang berjalan', async ({ page }) => {
+    const { email, ws, token } = await draftSetup(page, 'f')
+    await seedCustomers(page.request, ws, token, 1, 'D4F')
+    await seedItems(page.request, ws, token, 1, 'D4F')
+    const customer = await customerByName(page, ws, 'D4F 1', email)
+    const item = await catalogItemBySku(page, ws, 'D4F-1', email)
+    await uiLogin(page, email)
+    await gotoAuthed(page, `/workspaces/${ws}/rentals`, email)
+    let postAttempts = 0
+    let releaseReplay!: () => void
+    const replayHeld = new Promise<void>((resolve) => { releaseReplay = resolve })
+    await page.route(
+      (url) => url.pathname.startsWith('/api/'),
+      async (route) => {
+        const u = new URL(route.request().url())
+        if (route.request().method() === 'POST' && u.pathname.endsWith('/rental/contracts')) {
+          postAttempts++
+          if (postAttempts === 1) {
+            await route.fetch()
+            await route.abort()
+            return
+          }
+          if (postAttempts === 2) {
+            await replayHeld
+          }
+        }
+        await route.continue()
+      }
+    )
+    await page.getByLabel('Pelanggan').selectOption(customer.id)
+    await page.getByLabel('Barang').selectOption(item.id)
+    await page.getByLabel('Mulai (UTC)').fill('2047-01-01T00:00')
+    await page.getByLabel('Berakhir (UTC)').fill('2047-02-01T00:00')
+    await page.getByRole('button', { name: 'Simpan draf sewa' }).click()
+    await expect(page.getByRole('heading', { name: 'Hasil penyimpanan tidak diketahui' })).toBeVisible()
+    const resend = page.getByRole('button', { name: 'Kirim lagi (permintaan sama)' })
+    await resend.click()
+    await expect.poll(() => postAttempts).toBe(2)
+    await expect(page.getByRole('button', { name: 'Mulai draf baru' })).toBeDisabled()
+    releaseReplay()
+    await expect(page.getByRole('heading', { name: 'Draf tersimpan' })).toBeVisible()
+    expect((await listDraftRows(page, ws, email)).length).toBe(1)
+    await page.unrouteAll({ behavior: 'wait' })
+  })
+
+  test('draf sewa: arsip — label riwayat (arsip — riwayat), bukan pilihan baru; capture tetap pulih', async ({ page }) => {
+    const { email, ws, token } = await draftSetup(page, 'g')
+    await seedCustomers(page.request, ws, token, 1, 'D4G')
+    await seedItems(page.request, ws, token, 2, 'D4G')
+    const customer = await customerByName(page, ws, 'D4G 1', email)
+    const item1 = await catalogItemBySku(page, ws, 'D4G-1', email)
+    const item2 = await catalogItemBySku(page, ws, 'D4G-2', email)
+    await seedDrafts(page.request, ws, token, customer.id, item1.id, 1)
+    psql(`UPDATE catalog_items SET status='archived' WHERE workspace_id='${ws}' AND id='${item1.id}'`)
+    await uiLogin(page, email)
+    await gotoAuthed(page, `/workspaces/${ws}/rentals`, email)
+    await expect(page.locator('section[aria-labelledby="list-heading"]').getByText('(arsip — riwayat)')).toBeVisible()
+    const itemOptions = await page.getByLabel('Barang').locator('option').allTextContents()
+    expect(itemOptions.join(' ')).not.toContain('D4G-1')
+    expect(itemOptions.join(' ')).toContain('D4G-2')
+    // Capture yang belum pasti atas barang yang kini diarsipkan tetap
+    // pulih lewat kirim-ulang kunci-sama sesudah guard lolos.
+    let postAttempts = 0
+    await page.route(
+      (url) => url.pathname.startsWith('/api/'),
+      async (route) => {
+        const u = new URL(route.request().url())
+        if (route.request().method() === 'POST' && u.pathname.endsWith('/rental/contracts')) {
+          postAttempts++
+          if (postAttempts === 1) {
+            await route.fetch()
+            await route.abort()
+            return
+          }
+        }
+        await route.continue()
+      }
+    )
+    await page.getByLabel('Pelanggan').selectOption(customer.id)
+    await page.getByLabel('Barang').selectOption(item2.id)
+    await page.getByLabel('Mulai (UTC)').fill('2047-05-01T00:00')
+    await page.getByLabel('Berakhir (UTC)').fill('2047-06-01T00:00')
+    await page.getByRole('button', { name: 'Simpan draf sewa' }).click()
+    await expect(page.getByRole('heading', { name: 'Hasil penyimpanan tidak diketahui' })).toBeVisible()
+    psql(`UPDATE catalog_items SET status='archived' WHERE workspace_id='${ws}' AND id='${item2.id}'`)
+    await page.getByRole('button', { name: 'Kirim lagi (permintaan sama)' }).click()
+    await expect(page.getByRole('heading', { name: 'Draf tersimpan' })).toBeVisible()
+    expect((await listDraftRows(page, ws, email)).length).toBe(2)
+    await page.unrouteAll({ behavior: 'wait' })
+  })
+
+  test('draf sewa: pelanggan/barang asing 404 identik', async ({ page }) => {
+    const { email, ws, token } = await draftSetup(page, 'h')
+    const other = await draftSetup(page, 'hx')
+    await seedCustomers(page.request, ws, token, 1, 'D4H')
+    await seedItems(page.request, ws, token, 1, 'D4H')
+    await seedCustomers(page.request, other.ws, other.token, 1, 'D4HX')
+    await seedItems(page.request, other.ws, other.token, 1, 'D4HX')
+    const customer = await customerByName(page, ws, 'D4H 1', email)
+    const item = await catalogItemBySku(page, ws, 'D4H-1', email)
+    const foreignCustomer = await customerByName(page, other.ws, 'D4HX 1', other.email)
+    const foreignItem = await catalogItemBySku(page, other.ws, 'D4HX-1', other.email)
+    const missingCustomer = randomUUID()
+    const missingItem = randomUUID()
+    const postDraft = async (customerId: string, itemId: string) => {
+      return await page.request.post(`/api/workspaces/${ws}/rental/contracts`, {
+        headers: { Authorization: `Bearer ${token}`, 'Idempotency-Key': randomUUID() },
+        data: { customer_id: customerId, catalog_item_id: itemId, starts_at: '2047-01-01T00:00:00Z', ends_at: '2047-02-01T00:00:00Z' }
+      })
+    }
+    const r1 = await postDraft(missingCustomer, item.id)
+    expect(r1.status()).toBe(404)
+    expect(((await r1.json()) as { error: string }).error).toBe('pelanggan tidak ditemukan')
+    const r2 = await postDraft(foreignCustomer.id, item.id)
+    expect(r2.status()).toBe(404)
+    expect(((await r2.json()) as { error: string }).error).toBe('pelanggan tidak ditemukan')
+    const r3 = await postDraft(customer.id, missingItem)
+    expect(r3.status()).toBe(404)
+    expect(((await r3.json()) as { error: string }).error).toBe('barang tidak ditemukan')
+    const r4 = await postDraft(customer.id, foreignItem.id)
+    expect(r4.status()).toBe(404)
+    expect(((await r4.json()) as { error: string }).error).toBe('barang tidak ditemukan')
+    expect((await listDraftRows(page, ws, email)).length).toBe(0)
+  })
+
+  test('draf sewa: pelanggan 403 awal — penolakan tampil, Memuat… hilang, sesi dipertahankan', async ({ page }) => {
+    const { email, ws, token } = await draftSetup(page, 'i')
+    await seedCustomers(page.request, ws, token, 1, 'D4I')
+    await seedItems(page.request, ws, token, 1, 'D4I')
+    await page.route(
+      (url) => url.pathname.startsWith('/api/') && url.pathname.endsWith('/customers') && url.pathname.includes(`/workspaces/${ws}/`),
+      async (route) => {
+        if (route.request().method() === 'GET') {
+          await route.fulfill({ status: 403, contentType: 'application/json', body: JSON.stringify({ error: 'bukan anggota workspace ini' }) })
+          return
+        }
+        await route.continue()
+      }
+    )
+    await uiLogin(page, email)
+    await gotoAuthed(page, `/workspaces/${ws}/rentals`, email)
+    await expect(page.getByRole('heading', { name: 'Tidak ada izin' })).toBeVisible()
+    await expect(page.getByText('bukan anggota workspace ini')).toBeVisible()
+    await expect(page.getByText('Memuat…')).toHaveCount(0)
+    await expect(page.getByText('Buat draf sewa')).toHaveCount(0)
+    await expect(page.getByRole('button', { name: 'Keluar' })).toBeVisible()
+    await page.unrouteAll({ behavior: 'wait' })
+  })
+
+  test('draf sewa: katalog 403 awal — penolakan tampil, Memuat… hilang, sesi dipertahankan', async ({ page }) => {
+    const { email, ws, token } = await draftSetup(page, 'j')
+    await seedCustomers(page.request, ws, token, 1, 'D4J')
+    await seedItems(page.request, ws, token, 1, 'D4J')
+    await page.route(
+      (url) => url.pathname.startsWith('/api/') && url.pathname.endsWith('/catalog/items') && url.pathname.includes(`/workspaces/${ws}/`),
+      async (route) => {
+        if (route.request().method() === 'GET') {
+          await route.fulfill({ status: 403, contentType: 'application/json', body: JSON.stringify({ error: 'bukan anggota workspace ini' }) })
+          return
+        }
+        await route.continue()
+      }
+    )
+    await uiLogin(page, email)
+    await gotoAuthed(page, `/workspaces/${ws}/rentals`, email)
+    await expect(page.getByRole('heading', { name: 'Tidak ada izin' })).toBeVisible()
+    await expect(page.getByText('bukan anggota workspace ini')).toBeVisible()
+    await expect(page.getByText('Memuat…')).toHaveCount(0)
+    await expect(page.getByText('Buat draf sewa')).toHaveCount(0)
+    await expect(page.getByRole('button', { name: 'Keluar' })).toBeVisible()
+    await page.unrouteAll({ behavior: 'wait' })
+  })
+
+  test('draf sewa: pagination pelanggan 101 + barang 101 (arsip dulu) + draf 51', async ({ page }) => {
+    const { email, ws, token } = await draftSetup(page, 'k')
+    await seedCustomers(page.request, ws, token, 101, 'D4K')
+    await seedItems(page.request, ws, token, 100, 'D4K')
+    psql(`UPDATE catalog_items SET status='archived' WHERE workspace_id='${ws}' AND sku LIKE 'D4K-%'`)
+    await seedItems(page.request, ws, token, 1, 'D4KX')
+    const customer101 = await customerByName(page, ws, 'D4K 101', email)
+    const activeItem = await catalogItemBySku(page, ws, 'D4KX-1', email)
+    const firstCustomer = await customerByName(page, ws, 'D4K 1', email)
+    await seedDrafts(page.request, ws, token, firstCustomer.id, activeItem.id, 51)
+    await uiLogin(page, email)
+    await gotoAuthed(page, `/workspaces/${ws}/rentals`, email)
+    // Pelanggan: halaman pertama 100, klik muat-lebih -> ke-101 muncul.
+    await expect(page.getByText('100 pelanggan dimuat sejauh ini.')).toBeVisible()
+    await page.getByRole('button', { name: 'Muat lebih banyak pelanggan' }).click()
+    await expect(page.getByText('101 pelanggan dimuat sejauh ini.')).toBeVisible()
+    const customerOptions = await page.getByLabel('Pelanggan').locator('option').allTextContents()
+    expect(customerOptions.join(' ')).toContain('D4K 101')
+    // Barang: halaman mentah pertama penuh arsip -> tanpa pilihan aktif;
+    // muat-lebih (kursor mentah) -> barang aktif muncul, arsip tak ditawarkan.
+    await expect(page.getByText('100 barang dimuat sejauh ini.')).toBeVisible()
+    let itemOptions = await page.getByLabel('Barang').locator('option').allTextContents()
+    expect(itemOptions.length).toBe(1)
+    await page.getByRole('button', { name: 'Muat lebih banyak barang' }).click()
+    await expect(page.getByText('101 barang dimuat sejauh ini.')).toBeVisible()
+    itemOptions = await page.getByLabel('Barang').locator('option').allTextContents()
+    expect(itemOptions.join(' ')).toContain('D4KX-1')
+    expect(itemOptions.join(' ')).not.toContain('D4K-1')
+    // Daftar: 50 baris + Muat lebih -> 51 baris.
+    await expect(listItems(page)).toHaveCount(50)
+    await page.getByRole('button', { name: 'Muat lebih' }).click()
+    await expect(listItems(page)).toHaveCount(51)
+  })
+
+  test('draf sewa: tanggal lampau diizinkan; UTC menit; riwayat submenit tampil apa adanya', async ({ page }) => {
+    const { email, ws, token } = await draftSetup(page, 'l')
+    await seedCustomers(page.request, ws, token, 1, 'D4L')
+    await seedItems(page.request, ws, token, 1, 'D4L')
+    const customer = await customerByName(page, ws, 'D4L 1', email)
+    const item = await catalogItemBySku(page, ws, 'D4L-1', email)
+    await uiLogin(page, email)
+    await gotoAuthed(page, `/workspaces/${ws}/rentals`, email)
+    await page.getByLabel('Pelanggan').selectOption(customer.id)
+    await page.getByLabel('Barang').selectOption(item.id)
+    await page.getByLabel('Mulai (UTC)').fill('2020-01-01T00:00')
+    await page.getByLabel('Berakhir (UTC)').fill('2020-02-01T00:00')
+    await page.getByRole('button', { name: 'Simpan draf sewa' }).click()
+    await expect(page.getByRole('heading', { name: 'Draf tersimpan' })).toBeVisible()
+    await expect(page.locator('section[aria-labelledby="list-heading"]').getByText('2020-01-01T00:00:00Z')).toBeVisible()
+    const sub = await page.request.post(`/api/workspaces/${ws}/rental/contracts`, {
+      headers: { Authorization: `Bearer ${token}`, 'Idempotency-Key': randomUUID() },
+      data: { customer_id: customer.id, catalog_item_id: item.id, starts_at: '2033-06-01T10:30:45.123456Z', ends_at: '2033-07-01T10:30:45.123456Z' }
+    })
+    expect(sub.status()).toBe(201)
+    await page.locator('section[aria-labelledby="list-heading"]').getByRole('button', { name: 'Muat ulang daftar' }).click()
+    await expect(page.locator('section[aria-labelledby="list-heading"]').getByText('2033-06-01T10:30:45.123456Z')).toBeVisible()
+  })
+
+  test('draf sewa: simpan 201 mereset prefix daftar; refresh gagal bukan kosong', async ({ page }) => {
+    const { email, ws, token } = await draftSetup(page, 'm')
+    await seedCustomers(page.request, ws, token, 1, 'D4M')
+    await seedItems(page.request, ws, token, 1, 'D4M')
+    const customer = await customerByName(page, ws, 'D4M 1', email)
+    const item = await catalogItemBySku(page, ws, 'D4M-1', email)
+    await uiLogin(page, email)
+    await gotoAuthed(page, `/workspaces/${ws}/rentals`, email)
+    await expect(page.getByText('Belum ada draf.')).toBeVisible()
+    let listGets = 0
+    await page.route(
+      (url) => url.pathname.startsWith('/api/'),
+      async (route) => {
+        const u = new URL(route.request().url())
+        if (route.request().method() === 'GET' && u.pathname.endsWith('/rental/contracts')) {
+          listGets++
+          if (listGets === 1) {
+            // Rute dipasang sesudah muat awal: GET pertama yang tertangkap
+            // adalah refresh sesudah simpan 201.
+            await route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: 'daftar kontrak gagal dibaca' }) })
+            return
+          }
+        }
+        await route.continue()
+      }
+    )
+    await page.getByLabel('Pelanggan').selectOption(customer.id)
+    await page.getByLabel('Barang').selectOption(item.id)
+    await page.getByLabel('Mulai (UTC)').fill('2047-01-01T00:00')
+    await page.getByLabel('Berakhir (UTC)').fill('2047-02-01T00:00')
+    await page.getByRole('button', { name: 'Simpan draf sewa' }).click()
+    await expect(page.getByRole('heading', { name: 'Draf tersimpan' })).toBeVisible()
+    await expect(page.locator('section[aria-labelledby="list-heading"]').getByText('Daftar gagal dimuat ulang. Coba muat ulang daftar.')).toBeVisible()
+    await expect(page.locator('section[aria-labelledby="list-heading"]').getByText('Belum ada draf.')).toHaveCount(0)
+    await page.unrouteAll({ behavior: 'wait' })
+    await page.locator('section[aria-labelledby="list-heading"]').getByRole('button', { name: 'Muat ulang daftar' }).click()
+    await expect(listItems(page)).toHaveCount(1)
+  })
+
+  test('draf sewa: GET koleksi 404 = galat baca, bukan penghapusan', async ({ page }) => {
+    const { email, ws, token } = await draftSetup(page, 'n')
+    await seedCustomers(page.request, ws, token, 1, 'D4N')
+    await seedItems(page.request, ws, token, 1, 'D4N')
+    await page.route(
+      (url) => url.pathname.startsWith('/api/'),
+      async (route) => {
+        const u = new URL(route.request().url())
+        if (route.request().method() === 'GET' && u.pathname.endsWith('/rental/contracts')) {
+          await route.fulfill({ status: 404, contentType: 'application/json', body: JSON.stringify({ error: 'tidak ditemukan' }) })
+          return
+        }
+        await route.continue()
+      }
+    )
+    await uiLogin(page, email)
+    await gotoAuthed(page, `/workspaces/${ws}/rentals`, email)
+    await expect(page.locator('section[aria-labelledby="list-heading"]').getByText('Daftar draf gagal dimuat. Coba muat ulang daftar.')).toBeVisible()
+    await expect(page.locator('section[aria-labelledby="list-heading"]').getByText('Belum ada draf.')).toHaveCount(0)
+    await page.unrouteAll({ behavior: 'wait' })
+    await page.locator('section[aria-labelledby="list-heading"]').getByRole('button', { name: 'Muat ulang daftar' }).click()
+    await expect(page.getByText('Belum ada draf.')).toBeVisible()
+  })
+
+  test('draf sewa: POST 403 pertama mempertahankan riwayat + isian', async ({ page }) => {
+    const { email, ws, token } = await draftSetup(page, 'o')
+    await seedCustomers(page.request, ws, token, 1, 'D4O')
+    await seedItems(page.request, ws, token, 1, 'D4O')
+    const customer = await customerByName(page, ws, 'D4O 1', email)
+    const item = await catalogItemBySku(page, ws, 'D4O-1', email)
+    await seedDrafts(page.request, ws, token, customer.id, item.id, 1)
+    // Kasir baru per tes (bukan staf bersama): bisa jalan sendiri lewat
+    // --grep maupun dalam suite penuh.
+    const cashierEmail = `d4-kasir-${RUN}@e2e.umnia.local`
+    await uiRegister(page, cashierEmail)
+    const code = await uiInvite(page, ws, cashierEmail, 'cashier', email)
+    await uiLogin(page, cashierEmail)
+    await gotoAuthed(page, `/invites/accept?workspace_id=${ws}`, cashierEmail)
+    await page.getByLabel('Kode undangan').fill(code)
+    await page.locator('form button[type="submit"]').click()
+    await expect(page).toHaveURL(new RegExp(`/workspaces/${ws}/members$`))
+    await gotoAuthed(page, `/workspaces/${ws}/rentals`, cashierEmail)
+    await expect(listItems(page)).toHaveCount(1)
+    await page.getByLabel('Pelanggan').selectOption(customer.id)
+    await page.getByLabel('Barang').selectOption(item.id)
+    await page.getByLabel('Mulai (UTC)').fill('2047-01-01T00:00')
+    await page.getByLabel('Berakhir (UTC)').fill('2047-02-01T00:00')
+    await page.getByRole('button', { name: 'Simpan draf sewa' }).click()
+    await expect(page.locator('section[aria-labelledby="add-heading"]').getByText('tidak punya izin mengelola data usaha')).toBeVisible()
+    await expect(page.getByLabel('Berakhir (UTC)')).toHaveValue('2047-02-01T00:00')
+    await expect(listItems(page)).toHaveCount(1)
+  })
+
+  test('draf sewa R1-1: barang ditolak 409 tidak meracuni pilihan lain — pilih B lalu 201', async ({ page }) => {
+    const { email, ws, token } = await draftSetup(page, 'r1a')
+    await seedCustomers(page.request, ws, token, 1, 'D4R1A')
+    await seedItems(page.request, ws, token, 2, 'D4R1A')
+    const customer = await customerByName(page, ws, 'D4R1A 1', email)
+    const itemA = await catalogItemBySku(page, ws, 'D4R1A-1', email)
+    const itemB = await catalogItemBySku(page, ws, 'D4R1A-2', email)
+    await uiLogin(page, email)
+    await gotoAuthed(page, `/workspaces/${ws}/rentals`, email)
+    // Pilih A + pelanggan + periode selagi A masih aktif di peta halaman.
+    await page.getByLabel('Pelanggan').selectOption(customer.id)
+    await page.getByLabel('Barang').selectOption(itemA.id)
+    await page.getByLabel('Mulai (UTC)').fill('2047-01-01T00:00')
+    await page.getByLabel('Berakhir (UTC)').fill('2047-02-01T00:00')
+    // A menjadi tidak aktif di antara pilihan termuat dan tulis pertama.
+    psql(`UPDATE catalog_items SET status='archived' WHERE workspace_id='${ws}' AND id='${itemA.id}'`)
+    await page.getByRole('button', { name: 'Simpan draf sewa' }).click()
+    // Penolakan server 409 yang sebenarnya; tidak ada baris A yang terbuat.
+    await expect(page.getByText('barang tidak aktif')).toBeVisible()
+    expect((await listDraftRows(page, ws, email)).length).toBe(0)
+    // Tanpa reload: pilih B yang aktif. Pemberitahuan arsip hilang, tanggal
+    // + tombol simpan kembali, pelanggan/periode dipertahankan.
+    await page.getByLabel('Barang').selectOption(itemB.id)
+    await expect(page.getByText('Barang diarsipkan — riwayat draf tetap dapat dibaca; draf baru tidak dapat dibuat.')).toHaveCount(0)
+    await expect(page.getByText('barang tidak aktif')).toHaveCount(0)
+    await expect(page.getByLabel('Pelanggan')).toHaveValue(customer.id)
+    await expect(page.getByLabel('Mulai (UTC)')).toHaveValue('2047-01-01T00:00')
+    await expect(page.getByLabel('Berakhir (UTC)')).toHaveValue('2047-02-01T00:00')
+    await expect(page.getByLabel('Berakhir (UTC)')).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Simpan draf sewa' })).toBeVisible()
+    // Kirim biasa (bukan kirim-ulang): 201 sungguhan untuk B.
+    await page.getByRole('button', { name: 'Simpan draf sewa' }).click()
+    await expect(page.getByRole('heading', { name: 'Draf tersimpan' })).toBeVisible()
+    const rows = await listDraftRows(page, ws, email)
+    expect(rows.length).toBe(1)
+    expect(rows[0].catalog_item_id).toBe(itemB.id)
+    expect(rows[0].customer_id).toBe(customer.id)
+    expect(rows[0].status).toBe('draft')
+    // Kembali ke A yang benar-benar tidak aktif: tetap ditolak server 409,
+    // tanpa baris baru (A masih ditawarkan dari peta yang belum dimuat ulang).
+    await page.getByLabel('Barang').selectOption(itemA.id)
+    await page.getByLabel('Mulai (UTC)').fill('2047-05-01T00:00')
+    await page.getByLabel('Berakhir (UTC)').fill('2047-06-01T00:00')
+    await page.getByRole('button', { name: 'Simpan draf sewa' }).click()
+    await expect(page.getByText('barang tidak aktif')).toBeVisible()
+    expect((await listDraftRows(page, ws, email)).length).toBe(1)
+  })
+
+  test('draf sewa R1-2: salinan periode netral — bantuan input, riwayat, simpan, ringkasan pemulihan', async ({ page }) => {
+    const { email, ws, token } = await draftSetup(page, 'r1b')
+    await seedCustomers(page.request, ws, token, 1, 'D4R1B')
+    await seedItems(page.request, ws, token, 1, 'D4R1B')
+    const customer = await customerByName(page, ws, 'D4R1B 1', email)
+    const item = await catalogItemBySku(page, ws, 'D4R1B-1', email)
+    await uiLogin(page, email)
+    await gotoAuthed(page, `/workspaces/${ws}/rentals`, email)
+    // Bantuan input berakhir memakai salinan netral, tanpa klaim eksklusif.
+    await expect(page.getByText('Tanggal dan jam berakhir yang dicatat untuk draf ini (UTC).')).toBeVisible()
+    await expect(page.getByText('tanggal berakhir tidak termasuk')).toHaveCount(0)
+    await expect(page.getByText('sampai sebelum')).toHaveCount(0)
+    await page.getByLabel('Pelanggan').selectOption(customer.id)
+    await page.getByLabel('Barang').selectOption(item.id)
+    await page.getByLabel('Mulai (UTC)').fill('2047-01-01T00:00')
+    await page.getByLabel('Berakhir (UTC)').fill('2047-02-01T00:00')
+    await page.getByRole('button', { name: 'Simpan draf sewa' }).click()
+    await expect(page.getByRole('heading', { name: 'Draf tersimpan' })).toBeVisible()
+    await expect(page.getByText('Periode yang dicatat: mulai 2047-01-01T00:00:00Z; berakhir 2047-02-01T00:00:00Z (UTC). Status: Draf.')).toBeVisible()
+    await expect(page.locator('section[aria-labelledby="list-heading"]').getByText('Periode yang dicatat: mulai 2047-01-01T00:00:00Z; berakhir 2047-02-01T00:00:00Z (UTC)')).toBeVisible()
+    await expect(page.getByText('sampai sebelum')).toHaveCount(0)
+    // Ringkasan pemulihan (unknown) memakai salinan netral yang sama.
+    let postAttempts = 0
+    await page.route(
+      (url) => url.pathname.startsWith('/api/'),
+      async (route) => {
+        const u = new URL(route.request().url())
+        if (route.request().method() === 'POST' && u.pathname.endsWith('/rental/contracts')) {
+          postAttempts++
+          if (postAttempts === 1) {
+            await route.fetch()
+            await route.abort()
+            return
+          }
+        }
+        await route.continue()
+      }
+    )
+    await page.getByLabel('Mulai (UTC)').fill('2047-03-01T00:00')
+    await page.getByLabel('Berakhir (UTC)').fill('2047-04-01T00:00')
+    await page.getByRole('button', { name: 'Simpan draf sewa' }).click()
+    await expect(page.getByRole('heading', { name: 'Hasil penyimpanan tidak diketahui' })).toBeVisible()
+    await expect(page.getByText('Periode yang dicatat: mulai 2047-03-01T00:00:00Z; berakhir 2047-04-01T00:00:00Z (UTC).')).toBeVisible()
+    await expect(page.getByText('sampai sebelum')).toHaveCount(0)
+    await page.getByRole('button', { name: 'Kirim lagi (permintaan sama)' }).click()
+    await expect(page.getByRole('heading', { name: 'Draf tersimpan' })).toBeVisible()
+    expect((await listDraftRows(page, ws, email)).length).toBe(2)
+    await page.unrouteAll({ behavior: 'wait' })
+  })
+
+  test('draf sewa: navigasi tujuh tautan 44x44 + fokus keyboard di 360/768/1440', async ({ page }) => {
+    // 21 muat halaman penuh (7 halaman x 3 lebar) — butuh lebih dari
+    // batas 120 dtk per tes; bukan pelonggaran assertion.
+    test.setTimeout(300000)
+    const { email, ws } = await draftSetup(page, 'p')
+    const pages = ['members', 'modules', 'customers', 'catalog', 'assets', 'prices', 'rentals']
+    const labels = ['Anggota', 'Fitur', 'Pelanggan', 'Barang', 'Unit', 'Tarif', 'Draf sewa']
+    for (const size of [{ width: 360, height: 640 }, { width: 768, height: 1024 }, { width: 1440, height: 900 }]) {
+      await page.setViewportSize(size)
+      for (const p of pages) {
+        await gotoAuthed(page, `/workspaces/${ws}/${p}`, email)
+        for (const label of labels) {
+          const link = page.getByRole('link', { name: label, exact: true })
+          await expect(link).toBeVisible()
+          const box = await link.boundingBox()
+          expect(box !== null && box.width >= 44 && box.height >= 44, `${p} ${size.width} ${label}`).toBe(true)
+        }
+      }
+    }
+    await page.setViewportSize({ width: 1440, height: 900 })
+    await gotoAuthed(page, `/workspaces/${ws}/rentals`, email)
+    // Fokus keyboard terlihat: dari tombol Keluar (tepat sebelum nav
+    // workspace dalam urutan Tab), satu Tab nyata harus mendarat di
+    // Anggota. Tunggu nav tampil dulu supaya Tab tidak ditekan saat
+    // halaman masih memuat (nav belum ter-render).
+    const workspaceNav = page.getByRole('navigation', { name: 'Navigasi workspace' })
+    await expect(workspaceNav).toBeVisible()
+    const anggota = workspaceNav.getByRole('link', { name: 'Anggota', exact: true })
+    await expect(anggota).toBeVisible()
+    const keluar = page.getByRole('button', { name: 'Keluar', exact: true })
+    await keluar.focus()
+    await expect(keluar).toBeFocused()
+    await page.keyboard.press('Tab')
+    await expect(anggota).toBeFocused()
+  })
+
+  test('screenshot f2-ui-04: tiga utama + kosong + tanpa-izin + picker + tak-diketahui + muat + galat + manifest', async ({ page }) => {
+    mkdirSync(SHOTS_UI04, { recursive: true })
+    const manifest: Array<{ file: string, viewport: string, state: string, provenance: string }> = []
+    const shot = async (name: string, state: string, provenance: string, width: number) => {
+      const file = `${name}-${width}.png`
+      await page.screenshot({ path: path.join(SHOTS_UI04, file), fullPage: true })
+      manifest.push({ file, viewport: `${width}`, state, provenance })
+    }
+    const sha = (name: string) => createHash('sha256').update(readFileSync(path.join(SHOTS_UI04, name))).digest('hex')
+    const { email, ws, token } = await draftSetup(page, 'shot')
+    await seedCustomers(page.request, ws, token, 1, 'SHT')
+    await seedItems(page.request, ws, token, 1, 'SHT')
+    const customer = await customerByName(page, ws, 'SHT 1', email)
+    const item = await catalogItemBySku(page, ws, 'SHT-1', email)
+    await seedDrafts(page.request, ws, token, customer.id, item.id, 1)
+    const sizes = [
+      { width: 360, height: 640 },
+      { width: 768, height: 1024 },
+      { width: 1440, height: 900 }
+    ]
+    for (const size of sizes) {
+      await page.setViewportSize(size)
+      await uiLogin(page, email)
+      await gotoAuthed(page, `/workspaces/${ws}/rentals`, email)
+      await expect(listItems(page).first()).toBeVisible()
+      await shot('01-rentals', 'populated-live', 'live', size.width)
+    }
+    await page.setViewportSize({ width: 360, height: 640 })
+    const emptySetup = await draftSetup(page, 'shot-empty')
+    await seedCustomers(page.request, emptySetup.ws, emptySetup.token, 1, 'SHTE')
+    await seedItems(page.request, emptySetup.ws, emptySetup.token, 1, 'SHTE')
+    await gotoAuthed(page, `/workspaces/${emptySetup.ws}/rentals`, emptySetup.email)
+    await expect(page.getByText('Belum ada draf.')).toBeVisible()
+    await shot('04-rentals-empty', 'empty-live', 'live', 360)
+    // Non-anggota baru per tes (bukan otherEmail bersama): bisa jalan
+    // sendiri lewat --grep maupun dalam suite penuh.
+    const nomemberEmail = `d4-bukan-anggota-${RUN}@e2e.umnia.local`
+    await uiRegister(page, nomemberEmail)
+    await uiLogin(page, nomemberEmail)
+    await gotoAuthed(page, `/workspaces/${ws}/rentals`, nomemberEmail)
+    await expect(page.getByRole('alert')).toContainText('bukan anggota workspace ini')
+    await shot('05-rentals-noperm', 'no-permission-live', 'live', 360)
+    await uiLogin(page, email)
+    // Picker: >100 pelanggan + >100 barang, kedua tombol muat-lebih ditekan.
+    const pickSetup = await draftSetup(page, 'shot-pick')
+    await seedCustomers(page.request, pickSetup.ws, pickSetup.token, 101, 'SHTP')
+    await seedItems(page.request, pickSetup.ws, pickSetup.token, 101, 'SHTP')
+    await gotoAuthed(page, `/workspaces/${pickSetup.ws}/rentals`, pickSetup.email)
+    await page.getByRole('button', { name: 'Muat lebih banyak pelanggan' }).click()
+    await expect(page.getByText('101 pelanggan dimuat sejauh ini.')).toBeVisible()
+    await page.getByRole('button', { name: 'Muat lebih banyak barang' }).click()
+    await expect(page.getByText('101 barang dimuat sejauh ini.')).toBeVisible()
+    await shot('06-rentals-pickers', 'picker-live', 'live', 360)
+    // Tak diketahui: POST sampai ke API nyata lalu responsnya hilang.
+    await gotoAuthed(page, `/workspaces/${emptySetup.ws}/rentals`, emptySetup.email)
+    await page.route(
+      (url) => url.pathname.startsWith('/api/'),
+      async (route) => {
+        const u = new URL(route.request().url())
+        if (route.request().method() === 'POST' && u.pathname.endsWith('/rental/contracts')) {
+          await route.fetch()
+          await route.abort()
+          return
+        }
+        await route.continue()
+      }
+    )
+    const emptyCustomer = await customerByName(page, emptySetup.ws, 'SHTE 1', emptySetup.email)
+    const emptyItem = await catalogItemBySku(page, emptySetup.ws, 'SHTE-1', emptySetup.email)
+    await page.getByLabel('Pelanggan').selectOption(emptyCustomer.id)
+    await page.getByLabel('Barang').selectOption(emptyItem.id)
+    await page.getByLabel('Mulai (UTC)').fill('2047-01-01T00:00')
+    await page.getByLabel('Berakhir (UTC)').fill('2047-02-01T00:00')
+    await page.getByRole('button', { name: 'Simpan draf sewa' }).click()
+    await expect(page.getByRole('heading', { name: 'Hasil penyimpanan tidak diketahui' })).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Kirim lagi (permintaan sama)' })).toBeVisible()
+    await shot('07-rentals-unknown', 'unknown-mocked', 'mocked-route', 360)
+    await page.unrouteAll({ behavior: 'wait' })
+    // Muat: respons ditahan 2,5 dtk, tangkap status memuat.
+    await page.route(
+      (url) => url.pathname.startsWith('/api/') && url.pathname.endsWith('/rental/contracts'),
+      async (route) => {
+        await new Promise(r => setTimeout(r, 2500))
+        await route.continue()
+      }
+    )
+    await gotoAuthed(page, `/workspaces/${emptySetup.ws}/rentals`, emptySetup.email)
+    await expect(page.getByText('Memuat…')).toBeVisible()
+    await shot('08-rentals-loading', 'loading-mocked', 'mocked-route', 360)
+    await page.unrouteAll({ behavior: 'wait' })
+    // Langkah tak-diketahui di atas menulis draf sungguhan ke workspace
+    // kosong ini, jadi sesudah pemulihan daftar menampilkan baris itu,
+    // bukan "Belum ada draf.".
+    await expect(listItems(page).first()).toBeVisible()
+    // Galat: respons GET dibatalkan, tangkap halaman galat. POST login
+    // tetap diteruskan supaya gotoAuthed bisa masuk.
+    await page.route(
+      (url) => url.pathname.startsWith('/api/'),
+      async (route) => {
+        if (route.request().method() === 'GET') {
+          await route.abort()
+          return
+        }
+        await route.continue()
+      }
+    )
+    await gotoAuthed(page, `/workspaces/${emptySetup.ws}/rentals`, emptySetup.email)
+    await expect(page.getByText('Layanan tidak tersedia').first()).toBeVisible()
+    await shot('09-rentals-error', 'error-mocked', 'mocked-route', 360)
+    await page.unrouteAll({ behavior: 'wait' })
+    const withSums = manifest.map(m => ({ ...m, sha256: sha(m.file) }))
+    writeFileSync(path.join(SHOTS_UI04, 'manifest.json'), JSON.stringify({ generated_by: 'owner-flow.spec.ts f2-ui-04', files: withSums }, null, 2) + '\n')
     expect(withSums.length).toBe(9)
   })
 })

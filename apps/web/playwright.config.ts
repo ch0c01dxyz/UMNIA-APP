@@ -24,7 +24,7 @@ export default defineConfig({
     screenshot: 'off'
   },
   projects: [
-    { name: 'owner-flow', testMatch: 'owner-flow.spec.ts' },
+    { name: 'owner-flow', testMatch: 'owner-flow.spec.ts', use: { timezoneId: 'Asia/Jakarta' } },
     { name: 'proxy-session', testMatch: 'proxy-session.spec.ts' }
   ],
   webServer: [

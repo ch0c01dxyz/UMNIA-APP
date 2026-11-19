@@ -30,6 +30,10 @@ export function resolveLoginTarget(raw: string | null | undefined): string {
   if (path === '/workspaces/new') return path
   const m = path.match(/^\/workspaces\/([0-9a-f-]{36})\/(members|modules|customers|catalog|assets|prices|rentals)$/)
   if (m && UUID_RE.test(m[1])) return path
+  // Harga draf (F2-UI-05): rute sibling dengan workspace DAN draft yang
+  // keduanya divalidasi UUID; bukan pelonggaran pola umum.
+  const price = path.match(/^\/workspaces\/([0-9a-f-]{36})\/rental-prices\/([0-9a-f-]{36})$/)
+  if (price && UUID_RE.test(price[1]) && UUID_RE.test(price[2])) return path
   if (path === '/invites/accept') {
     const params = new URLSearchParams(query)
     const ws = params.get('workspace_id')

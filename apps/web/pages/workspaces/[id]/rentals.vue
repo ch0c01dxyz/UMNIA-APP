@@ -1,8 +1,10 @@
 <script setup lang="ts">
 // Draf sewa workspace (GET/POST /workspaces/{id}/rental/contracts +
 // GET pelanggan/katalog). LIST+CREATE saja; tanpa detail/edit/hapus,
-// tanpa stok/unit/ketersediaan, tanpa holds/quote/harga, tanpa
-// serah-terima/retur/kerusakan, tanpa pembayaran. Draf TIDAK mereservasi
+// tanpa stok/unit/ketersediaan, tanpa holds, tanpa serah-terima/retur/
+// kerusakan, tanpa pembayaran. Harga draf dibaca/dicatat di halaman
+// "Harga draf" lewat tautan "Lihat harga" per baris riwayat; halaman ini
+// sendiri tidak menampilkan quote/harga. Draf TIDAK mereservasi
 // barang, TIDAK menjamin ketersediaan, TIDAK memilih unit fisik, dan
 // TIDAK mengunci harga — salinan itu tampil tetap di halaman.
 //
@@ -1183,7 +1185,7 @@ async function resendCreate() {
           <p v-if="refreshing" role="status">Memuat daftar…</p>
           <p v-else-if="items.length === 0 && listLoaded && !reloadError" class="muted">Belum ada draf.</p>
           <ul v-else class="plain">
-            <li v-for="d in items" :key="d.id"><strong>{{ customerLabel(d.customer_id) }} — {{ catalogLabel(d.catalog_item_id) }}</strong><br>Periode yang dicatat: mulai {{ d.starts_at }}; berakhir {{ d.ends_at }} (UTC)<br>Status: Draf</li>
+            <li v-for="d in items" :key="d.id"><strong>{{ customerLabel(d.customer_id) }} — {{ catalogLabel(d.catalog_item_id) }}</strong><br>Periode yang dicatat: mulai {{ d.starts_at }}; berakhir {{ d.ends_at }} (UTC)<br>Status: Draf<br><NuxtLink class="btn btn-secondary" :to="`/workspaces/${wsId}/rental-prices/${d.id}`">Lihat harga</NuxtLink></li>
           </ul>
           <p v-if="loadMoreError" class="alert" role="alert">{{ loadMoreError }}</p>
           <p v-if="hasMore">

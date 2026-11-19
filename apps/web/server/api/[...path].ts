@@ -33,7 +33,11 @@ const ALLOWLIST: Route[] = [
   { method: 'GET', segments: ['workspaces', 'uuid', 'catalog', 'items', 'uuid', 'prices'], query: true },
   { method: 'POST', segments: ['workspaces', 'uuid', 'catalog', 'items', 'uuid', 'prices'] },
   { method: 'GET', segments: ['workspaces', 'uuid', 'rental', 'contracts'], query: true },
-  { method: 'POST', segments: ['workspaces', 'uuid', 'rental', 'contracts'] }
+  { method: 'POST', segments: ['workspaces', 'uuid', 'rental', 'contracts'] },
+  // Harga draf (F2-UI-05): quote/fakta baca + pencatatan; tanpa query.
+  { method: 'GET', segments: ['workspaces', 'uuid', 'rental', 'contracts', 'uuid', 'quote'] },
+  { method: 'POST', segments: ['workspaces', 'uuid', 'rental', 'contracts', 'uuid', 'accept-price'] },
+  { method: 'GET', segments: ['workspaces', 'uuid', 'rental', 'contracts', 'uuid', 'agreed-price'] }
 ]
 
 // Validasi query daftar pelanggan/barang/unit/tarif/draf sewa (F2-UI-01/F2-UI-02/F2-UI-03/F2-UI-04,

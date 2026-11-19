@@ -1,5 +1,7 @@
 # F1-UPGRADE-FINAL-GUARDS — laporan perbaikan (2026-11-06)
 
+> Historical report. Its original evidence package is [pinned in Git history](https://github.com/ch0c01dxyz/UMNIA-APP/tree/be34a24e6f73e04c77263cecb1d43dd59e72c616/docs/reviews/f1-upgrade-final-guards). See the [review index](README.md) for relocated helpers and current status.
+
 STATUS: SELESAI (MF1+MF2 terverifikasi pada harness; eksekusi Windows nyata MASIH NOT RUN) | TASK_ID: F1-UPGRADE-FINAL-GUARDS | FILES CHANGED: lihat §7 | TESTS: repro baseline 3+1 checks, fixed baru 30 checks, regresi 49 checks, check-deployment 23/0/0 | RISK / BLOCKERS: `docker compose up` + skrip upgrade di host Windows nyata dan PowerShell 5.1 belum pernah dijalankan | NEXT ACTION: review leader, lalu CI untuk commit baru, lalu uji Windows nyata sebelum klaim F1 gate lolos
 
 ## 1. Baseline dan lingkungan (OBSERVED)

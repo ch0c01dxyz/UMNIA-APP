@@ -1,7 +1,0 @@
-
-=== baseline-mf2-equal: equal projects accepted (MF2 repro) ===
-CHECK PASS: MF2 repro: script does NOT reject equal projects
-CHECK PASS: MF2 repro: mutating calls happened before any rejection
-  mutating calls: 8 (e.g. compose -f /home/hatch/workspace/UMNIA-APP/deploy/windows/compose.yml -p umnia-fixedsrc up -d postgres-business)
-
---- 2 checks, failures: 0 ---

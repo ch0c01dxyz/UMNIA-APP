@@ -1,5 +1,7 @@
 # F1-WINDOWS-REVIEW-FIXES — laporan pelaksana
 
+> Historical report. Its original evidence package is [pinned in Git history](https://github.com/ch0c01dxyz/UMNIA-APP/tree/be34a24e6f73e04c77263cecb1d43dd59e72c616/docs/reviews/f1-windows-review-fixes). See the [review index](README.md) for relocated helpers and current status.
+
 STATUS: SELESAI (perubahan di working tree, **belum commit/push — tidak ada otorisasi commit/push pada tugas ini**)
 TASK_ID: F1-WINDOWS-REVIEW-FIXES
 Baseline: `d38d48f28b712e5d8b0f7de16d8f575c3ac1a88a` (branch `f1-03-identity`, terkonfirmasi remote)

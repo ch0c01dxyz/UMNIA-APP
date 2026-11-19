@@ -590,7 +590,7 @@ function Invoke-ScenarioFixedIsolatedApi {
   # Runs the isolated API workflow against the NEW cluster API left running
   # by fixed-happy. Labels the environment as an isolated synthetic fixture.
   $outLog = Join-Path ([System.IO.Path]::GetTempPath()) 'isolated-api.log'
-  & bash "$Repo/docs/reviews/f1-windows-review-fixes/scripts/api-workflow.sh" 'http://127.0.0.1:18081' 2>&1 | Tee-Object -FilePath $outLog | Out-Null
+  & bash "$Repo/deploy/windows/tests/api-workflow.sh" 'http://127.0.0.1:18081' 2>&1 | Tee-Object -FilePath $outLog | Out-Null
   $code = $LASTEXITCODE
   $steps = @(Get-Content $outLog | Where-Object { $_ -match '^STEP ' })
   Check 'fixed isolated-api: workflow exits 0 on the isolated fixture' ($code -eq 0)

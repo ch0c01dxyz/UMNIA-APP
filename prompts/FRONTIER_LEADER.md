@@ -26,3 +26,8 @@ Aturan:
 5. Berikan hasil: plan, task graph, proposed file list, cost/risks, verification and reasons for frontier-owned tasks.
 
 Jangan menandai fase P0 selesai hanya karena semua skrip scaffold ditulis. Syarat: clean Windows Compose boot + clean Linux native boot + negative readiness tests dan CI evidence.
+
+
+## Current delivery contract
+
+Follow `AGENTS.md`, `docs/development/current-status.md` and `docs/development/github-workflow.md`. Continue from the verified implementation checkpoint. Authorized implementation or maintenance includes a task branch, focused validation, commit and push; no routine manual patch transfer or separate publication approval round. A review-only task does not authorize product edits. Report the full SHA and actual GitHub checks. Merge and deployment still require explicit authorization. Keep temporary logs and personal handoffs under ignored `.local/`.

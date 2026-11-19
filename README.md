@@ -1,13 +1,15 @@
 # UMNIA — Technical Foundation Blueprint v0.6 — Fast-Track
 
 **UMNIA** = UMKM Modular Nusantara Indonesia  
-Status: **architecture specification / not an implementation**  
+Status: **implementation in progress; see the verified checkpoint below**
 Tanggal: 2026-10-25  
 Bahasa: Indonesia; identitas teknis memakai bahasa Inggris untuk portabilitas.
 
 ## MULAI DI SINI
 
-**Langsung baca [`FAST_TRACK.md`](FAST_TRACK.md)** dan jalankan F1-01. Empat fase merupakan satu-satunya rencana eksekusi utama; P0–P8 dalam dokumen lama hanya referensi. Tidak perlu menyelesaikan dokumentasi tambahan sebelum coding.
+**Langsung baca [`FAST_TRACK.md`](FAST_TRACK.md)** dan [status implementasi terverifikasi](docs/development/current-status.md). Lanjutkan tugas aktif tanpa mengulang gate yang sudah diterima. Empat fase merupakan rencana eksekusi utama; P0–P8 dalam dokumen lama hanya referensi.
+
+Pengerjaan berikutnya memakai [alur GitHub](docs/development/github-workflow.md): task branch, commit, push, review, dan CI pada SHA yang sama. Laporan yang dipertahankan tersedia di [indeks review](docs/reviews/README.md).
 
 ## Tujuan
 

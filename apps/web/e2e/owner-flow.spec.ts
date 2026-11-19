@@ -20,6 +20,7 @@ const SHOTS_UI01 = path.join(path.dirname(fileURLToPath(import.meta.url)), '..',
 const SHOTS_UI02 = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'design', 'screenshots', 'f2-ui-02')
 const SHOTS_UI03 = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'design', 'screenshots', 'f2-ui-03')
 const SHOTS_UI04 = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'design', 'screenshots', 'f2-ui-04')
+const SHOTS_UI05 = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'design', 'screenshots', 'f2-ui-05')
 
 const ownerEmail = `pemilik-${RUN}@e2e.umnia.local`
 const staffEmail = `staf-${RUN}@e2e.umnia.local`
@@ -352,6 +353,66 @@ async function draftSetup(page: Page, tag: string): Promise<{ email: string, ws:
   })
   expect(act.status()).toBe(200)
   return { email, ws, token }
+}
+
+interface QuoteRow { draft_id: string, catalog_item_id: string, price_version_id: string, valid_from: string, valid_to: string, recorded_at: string, amount_minor: string, currency: string, unit: string, units: number, total_minor: string, starts_at: string, ends_at: string }
+interface FactRow { id: string, workspace_id: string, rental_contract_id: string, price_version_id: string, pricing_rule_version_id: string, catalog_item_id: string, customer_id: string, client_request_id: string, amount_minor: string, currency: string, units: number, total_minor: string, starts_at: string, ends_at: string, accepted_at: string, accepted_by: string }
+
+async function getQuote(page: Page, ws: string, draftId: string, email: string = ownerEmail): Promise<{ status: number, body: any }> {
+  const res = await page.request.get(`/api/workspaces/${ws}/rental/contracts/${draftId}/quote`, {
+    headers: { Authorization: `Bearer ${await apiToken(page.request, email)}` }
+  })
+  return { status: res.status(), body: await res.json() }
+}
+
+async function getFact(page: Page, ws: string, draftId: string, email: string = ownerEmail): Promise<{ status: number, body: any }> {
+  const res = await page.request.get(`/api/workspaces/${ws}/rental/contracts/${draftId}/agreed-price`, {
+    headers: { Authorization: `Bearer ${await apiToken(page.request, email)}` }
+  })
+  return { status: res.status(), body: await res.json() }
+}
+
+async function acceptPrice(page: Page, ws: string, draftId: string, email: string, key: string, versionId: string, total: string): Promise<{ status: number, body: any }> {
+  const res = await page.request.post(`/api/workspaces/${ws}/rental/contracts/${draftId}/accept-price`, {
+    headers: { Authorization: `Bearer ${await apiToken(page.request, email)}`, 'Idempotency-Key': key },
+    data: { expected_price_version_id: versionId, expected_total_minor: total }
+  })
+  return { status: res.status(), body: await res.json() }
+}
+
+// Satu tarif lebar lewat API nyata (tanpa 85 panggilan seedPrices).
+async function seedPriceOne(req: APIRequestContext, ws: string, token: string, itemId: string, from: string, to: string, amount: string, currency = 'IDR'): Promise<PriceRow> {
+  const res = await req.post(`/api/workspaces/${ws}/catalog/items/${itemId}/prices`, {
+    headers: { Authorization: `Bearer ${token}`, 'Idempotency-Key': randomUUID() },
+    data: { valid_from: from, valid_to: to, amount_minor: amount, currency }
+  })
+  expect(res.status(), 'seed harga satu').toBe(201)
+  return (await res.json()) as PriceRow
+}
+
+// Satu draf lewat API nyata; kembalikan baris yang dibuat.
+async function seedDraftOne(req: APIRequestContext, ws: string, token: string, customerId: string, itemId: string, from: string, to: string): Promise<DraftRow> {
+  const res = await req.post(`/api/workspaces/${ws}/rental/contracts`, {
+    headers: { Authorization: `Bearer ${token}`, 'Idempotency-Key': randomUUID() },
+    data: { customer_id: customerId, catalog_item_id: itemId, starts_at: from, ends_at: to }
+  })
+  expect(res.status(), 'seed draf satu').toBe(201)
+  return (await res.json()) as DraftRow
+}
+
+// F2-UI-05: workspace + pemilik mandiri per tes harga (tanpa ws bersama)
+// supaya tiap tes harga bisa jalan sendiri lewat --grep.
+async function priceSetup(page: Page, tag: string): Promise<{ email: string, ws: string, token: string, customer: { id: string, display_name: string }, item: { id: string, sku: string, name: string, status: string } }> {
+  const { email, ws, token } = await draftSetup(page, `hp-${tag}`)
+  await seedCustomers(page.request, ws, token, 1, `HP${tag}`)
+  await seedItems(page.request, ws, token, 1, `HP${tag}`)
+  const customer = await customerByName(page, ws, `HP${tag} 1`, email)
+  const item = await catalogItemBySku(page, ws, `HP${tag}-1`, email)
+  return { email, ws, token, customer, item }
+}
+
+function countAudits(ws: string, action: string): number {
+  return Number(psql(`SELECT count(*) FROM audit_events WHERE workspace_id='${ws}' AND action='${action}'`).trim())
 }
 
 test.describe.serial('alur pemilik', () => {
@@ -4396,5 +4457,879 @@ test.describe.serial('alur pemilik', () => {
     const withSums = manifest.map(m => ({ ...m, sha256: sha(m.file) }))
     writeFileSync(path.join(SHOTS_UI04, 'manifest.json'), JSON.stringify({ generated_by: 'owner-flow.spec.ts f2-ui-04', files: withSums }, null, 2) + '\n')
     expect(withSums.length).toBe(9)
+  })
+
+  test('harga draf: tautan Lihat harga membuka halaman harga; quote tampil; konfirmasi 201 + fakta terbaca', async ({ page }) => {
+    const { email, ws, token, customer, item } = await priceSetup(page, 'hp1')
+    await seedPriceOne(page.request, ws, token, item.id, '2047-01-01T00:00:00Z', '2047-02-01T00:00:00Z', '150000')
+    const draft = await seedDraftOne(page.request, ws, token, customer.id, item.id, '2047-01-01T00:00:00Z', '2047-01-03T00:00:00Z')
+    await uiLogin(page, email)
+    await gotoAuthed(page, `/workspaces/${ws}/rentals`, email)
+    await expect(listItems(page).first()).toBeVisible()
+    await page.getByRole('link', { name: 'Lihat harga' }).click()
+    await expect(page).toHaveURL(`/workspaces/${ws}/rental-prices/${draft.id}`)
+    await expect(page.getByRole('heading', { name: 'Harga draf' })).toBeVisible()
+    await expect(page.getByText('Tarif: 150000 unit tarif · IDR per 24 jam')).toBeVisible()
+    await expect(page.getByText('2 unit 24 jam')).toBeVisible()
+    await expect(page.getByText('Total: 300000 unit tarif · IDR')).toBeVisible()
+    await expect(page.locator('section[aria-labelledby="quote-heading"]').getByText('Periode yang dicatat: mulai 2047-01-01T00:00:00Z; berakhir 2047-01-03T00:00:00Z (UTC)')).toBeVisible()
+    await expect(page.getByText('Berlaku tarif: 2047-01-01T00:00:00Z sampai sebelum 2047-02-01T00:00:00Z (UTC)')).toBeVisible()
+    await expect(page.getByText('Belum ada harga yang dicatat untuk draf ini.')).toBeVisible()
+    // Panel konfirmasi: ringkasan + dampak eksplisit, tanpa POST saat dibuka.
+    await page.getByRole('button', { name: 'Catat harga ini' }).click()
+    await expect(page.getByRole('heading', { name: 'Konfirmasi pencatatan harga' })).toBeVisible()
+    await expect(page.getByText('Fakta ini hanya mencatat harga yang dilihat untuk draf ini. Ini bukan persetujuan pelanggan, bukan perjanjian, bukan pembayaran, bukan invoice, dan tidak mengubah status draf.')).toBeVisible()
+    expect((await getFact(page, ws, draft.id, email)).status).toBe(404)
+    await page.getByRole('button', { name: 'Catat harga ini' }).click()
+    await expect(page.getByRole('heading', { name: 'Harga tercatat' })).toBeVisible()
+    await expect(page.getByText('Harga yang dicatat: 300000 unit tarif · IDR (2 × 24 jam @ 150000 unit tarif · IDR)')).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Catat harga ini' })).toHaveCount(0)
+    const fact = await getFact(page, ws, draft.id, email)
+    expect(fact.status).toBe(200)
+    expect(fact.body.price_version_id).toBeTruthy()
+    expect(fact.body.amount_minor).toBe('150000')
+    expect(fact.body.total_minor).toBe('300000')
+    expect(fact.body.units).toBe(2)
+    expect(fact.body.pricing_rule_version_id).toBe('elapsed_24h_ceil_v1')
+    expect(fact.body.rental_contract_id).toBe(draft.id)
+    expect(countAudits(ws, 'agreed_price_recorded')).toBe(1)
+  })
+
+  test('harga draf: respons hilang lalu kirim-ulang kunci sama 200; tanpa baris/audit kedua', async ({ page }) => {
+    const { email, ws, token, customer, item } = await priceSetup(page, 'hp2')
+    await seedPriceOne(page.request, ws, token, item.id, '2047-01-01T00:00:00Z', '2047-02-01T00:00:00Z', '150000')
+    const draft = await seedDraftOne(page.request, ws, token, customer.id, item.id, '2047-01-01T00:00:00Z', '2047-01-03T00:00:00Z')
+    let postAttempts = 0
+    await page.route(
+      (url) => url.pathname.startsWith('/api/'),
+      async (route) => {
+        const u = new URL(route.request().url())
+        if (route.request().method() === 'POST' && u.pathname.endsWith('/accept-price')) {
+          postAttempts++
+          if (postAttempts === 1) {
+            await route.fetch()
+            await route.abort()
+            return
+          }
+        }
+        await route.continue()
+      }
+    )
+    await uiLogin(page, email)
+    await gotoAuthed(page, `/workspaces/${ws}/rental-prices/${draft.id}`, email)
+    await page.getByRole('button', { name: 'Catat harga ini' }).click()
+    await page.getByRole('button', { name: 'Catat harga ini' }).click()
+    await expect(page.getByRole('heading', { name: 'Hasil pencatatan tidak diketahui' })).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Kirim lagi (permintaan sama)' })).toBeVisible()
+    // POST pertama sungguhan sudah terkomit (responsnya yang hilang).
+    expect((await getFact(page, ws, draft.id, email)).status).toBe(200)
+    await page.getByRole('button', { name: 'Kirim lagi (permintaan sama)' }).click()
+    await expect(page.getByRole('heading', { name: 'Harga tercatat' })).toBeVisible()
+    const fact = await getFact(page, ws, draft.id, email)
+    expect(fact.status).toBe(200)
+    expect(fact.body.total_minor).toBe('300000')
+    expect(countAudits(ws, 'agreed_price_recorded')).toBe(1)
+    await page.unrouteAll({ behavior: 'wait' })
+  })
+
+  test('harga draf: tiga 409 berbeda — fakta sudah ada, kunci salah, expected tidak cocok', async ({ page }) => {
+    const { email, ws, token, customer, item } = await priceSetup(page, 'hp3')
+    const price = await seedPriceOne(page.request, ws, token, item.id, '2047-01-01T00:00:00Z', '2047-03-01T00:00:00Z', '150000')
+    const draftA = await seedDraftOne(page.request, ws, token, customer.id, item.id, '2047-01-01T00:00:00Z', '2047-01-03T00:00:00Z')
+    const draftB = await seedDraftOne(page.request, ws, token, customer.id, item.id, '2047-01-05T00:00:00Z', '2047-01-07T00:00:00Z')
+    const draftC = await seedDraftOne(page.request, ws, token, customer.id, item.id, '2047-01-10T00:00:00Z', '2047-01-12T00:00:00Z')
+    await uiLogin(page, email)
+    // (a) Fakta sudah ada (nyata): konfirmasi dibuka, fakta dicatat aksi
+    // lain, kirim UI ditolak 409 — halaman memulihkan lewat GET fakta.
+    await gotoAuthed(page, `/workspaces/${ws}/rental-prices/${draftA.id}`, email)
+    await page.getByRole('button', { name: 'Catat harga ini' }).click()
+    await expect(page.getByRole('heading', { name: 'Konfirmasi pencatatan harga' })).toBeVisible()
+    const quoteA = await getQuote(page, ws, draftA.id, email)
+    const recorded = await acceptPrice(page, ws, draftA.id, email, randomUUID(), quoteA.body.price_version_id, quoteA.body.total_minor)
+    expect(recorded.status).toBe(201)
+    await page.getByRole('button', { name: 'Catat harga ini' }).click()
+    await expect(page.getByText('Harga yang dicatat: 300000 unit tarif · IDR (2 × 24 jam @ 150000 unit tarif · IDR)')).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Catat harga ini' })).toHaveCount(0)
+    await expect(page.getByRole('heading', { name: 'Hasil pencatatan tidak diketahui' })).toHaveCount(0)
+    expect(countAudits(ws, 'agreed_price_recorded')).toBe(1)
+    // (b) Kunci salah (injeksi): panel mismatch, tanpa kirim-ulang; sesudah
+    // retirement, maksud baru dapat dicatat sungguhan.
+    await page.route(
+      (url) => url.pathname.startsWith('/api/'),
+      async (route) => {
+        const u = new URL(route.request().url())
+        if (route.request().method() === 'POST' && u.pathname.endsWith('/accept-price')) {
+          await route.fulfill({ status: 409, contentType: 'application/json', body: JSON.stringify({ error: 'kunci idempotency sudah dipakai untuk permintaan yang berbeda' }) })
+          return
+        }
+        await route.continue()
+      }
+    )
+    await gotoAuthed(page, `/workspaces/${ws}/rental-prices/${draftB.id}`, email)
+    await page.getByRole('button', { name: 'Catat harga ini' }).click()
+    await page.getByRole('button', { name: 'Catat harga ini' }).click()
+    await expect(page.getByRole('heading', { name: 'Kunci idempotency sudah dipakai' })).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Kirim lagi (permintaan sama)' })).toHaveCount(0)
+    await page.getByRole('button', { name: 'Mulai pencatatan baru' }).click()
+    await expect(page.getByRole('button', { name: 'Catat harga ini' })).toBeVisible()
+    await page.unrouteAll({ behavior: 'wait' })
+    await page.getByRole('button', { name: 'Catat harga ini' }).click()
+    await page.getByRole('button', { name: 'Catat harga ini' }).click()
+    await expect(page.getByRole('heading', { name: 'Harga tercatat' })).toBeVisible()
+    // (c) Expected tidak cocok (injeksi): panel berbeda, tanpa kirim-ulang.
+    await page.route(
+      (url) => url.pathname.startsWith('/api/'),
+      async (route) => {
+        const u = new URL(route.request().url())
+        if (route.request().method() === 'POST' && u.pathname.endsWith('/accept-price')) {
+          await route.fulfill({ status: 409, contentType: 'application/json', body: JSON.stringify({ error: 'harga yang diharapkan tidak cocok dengan penawaran saat ini' }) })
+          return
+        }
+        await route.continue()
+      }
+    )
+    await gotoAuthed(page, `/workspaces/${ws}/rental-prices/${draftC.id}`, email)
+    await page.getByRole('button', { name: 'Catat harga ini' }).click()
+    await page.getByRole('button', { name: 'Catat harga ini' }).click()
+    await expect(page.getByRole('heading', { name: 'Harga yang diharapkan tidak cocok' })).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Kirim lagi (permintaan sama)' })).toHaveCount(0)
+    await page.getByRole('button', { name: 'Mulai pencatatan baru' }).click()
+    await expect(page.getByRole('button', { name: 'Catat harga ini' })).toBeVisible()
+    await page.unrouteAll({ behavior: 'wait' })
+    await page.getByRole('button', { name: 'Catat harga ini' }).click()
+    await page.getByRole('button', { name: 'Catat harga ini' }).click()
+    await expect(page.getByRole('heading', { name: 'Harga tercatat' })).toBeVisible()
+    expect(price.id).toBeTruthy()
+  })
+
+  test('harga draf: kasir baca quote/fakta; simpan 403; nonanggota 403; 401 lanjut ke halaman harga', async ({ page }) => {
+    const { email, ws, token, customer, item } = await priceSetup(page, 'hp4')
+    await seedPriceOne(page.request, ws, token, item.id, '2047-01-01T00:00:00Z', '2047-02-01T00:00:00Z', '150000')
+    const draft = await seedDraftOne(page.request, ws, token, customer.id, item.id, '2047-01-01T00:00:00Z', '2047-01-03T00:00:00Z')
+    const cashierEmail = `hp4-kasir-${RUN}@e2e.umnia.local`
+    await uiLogin(page, email)
+    const code = await uiInvite(page, ws, cashierEmail, 'cashier', email)
+    await uiRegister(page, cashierEmail)
+    await uiLogin(page, cashierEmail)
+    await gotoAuthed(page, `/invites/accept?workspace_id=${ws}`, cashierEmail)
+    await page.getByLabel('Kode undangan').fill(code)
+    await page.locator('form button[type="submit"]').click()
+    await expect(page).toHaveURL(`/workspaces/${ws}/members`)
+    await uiLogin(page, cashierEmail)
+    await gotoAuthed(page, `/workspaces/${ws}/rental-prices/${draft.id}`, cashierEmail)
+    await expect(page.getByText('Tarif: 150000 unit tarif · IDR per 24 jam')).toBeVisible()
+    await page.getByRole('button', { name: 'Catat harga ini' }).click()
+    await page.getByRole('button', { name: 'Catat harga ini' }).click()
+    await expect(page.getByRole('alert')).toContainText('tidak punya izin mengelola data usaha')
+    await expect(page.getByRole('button', { name: 'Batalkan' })).toBeVisible()
+    expect((await getFact(page, ws, draft.id, email)).status).toBe(404)
+    // Nonanggota: GET 403 menyembunyikan halaman, sesi dipertahankan.
+    const nomemberEmail = `hp4-bukan-anggota-${RUN}@e2e.umnia.local`
+    await uiRegister(page, nomemberEmail)
+    await uiLogin(page, nomemberEmail)
+    await gotoAuthed(page, `/workspaces/${ws}/rental-prices/${draft.id}`, nomemberEmail)
+    await expect(page.getByRole('alert')).toContainText('bukan anggota workspace ini')
+    // 401 menghapus sesi dan minta masuk lewat halaman harga yang sama.
+    await uiLogin(page, email)
+    await gotoAuthed(page, `/workspaces/${ws}/rental-prices/${draft.id}`, email)
+    psql(`DELETE FROM sessions WHERE subject_id = (SELECT id FROM identity_subjects WHERE email = '${email}')`)
+    await page.getByRole('link', { name: 'Pelanggan' }).click()
+    await expect(page).toHaveURL(/\/login\?next=/)
+    await page.getByLabel('Email').fill(email)
+    await page.getByLabel('Kata sandi').fill(PASSWORD)
+    await page.locator('form button[type="submit"]').click()
+    await expect(page).toHaveURL(`/workspaces/${ws}/customers`)
+    await gotoAuthed(page, `/workspaces/${ws}/rental-prices/${draft.id}`, email)
+    await expect(page.getByRole('heading', { name: 'Harga draf' })).toBeVisible()
+    await expect(page.getByText('Tarif: 150000 unit tarif · IDR per 24 jam')).toBeVisible()
+  })
+
+  test('harga draf: draf di luar 50 pertama butuh paging eksplisit; tanpa rantai otomatis', async ({ page }) => {
+    const { email, ws, token, customer, item } = await priceSetup(page, 'hp5')
+    await seedPriceOne(page.request, ws, token, item.id, '2040-01-01T00:00:00Z', '2050-01-01T00:00:00Z', '100000')
+    await seedDrafts(page.request, ws, token, customer.id, item.id, 51)
+    const rows = await listDraftRows(page, ws, email)
+    expect(rows.length).toBe(51)
+    const target = rows[50]
+    let collectionGets = 0
+    await page.route(
+      (url) => url.pathname.startsWith('/api/'),
+      async (route) => {
+        const u = new URL(route.request().url())
+        if (route.request().method() === 'GET' && u.pathname.endsWith('/rental/contracts')) collectionGets++
+        await route.continue()
+      }
+    )
+    await uiLogin(page, email)
+    await gotoAuthed(page, `/workspaces/${ws}/rental-prices/${target.id}`, email)
+    await expect(page.getByText('Mencari draf dalam daftar:')).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Muat lebih banyak draf' })).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Catat harga ini' })).toHaveCount(0)
+    expect(collectionGets).toBe(1)
+    await page.getByRole('button', { name: 'Muat lebih banyak draf' }).click()
+    await expect(page.getByRole('button', { name: 'Catat harga ini' })).toBeVisible()
+    expect(collectionGets).toBe(2)
+    await page.unrouteAll({ behavior: 'wait' })
+  })
+
+  test('harga draf: peta label di luar 100 + arsip tetap dapat dibaca/dicatat', async ({ page }) => {
+    const { email, ws, token } = await draftSetup(page, 'hp-hp6')
+    await seedCustomers(page.request, ws, token, 101, 'HP6C')
+    await seedItems(page.request, ws, token, 101, 'HP6I')
+    const customer = await customerByName(page, ws, 'HP6C 101', email)
+    const item = await catalogItemBySku(page, ws, 'HP6I-101', email)
+    await seedPriceOne(page.request, ws, token, item.id, '2047-01-01T00:00:00Z', '2047-02-01T00:00:00Z', '150000')
+    const draft = await seedDraftOne(page.request, ws, token, customer.id, item.id, '2047-01-01T00:00:00Z', '2047-01-03T00:00:00Z')
+    await uiLogin(page, email)
+    await gotoAuthed(page, `/workspaces/${ws}/rental-prices/${draft.id}`, email)
+    await expect(page.getByText('Nama pelanggan belum dimuat')).toBeVisible()
+    await expect(page.getByText('Nama barang belum dimuat')).toBeVisible()
+    await page.getByRole('button', { name: 'Muat lebih banyak pelanggan' }).click()
+    await expect(page.getByText('HP6C 101')).toBeVisible()
+    await page.getByRole('button', { name: 'Muat lebih banyak barang' }).click()
+    await expect(page.getByText('HP6I-101')).toBeVisible()
+    // Barang diarsipkan sesudah draf dibuat: label riwayat berarsip,
+    // quote + pencatatan tetap jalan (tidak ada larangan arsip di sini).
+    psql(`UPDATE catalog_items SET status='archived' WHERE workspace_id='${ws}' AND id='${item.id}'`)
+    await gotoAuthed(page, `/workspaces/${ws}/rental-prices/${draft.id}`, email)
+    await page.getByRole('button', { name: 'Muat lebih banyak pelanggan' }).click()
+    await expect(page.getByText('HP6C 101')).toBeVisible()
+    await page.getByRole('button', { name: 'Muat lebih banyak barang' }).click()
+    await expect(page.getByText('(arsip — riwayat)')).toBeVisible()
+    await page.getByRole('button', { name: 'Catat harga ini' }).click()
+    await page.getByRole('button', { name: 'Catat harga ini' }).click()
+    await expect(page.getByRole('heading', { name: 'Harga tercatat' })).toBeVisible()
+    expect((await getFact(page, ws, draft.id, email)).status).toBe(200)
+  })
+
+  test('harga draf: quote 404 tanpa tarif + 422 overflow; tanpa harga nol', async ({ page }) => {
+    const { email, ws, token, customer, item } = await priceSetup(page, 'hp7a')
+    const draftNoTariff = await seedDraftOne(page.request, ws, token, customer.id, item.id, '2047-01-01T00:00:00Z', '2047-01-03T00:00:00Z')
+    await uiLogin(page, email)
+    await gotoAuthed(page, `/workspaces/${ws}/rental-prices/${draftNoTariff.id}`, email)
+    await expect(page.getByText('harga efektif tidak ditemukan')).toBeVisible()
+    await expect(page.getByRole('link', { name: 'Lihat tarif' })).toBeVisible()
+    await expect(page.getByText('Total: 0 unit tarif')).toHaveCount(0)
+    await expect(page.getByRole('button', { name: 'Catat harga ini' })).toHaveCount(0)
+    // Overflow: tarif maksimum × 2 unit melampaui int64.
+    await seedPriceOne(page.request, ws, token, item.id, '2047-01-01T00:00:00Z', '2047-02-01T00:00:00Z', '9223372036854775807')
+    const draftOverflow = await seedDraftOne(page.request, ws, token, customer.id, item.id, '2047-01-01T00:00:00Z', '2047-01-03T00:00:00Z')
+    await gotoAuthed(page, `/workspaces/${ws}/rental-prices/${draftOverflow.id}`, email)
+    await expect(page.getByText('total di luar batas yang dapat diwakili')).toBeVisible()
+    await expect(page.getByRole('link', { name: 'Lihat tarif' })).toBeVisible()
+    await expect(page.getByText('Total: 0 unit tarif')).toHaveCount(0)
+    await expect(page.getByRole('button', { name: 'Catat harga ini' })).toHaveCount(0)
+  })
+
+  test('harga draf: uang eksak di atas 2^53 + nol + maksimum; batas 24 jam mikrodetik', async ({ page }) => {
+    const { email, ws, token, customer } = await priceSetup(page, 'hp7b')
+    const cases: Array<{ tag: string, amount: string, from: string, to: string, unitsText: string, totalText: string }> = [
+      { tag: 'big', amount: '9007199254740993', from: '2047-01-01T00:00:00Z', to: '2047-01-02T00:00:00Z', unitsText: '1 unit 24 jam', totalText: 'Total: 9007199254740993 unit tarif · IDR' },
+      { tag: 'zero', amount: '0', from: '2047-02-01T00:00:00Z', to: '2047-02-02T00:00:00Z', unitsText: '1 unit 24 jam', totalText: 'Total: 0 unit tarif · IDR' },
+      { tag: 'max', amount: '9223372036854775807', from: '2047-03-01T00:00:00Z', to: '2047-03-02T00:00:00Z', unitsText: '1 unit 24 jam', totalText: 'Total: 9223372036854775807 unit tarif · IDR' },
+      { tag: 'micro', amount: '150000', from: '2047-04-01T00:00:00Z', to: '2047-04-02T00:00:00.000001Z', unitsText: '2 unit 24 jam', totalText: 'Total: 300000 unit tarif · IDR' }
+    ]
+    await uiLogin(page, email)
+    for (let i = 0; i < cases.length; i++) {
+      const c = cases[i]
+      await seedItems(page.request, ws, token, 1, `HP7${c.tag}`)
+      const item = await catalogItemBySku(page, ws, `HP7${c.tag}-1`, email)
+      await seedPriceOne(page.request, ws, token, item.id, c.from.slice(0, 8) + '01T00:00:00Z', '2047-12-01T00:00:00Z', c.amount)
+      const draft = await seedDraftOne(page.request, ws, token, customer.id, item.id, c.from, c.to)
+      await gotoAuthed(page, `/workspaces/${ws}/rental-prices/${draft.id}`, email)
+      await expect(page.getByText(c.unitsText)).toBeVisible()
+      await expect(page.getByText(c.totalText)).toBeVisible()
+      await page.getByRole('button', { name: 'Catat harga ini' }).click()
+      await page.getByRole('button', { name: 'Catat harga ini' }).click()
+      await expect(page.getByRole('heading', { name: 'Harga tercatat' })).toBeVisible()
+      const fact = await getFact(page, ws, draft.id, email)
+      expect(fact.status).toBe(200)
+      expect(fact.body.total_minor).toBe(c.totalText.split(': ')[1].split(' unit')[0])
+    }
+  })
+
+  test('harga draf: GET fakta mengonfirmasi attempt vs fakta kunci-lain vs fakta cacat', async ({ page }) => {
+    // (a) Respons hilang, lalu muat-ulang GET-only mengonfirmasi (tanpa kirim-ulang).
+    const a = await priceSetup(page, 'hp8a')
+    await seedPriceOne(page.request, a.ws, a.token, a.item.id, '2047-01-01T00:00:00Z', '2047-02-01T00:00:00Z', '150000')
+    const draftA = await seedDraftOne(page.request, a.ws, a.token, a.customer.id, a.item.id, '2047-01-01T00:00:00Z', '2047-01-03T00:00:00Z')
+    let postAttempts = 0
+    await page.route(
+      (url) => url.pathname.startsWith('/api/'),
+      async (route) => {
+        const u = new URL(route.request().url())
+        if (route.request().method() === 'POST' && u.pathname.endsWith('/accept-price')) {
+          postAttempts++
+          if (postAttempts === 1) {
+            await route.fetch()
+            await route.abort()
+            return
+          }
+        }
+        await route.continue()
+      }
+    )
+    await uiLogin(page, a.email)
+    await gotoAuthed(page, `/workspaces/${a.ws}/rental-prices/${draftA.id}`, a.email)
+    await page.getByRole('button', { name: 'Catat harga ini' }).click()
+    await page.getByRole('button', { name: 'Catat harga ini' }).click()
+    await expect(page.getByRole('heading', { name: 'Hasil pencatatan tidak diketahui' })).toBeVisible()
+    await page.getByRole('alert').getByRole('button', { name: 'Muat ulang harga' }).click()
+    await expect(page.getByRole('heading', { name: 'Harga tercatat' })).toBeVisible()
+    expect(countAudits(a.ws, 'agreed_price_recorded')).toBe(1)
+    await page.unrouteAll({ behavior: 'wait' })
+    // (b) Fakta kunci-lain: attempt mati, kirim-ulang hilang, fakta tampil.
+    // POST pertama di-ABORT tanpa fetch: permintaan tidak pernah sampai
+    // ke server, jadi tidak ada fakta yang terkomit — pencatatan API
+    // dengan kunci lain lalu deterministik 201 (bukan 409 fakta-sudah-ada).
+    const b = await priceSetup(page, 'hp8b')
+    await seedPriceOne(page.request, b.ws, b.token, b.item.id, '2047-01-01T00:00:00Z', '2047-02-01T00:00:00Z', '150000')
+    const draftB = await seedDraftOne(page.request, b.ws, b.token, b.customer.id, b.item.id, '2047-01-01T00:00:00Z', '2047-01-03T00:00:00Z')
+    postAttempts = 0
+    await page.route(
+      (url) => url.pathname.startsWith('/api/'),
+      async (route) => {
+        const u = new URL(route.request().url())
+        if (route.request().method() === 'POST' && u.pathname.endsWith('/accept-price')) {
+          postAttempts++
+          if (postAttempts === 1) {
+            await route.abort()
+            return
+          }
+        }
+        await route.continue()
+      }
+    )
+    await gotoAuthed(page, `/workspaces/${b.ws}/rental-prices/${draftB.id}`, b.email)
+    await page.getByRole('button', { name: 'Catat harga ini' }).click()
+    await page.getByRole('button', { name: 'Catat harga ini' }).click()
+    await expect(page.getByRole('heading', { name: 'Hasil pencatatan tidak diketahui' })).toBeVisible()
+    const quoteB = await getQuote(page, b.ws, draftB.id, b.email)
+    const other = await acceptPrice(page, b.ws, draftB.id, b.email, randomUUID(), quoteB.body.price_version_id, quoteB.body.total_minor)
+    expect(other.status).toBe(201)
+    await page.getByRole('alert').getByRole('button', { name: 'Muat ulang harga' }).click()
+    await expect(page.getByText('Harga yang dicatat: 300000 unit tarif · IDR (2 × 24 jam @ 150000 unit tarif · IDR)')).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'Hasil pencatatan tidak diketahui' })).toHaveCount(0)
+    await expect(page.getByRole('button', { name: 'Kirim lagi (permintaan sama)' })).toHaveCount(0)
+    await expect(page.getByRole('button', { name: 'Catat harga ini' })).toHaveCount(0)
+    expect(countAudits(b.ws, 'agreed_price_recorded')).toBe(1)
+    await page.unrouteAll({ behavior: 'wait' })
+    // (c) Fakta cacat (draf salah): ketidakpastian dipertahankan + galat tampil.
+    const c = await priceSetup(page, 'hp8c')
+    await seedPriceOne(page.request, c.ws, c.token, c.item.id, '2047-01-01T00:00:00Z', '2047-02-01T00:00:00Z', '150000')
+    const draftC = await seedDraftOne(page.request, c.ws, c.token, c.customer.id, c.item.id, '2047-01-01T00:00:00Z', '2047-01-03T00:00:00Z')
+    // Rute dipasang SESUDAH halaman termuat: bacaan fakta awal harus
+    // nyata (404 tanpa-fakta) supaya konfirmasi tersedia; fulfill cacat
+    // hanya boleh meracuni bacaan SETELAH attempt berjalan.
+    await gotoAuthed(page, `/workspaces/${c.ws}/rental-prices/${draftC.id}`, c.email)
+    postAttempts = 0
+    // Fulfill cacat hanya sesudah POST pertama dilepas: bacaan fakta awal
+    // (sebelum attempt) harus terus ke server nyata, bukan diracuni.
+    let factPoisoned = false
+    await page.route(
+      (url) => url.pathname.startsWith('/api/'),
+      async (route) => {
+        const u = new URL(route.request().url())
+        if (route.request().method() === 'POST' && u.pathname.endsWith('/accept-price')) {
+          postAttempts++
+          if (postAttempts === 1) {
+            factPoisoned = true
+            await route.fetch()
+            await route.abort()
+            return
+          }
+        }
+        if (factPoisoned && route.request().method() === 'GET' && u.pathname.endsWith('/agreed-price')) {
+          await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({
+            id: randomUUID(), workspace_id: c.ws, rental_contract_id: '00000000-0000-4000-8000-000000000099',
+            price_version_id: randomUUID(), pricing_rule_version_id: 'elapsed_24h_ceil_v1', catalog_item_id: c.item.id,
+            customer_id: c.customer.id, client_request_id: randomUUID(), amount_minor: '150000', currency: 'IDR',
+            units: 2, total_minor: '300000', starts_at: '2047-01-01T00:00:00Z', ends_at: '2047-01-03T00:00:00Z',
+            accepted_at: '2047-01-01T00:00:00Z', accepted_by: randomUUID()
+          }) })
+          return
+        }
+        await route.continue()
+      }
+    )
+    await page.getByRole('button', { name: 'Catat harga ini' }).click()
+    await page.getByRole('button', { name: 'Catat harga ini' }).click()
+    await expect(page.getByRole('heading', { name: 'Hasil pencatatan tidak diketahui' })).toBeVisible()
+    await page.getByRole('alert').getByRole('button', { name: 'Muat ulang harga' }).click()
+    await expect(page.getByRole('heading', { name: 'Hasil pencatatan tidak diketahui' })).toBeVisible()
+    await expect(page.getByText('Fakta yang dibaca tidak cocok dengan permintaan ini; pencatatan tetap tidak diketahui.')).toBeVisible()
+    await page.unrouteAll({ behavior: 'wait' })
+  })
+
+  test('harga draf: snapshot tidak berubah oleh refresh; batal hanya pra-POST; retirement terkunci selama POST', async ({ page }) => {
+    const { email, ws, token, customer, item } = await priceSetup(page, 'hp9')
+    await seedPriceOne(page.request, ws, token, item.id, '2047-01-01T00:00:00Z', '2047-02-01T00:00:00Z', '150000')
+    const draft = await seedDraftOne(page.request, ws, token, customer.id, item.id, '2047-01-01T00:00:00Z', '2047-01-03T00:00:00Z')
+    await uiLogin(page, email)
+    await gotoAuthed(page, `/workspaces/${ws}/rental-prices/${draft.id}`, email)
+    // (a) Quote baru saat refresh: pemberitahuan tampil, snapshot tetap 300000.
+    // Injeksi harus konsisten secara internal (total = tarif × unit) —
+    // penawaran cacat ditolak halaman sebagai bacaan tidak valid, bukan
+    // ditampilkan sebagai harga. Di sini tarif berubah 150000 → 999999.
+    await page.getByRole('button', { name: 'Catat harga ini' }).click()
+    await expect(page.getByRole('heading', { name: 'Konfirmasi pencatatan harga' })).toBeVisible()
+    await page.route(
+      (url) => url.pathname.startsWith('/api/'),
+      async (route) => {
+        const u = new URL(route.request().url())
+        if (route.request().method() === 'GET' && u.pathname.endsWith('/quote')) {
+          const real = await route.fetch()
+          const body = await real.json() as QuoteRow
+          await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ ...body, amount_minor: '999999', total_minor: '1999998' }) })
+          return
+        }
+        await route.continue()
+      }
+    )
+    await page.locator('section[aria-labelledby="quote-heading"]').getByRole('button', { name: 'Muat ulang harga' }).click()
+    await expect(page.getByText('Penawaran berubah sejak konfirmasi dibuka.')).toBeVisible()
+    await expect(page.getByText('Penawaran terbaru: 1999998 unit tarif · IDR')).toBeVisible()
+    await expect(page.getByText('Total: 300000 unit tarif · IDR').first()).toBeVisible()
+    await page.unrouteAll({ behavior: 'wait' })
+    // (b) Batal pra-POST membuang konfirmasi; panel dapat dibuka lagi lalu 201.
+    await page.getByRole('button', { name: 'Batalkan' }).click()
+    await expect(page.getByRole('heading', { name: 'Konfirmasi pencatatan harga' })).toHaveCount(0)
+    await page.getByRole('button', { name: 'Catat harga ini' }).click()
+    await expect(page.getByRole('heading', { name: 'Konfirmasi pencatatan harga' })).toBeVisible()
+    // (c) Retirement terkunci selama POST kirim-ulang berjalan.
+    let postAttempts = 0
+    await page.route(
+      (url) => url.pathname.startsWith('/api/'),
+      async (route) => {
+        const u = new URL(route.request().url())
+        if (route.request().method() === 'POST' && u.pathname.endsWith('/accept-price')) {
+          postAttempts++
+          if (postAttempts === 1) {
+            await route.fetch()
+            await route.abort()
+            return
+          }
+          if (postAttempts === 2) {
+            await new Promise(r => setTimeout(r, 2500))
+            await route.continue()
+            return
+          }
+        }
+        await route.continue()
+      }
+    )
+    await page.getByRole('button', { name: 'Catat harga ini' }).click()
+    await expect(page.getByRole('heading', { name: 'Hasil pencatatan tidak diketahui' })).toBeVisible()
+    const resend = page.getByRole('button', { name: 'Kirim lagi (permintaan sama)' })
+    const retire = page.getByRole('button', { name: 'Mulai pencatatan baru' })
+    await resend.click()
+    await expect(retire).toBeDisabled()
+    await expect(page.getByRole('heading', { name: 'Harga tercatat' })).toBeVisible()
+    await page.unrouteAll({ behavior: 'wait' })
+  })
+
+  test('harga draf: navigasi + fokus keyboard 44px di 360/768/1440', async ({ page }) => {
+    const { email, ws, token, customer, item } = await priceSetup(page, 'hp10')
+    await seedPriceOne(page.request, ws, token, item.id, '2047-01-01T00:00:00Z', '2047-02-01T00:00:00Z', '150000')
+    const draft = await seedDraftOne(page.request, ws, token, customer.id, item.id, '2047-01-01T00:00:00Z', '2047-01-03T00:00:00Z')
+    await uiLogin(page, email)
+    const sizes = [
+      { width: 360, height: 640 },
+      { width: 768, height: 1024 },
+      { width: 1440, height: 900 }
+    ]
+    for (const size of sizes) {
+      await page.setViewportSize(size)
+      await gotoAuthed(page, `/workspaces/${ws}/rentals`, email)
+      const entry = page.getByRole('link', { name: 'Lihat harga' })
+      await expect(entry).toBeVisible()
+      const entryBox = await entry.boundingBox()
+      expect(entryBox).not.toBeNull()
+      expect(entryBox!.height).toBeGreaterThanOrEqual(44)
+      expect(entryBox!.width).toBeGreaterThanOrEqual(44)
+      await entry.click()
+      await expect(page).toHaveURL(`/workspaces/${ws}/rental-prices/${draft.id}`)
+      const back = page.getByRole('link', { name: 'Kembali ke Draf sewa' })
+      const backBox = await back.boundingBox()
+      expect(backBox).not.toBeNull()
+      expect(backBox!.height).toBeGreaterThanOrEqual(44)
+      expect(backBox!.width).toBeGreaterThanOrEqual(44)
+      await back.focus()
+      await page.keyboard.press('Tab')
+      await expect(page.locator('section[aria-labelledby="quote-heading"]').getByRole('button', { name: 'Muat ulang harga' })).toBeFocused()
+      const record = page.getByRole('button', { name: 'Catat harga ini' })
+      const recordBox = await record.boundingBox()
+      expect(recordBox).not.toBeNull()
+      expect(recordBox!.height).toBeGreaterThanOrEqual(44)
+      await record.click()
+      await expect(page.getByRole('heading', { name: 'Konfirmasi pencatatan harga' })).toBeFocused()
+      const cancelBox = await page.getByRole('button', { name: 'Batalkan' }).boundingBox()
+      expect(cancelBox).not.toBeNull()
+      expect(cancelBox!.height).toBeGreaterThanOrEqual(44)
+      await page.getByRole('button', { name: 'Batalkan' }).click()
+    }
+  })
+
+  test('harga draf: tautan lanjut login menolak URL luar (tanpa open redirect)', async ({ page }) => {
+    const email = `hp11-redirect-${RUN}@e2e.umnia.local`
+    await uiRegister(page, email)
+    for (const next of ['https://evil.example/', '//evil.example/']) {
+      await page.goto(`/login?next=${encodeURIComponent(next)}`)
+      await page.getByLabel('Email').fill(email)
+      await page.getByLabel('Kata sandi').fill(PASSWORD)
+      await page.locator('form button[type="submit"]').click()
+      await expect(page).toHaveURL(/\/workspaces\/new/)
+      await expect(page.getByRole('heading', { name: 'Buat workspace' })).toBeVisible()
+    }
+  })
+
+  test('harga draf: fakta tetap terbaca sesudah modul dinonaktifkan; tulis diblokir', async ({ page }) => {
+    const { email, ws, token, customer, item } = await priceSetup(page, 'hp12')
+    await seedPriceOne(page.request, ws, token, item.id, '2047-01-01T00:00:00Z', '2047-03-01T00:00:00Z', '150000')
+    const draftA = await seedDraftOne(page.request, ws, token, customer.id, item.id, '2047-01-01T00:00:00Z', '2047-01-03T00:00:00Z')
+    const draftB = await seedDraftOne(page.request, ws, token, customer.id, item.id, '2047-01-05T00:00:00Z', '2047-01-07T00:00:00Z')
+    const quoteA = await getQuote(page, ws, draftA.id, email)
+    const recorded = await acceptPrice(page, ws, draftA.id, email, randomUUID(), quoteA.body.price_version_id, quoteA.body.total_minor)
+    expect(recorded.status).toBe(201)
+    psql(`UPDATE module_installations SET status='inactive', deactivated_at=now() WHERE workspace_id='${ws}' AND module_id='rental.basic'`)
+    await uiLogin(page, email)
+    await gotoAuthed(page, `/workspaces/${ws}/rental-prices/${draftA.id}`, email)
+    await expect(page.getByText('Harga yang dicatat: 300000 unit tarif · IDR (2 × 24 jam @ 150000 unit tarif · IDR)')).toBeVisible()
+    await expect(page.getByText('Tarif: 150000 unit tarif · IDR per 24 jam')).toBeVisible()
+    await gotoAuthed(page, `/workspaces/${ws}/rental-prices/${draftB.id}`, email)
+    await page.getByRole('button', { name: 'Catat harga ini' }).click()
+    await page.getByRole('button', { name: 'Catat harga ini' }).click()
+    await expect(page.getByRole('alert')).toContainText('rental belum aktif di workspace ini')
+    const denied = await acceptPrice(page, ws, draftB.id, email, randomUUID(), (await getQuote(page, ws, draftB.id, email)).body.price_version_id, '300000')
+    expect(denied.status).toBe(403)
+    expect((await getFact(page, ws, draftB.id, email)).status).toBe(404)
+  })
+
+  test('screenshot f2-ui-05: tiga utama + tanpa-fakta/konfirmasi + tanpa-izin + tak-diketahui + muat + galat + manifest', async ({ page }) => {
+    mkdirSync(SHOTS_UI05, { recursive: true })
+    const manifest: Array<{ file: string, viewport: string, state: string, provenance: string }> = []
+    const shot = async (name: string, state: string, provenance: string, width: number) => {
+      const file = `${name}-${width}.png`
+      await page.screenshot({ path: path.join(SHOTS_UI05, file), fullPage: true })
+      manifest.push({ file, viewport: `${width}`, state, provenance })
+    }
+    const sha = (name: string) => createHash('sha256').update(readFileSync(path.join(SHOTS_UI05, name))).digest('hex')
+    const { email, ws, token, customer, item } = await priceSetup(page, 'shot')
+    await seedPriceOne(page.request, ws, token, item.id, '2047-01-01T00:00:00Z', '2047-02-01T00:00:00Z', '150000')
+    const draft = await seedDraftOne(page.request, ws, token, customer.id, item.id, '2047-01-01T00:00:00Z', '2047-01-03T00:00:00Z')
+    const quote = await getQuote(page, ws, draft.id, email)
+    const recorded = await acceptPrice(page, ws, draft.id, email, randomUUID(), quote.body.price_version_id, quote.body.total_minor)
+    expect(recorded.status).toBe(201)
+    const sizes = [
+      { width: 360, height: 640 },
+      { width: 768, height: 1024 },
+      { width: 1440, height: 900 }
+    ]
+    for (const size of sizes) {
+      await page.setViewportSize(size)
+      await uiLogin(page, email)
+      await gotoAuthed(page, `/workspaces/${ws}/rental-prices/${draft.id}`, email)
+      await expect(page.getByText('Harga yang dicatat: 300000 unit tarif · IDR (2 × 24 jam @ 150000 unit tarif · IDR)')).toBeVisible()
+      await expect(page.getByRole('button', { name: 'Catat harga ini' })).toHaveCount(0)
+      await shot('01-price', 'recorded-fact-live', 'live', size.width)
+    }
+    await page.setViewportSize({ width: 360, height: 640 })
+    const nofactSetup = await priceSetup(page, 'shot-nf')
+    await seedPriceOne(page.request, nofactSetup.ws, nofactSetup.token, nofactSetup.item.id, '2047-01-01T00:00:00Z', '2047-02-01T00:00:00Z', '150000')
+    const draftNf = await seedDraftOne(page.request, nofactSetup.ws, nofactSetup.token, nofactSetup.customer.id, nofactSetup.item.id, '2047-01-01T00:00:00Z', '2047-01-03T00:00:00Z')
+    await gotoAuthed(page, `/workspaces/${nofactSetup.ws}/rental-prices/${draftNf.id}`, nofactSetup.email)
+    await page.getByRole('button', { name: 'Catat harga ini' }).click()
+    await expect(page.getByRole('heading', { name: 'Konfirmasi pencatatan harga' })).toBeVisible()
+    await shot('04-price-nofact', 'nofact-confirmation-live', 'live', 360)
+    // Non-anggota baru per tes (bukan otherEmail bersama): bisa jalan
+    // sendiri lewat --grep maupun dalam suite penuh.
+    const nomemberEmail = `hp5-bukan-anggota-${RUN}@e2e.umnia.local`
+    await uiRegister(page, nomemberEmail)
+    await uiLogin(page, nomemberEmail)
+    await gotoAuthed(page, `/workspaces/${ws}/rental-prices/${draft.id}`, nomemberEmail)
+    await expect(page.getByRole('alert')).toContainText('bukan anggota workspace ini')
+    await shot('05-price-noperm', 'no-permission-live', 'live', 360)
+    await uiLogin(page, nofactSetup.email)
+    // Tak diketahui: POST sampai ke API nyata lalu responsnya hilang.
+    await gotoAuthed(page, `/workspaces/${nofactSetup.ws}/rental-prices/${draftNf.id}`, nofactSetup.email)
+    await page.route(
+      (url) => url.pathname.startsWith('/api/'),
+      async (route) => {
+        const u = new URL(route.request().url())
+        if (route.request().method() === 'POST' && u.pathname.endsWith('/accept-price')) {
+          await route.fetch()
+          await route.abort()
+          return
+        }
+        await route.continue()
+      }
+    )
+    await page.getByRole('button', { name: 'Catat harga ini' }).click()
+    await page.getByRole('button', { name: 'Catat harga ini' }).click()
+    await expect(page.getByRole('heading', { name: 'Hasil pencatatan tidak diketahui' })).toBeVisible()
+    await shot('06-price-unknown', 'unknown-mocked', 'mocked-route', 360)
+    await page.unrouteAll({ behavior: 'wait' })
+    // Muat: respons ditahan 2,5 dtk, tangkap status memuat.
+    await page.route(
+      (url) => url.pathname.startsWith('/api/') && url.pathname.endsWith('/quote'),
+      async (route) => {
+        await new Promise(r => setTimeout(r, 2500))
+        await route.continue()
+      }
+    )
+    await gotoAuthed(page, `/workspaces/${nofactSetup.ws}/rental-prices/${draftNf.id}`, nofactSetup.email)
+    await expect(page.getByText('Memuat…')).toBeVisible()
+    await shot('07-price-loading', 'loading-mocked', 'mocked-route', 360)
+    await page.unrouteAll({ behavior: 'wait' })
+    // Galat: respons GET dibatalkan, tangkap halaman galat. POST login
+    // tetap diteruskan supaya gotoAuthed bisa masuk.
+    await page.route(
+      (url) => url.pathname.startsWith('/api/'),
+      async (route) => {
+        if (route.request().method() === 'GET') {
+          await route.abort()
+          return
+        }
+        await route.continue()
+      }
+    )
+    await gotoAuthed(page, `/workspaces/${nofactSetup.ws}/rental-prices/${draftNf.id}`, nofactSetup.email)
+    await expect(page.getByText('Layanan tidak tersedia').first()).toBeVisible()
+    await shot('08-price-error', 'error-mocked', 'mocked-route', 360)
+    await page.unrouteAll({ behavior: 'wait' })
+    const withSums = manifest.map(m => ({ ...m, sha256: sha(m.file) }))
+    writeFileSync(path.join(SHOTS_UI05, 'manifest.json'), JSON.stringify({ generated_by: 'owner-flow.spec.ts f2-ui-05', files: withSums }, null, 2) + '\n')
+    expect(withSums.length).toBe(8)
+  })
+
+  test('harga draf R1-1A: fakta kunci-sama yang tidak cocok tidak dipromosikan; GET cocok kemudian menyelesaikan', async ({ page }) => {
+    const { email, ws, token, customer, item } = await priceSetup(page, 'r1a')
+    await seedPriceOne(page.request, ws, token, item.id, '2047-01-01T00:00:00Z', '2047-02-01T00:00:00Z', '100')
+    const draft = await seedDraftOne(page.request, ws, token, customer.id, item.id, '2047-01-01T00:00:00Z', '2047-01-03T00:00:00Z')
+    // POST pertama hilang (fetch+abort); kunci ditangkap dari header.
+    // GET fakta sesudahnya dipenuhi kandidat kunci-sama yang tidak cocok
+    // (tarif 999 × 2 unit = 1998, aritmetika valid) — BUKAN fakta cacat.
+    let postAttempts = 0
+    let capturedKey = ''
+    let craftedVersionId = ''
+    let sameKeyPoison = false
+    await page.route(
+      (url) => url.pathname.startsWith('/api/'),
+      async (route) => {
+        const u = new URL(route.request().url())
+        if (route.request().method() === 'POST' && u.pathname.endsWith('/accept-price')) {
+          postAttempts++
+          if (postAttempts === 1) {
+            capturedKey = route.request().headers()['idempotency-key'] ?? ''
+            sameKeyPoison = true
+            await route.fetch()
+            await route.abort()
+            return
+          }
+        }
+        if (sameKeyPoison && craftedVersionId !== '' && route.request().method() === 'GET' && u.pathname.endsWith('/agreed-price')) {
+          await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({
+            id: randomUUID(), workspace_id: ws, rental_contract_id: draft.id,
+            price_version_id: craftedVersionId, pricing_rule_version_id: 'elapsed_24h_ceil_v1', catalog_item_id: item.id,
+            customer_id: customer.id, client_request_id: capturedKey, amount_minor: '999', currency: 'IDR',
+            units: 2, total_minor: '1998', starts_at: '2047-01-01T00:00:00Z', ends_at: '2047-01-03T00:00:00Z',
+            accepted_at: '2047-01-01T00:00:00Z', accepted_by: randomUUID()
+          }) })
+          return
+        }
+        await route.continue()
+      }
+    )
+    await uiLogin(page, email)
+    await gotoAuthed(page, `/workspaces/${ws}/rental-prices/${draft.id}`, email)
+    await page.getByRole('button', { name: 'Catat harga ini' }).click()
+    await page.getByRole('button', { name: 'Catat harga ini' }).click()
+    await expect(page.getByRole('heading', { name: 'Hasil pencatatan tidak diketahui' })).toBeVisible()
+    const quote = await getQuote(page, ws, draft.id, email)
+    craftedVersionId = quote.body.price_version_id
+    await page.getByRole('alert').getByRole('button', { name: 'Muat ulang harga' }).click()
+    // Kandidat kunci-sama yang tidak cocok: ketidakpastian dipertahankan,
+    // ringkasan/kunci asli selamat, kandidat TIDAK tampil sebagai fakta.
+    await expect(page.getByRole('heading', { name: 'Hasil pencatatan tidak diketahui' })).toBeVisible()
+    await expect(page.getByText('Fakta yang dibaca memakai kunci yang sama tetapi tidak cocok dengan permintaan ini; pencatatan tetap tidak diketahui.')).toBeVisible()
+    await expect(page.getByText('Harga yang dicatat: 1998 unit tarif · IDR')).toHaveCount(0)
+    await expect(page.getByRole('alert').getByText('Total: 200 unit tarif · IDR')).toBeVisible()
+    await page.unrouteAll({ behavior: 'wait' })
+    // GET asli berikutnya mengembalikan fakta cocok (kunci sama, total 200).
+    await page.getByRole('alert').getByRole('button', { name: 'Muat ulang harga' }).click()
+    await expect(page.getByRole('heading', { name: 'Harga tercatat' })).toBeVisible()
+    await expect(page.getByText('Harga yang dicatat: 200 unit tarif · IDR (2 × 24 jam @ 100 unit tarif · IDR)')).toBeVisible()
+    expect(countAudits(ws, 'agreed_price_recorded')).toBe(1)
+  })
+
+  test('harga draf R1-1B: GET menyelesaikan attempt memagari POST lama; tanpa panel pemulihan', async ({ page }) => {
+    // (a) Fakta kunci-lain menyelesaikan attempt; POST lama dilepas 500.
+    const a = await priceSetup(page, 'r1b-a')
+    await seedPriceOne(page.request, a.ws, a.token, a.item.id, '2047-01-01T00:00:00Z', '2047-02-01T00:00:00Z', '150000')
+    const draftA = await seedDraftOne(page.request, a.ws, a.token, a.customer.id, a.item.id, '2047-01-01T00:00:00Z', '2047-01-03T00:00:00Z')
+    let postAttemptsA = 0
+    let releasePostA!: () => void
+    const postHeldA = new Promise<void>((resolve) => { releasePostA = resolve })
+    let resolvePostDispatchedA!: () => void
+    const postDispatchedA = new Promise<void>((resolve) => { resolvePostDispatchedA = resolve })
+    await page.route(
+      (url) => url.pathname.startsWith('/api/'),
+      async (route) => {
+        const u = new URL(route.request().url())
+        if (route.request().method() === 'POST' && u.pathname.endsWith('/accept-price')) {
+          postAttemptsA++
+          if (postAttemptsA === 1) {
+            resolvePostDispatchedA()
+            await postHeldA
+            await route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: 'kesalahan server' }) })
+            return
+          }
+        }
+        await route.continue()
+      }
+    )
+    await uiLogin(page, a.email)
+    await gotoAuthed(page, `/workspaces/${a.ws}/rental-prices/${draftA.id}`, a.email)
+    await page.getByRole('button', { name: 'Catat harga ini' }).click()
+    await page.getByRole('button', { name: 'Catat harga ini' }).click()
+    await postDispatchedA
+    const quoteA = await getQuote(page, a.ws, draftA.id, a.email)
+    const otherA = await acceptPrice(page, a.ws, draftA.id, a.email, randomUUID(), quoteA.body.price_version_id, quoteA.body.total_minor)
+    expect(otherA.status).toBe(201)
+    await page.locator('section[aria-labelledby="quote-heading"]').getByRole('button', { name: 'Muat ulang harga' }).click()
+    await expect(page.getByText('Harga yang dicatat: 300000 unit tarif · IDR (2 × 24 jam @ 150000 unit tarif · IDR)')).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'Hasil pencatatan tidak diketahui' })).toHaveCount(0)
+    await expect(page.getByRole('button', { name: 'Catat harga ini' })).toHaveCount(0)
+    releasePostA()
+    await page.waitForTimeout(1000)
+    // POST lama 500 tidak boleh membangkitkan panel pemulihan tanpa attempt.
+    await expect(page.getByRole('heading', { name: 'Hasil pencatatan tidak diketahui' })).toHaveCount(0)
+    await expect(page.getByRole('heading', { name: 'Harga tercatat' })).toHaveCount(0)
+    await expect(page.getByText('Harga yang dicatat: 300000 unit tarif · IDR (2 × 24 jam @ 150000 unit tarif · IDR)')).toBeVisible()
+    expect(postAttemptsA).toBe(1)
+    expect(countAudits(a.ws, 'agreed_price_recorded')).toBe(1)
+    await page.unrouteAll({ behavior: 'wait' })
+    // (b) Fakta kunci-sama menyelesaikan attempt; POST lama dilepas 500.
+    const b = await priceSetup(page, 'r1b-b')
+    await seedPriceOne(page.request, b.ws, b.token, b.item.id, '2047-01-01T00:00:00Z', '2047-02-01T00:00:00Z', '150000')
+    const draftB = await seedDraftOne(page.request, b.ws, b.token, b.customer.id, b.item.id, '2047-01-01T00:00:00Z', '2047-01-03T00:00:00Z')
+    let postAttemptsB = 0
+    let capturedKeyB = ''
+    let releasePostB!: () => void
+    const postHeldB = new Promise<void>((resolve) => { releasePostB = resolve })
+    let resolvePostDispatchedB!: () => void
+    const postDispatchedB = new Promise<void>((resolve) => { resolvePostDispatchedB = resolve })
+    await page.route(
+      (url) => url.pathname.startsWith('/api/'),
+      async (route) => {
+        const u = new URL(route.request().url())
+        if (route.request().method() === 'POST' && u.pathname.endsWith('/accept-price')) {
+          postAttemptsB++
+          if (postAttemptsB === 1) {
+            capturedKeyB = route.request().headers()['idempotency-key'] ?? ''
+            resolvePostDispatchedB()
+            await postHeldB
+            await route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: 'kesalahan server' }) })
+            return
+          }
+        }
+        await route.continue()
+      }
+    )
+    await gotoAuthed(page, `/workspaces/${b.ws}/rental-prices/${draftB.id}`, b.email)
+    await page.getByRole('button', { name: 'Catat harga ini' }).click()
+    await page.getByRole('button', { name: 'Catat harga ini' }).click()
+    await postDispatchedB
+    const quoteB = await getQuote(page, b.ws, draftB.id, b.email)
+    const sameB = await acceptPrice(page, b.ws, draftB.id, b.email, capturedKeyB, quoteB.body.price_version_id, quoteB.body.total_minor)
+    expect(sameB.status).toBe(201)
+    await page.locator('section[aria-labelledby="quote-heading"]').getByRole('button', { name: 'Muat ulang harga' }).click()
+    await expect(page.getByRole('heading', { name: 'Harga tercatat' })).toBeVisible()
+    releasePostB()
+    await page.waitForTimeout(1000)
+    await expect(page.getByRole('heading', { name: 'Harga tercatat' })).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'Hasil pencatatan tidak diketahui' })).toHaveCount(0)
+    await expect(page.getByText('Harga yang dicatat: 300000 unit tarif · IDR (2 × 24 jam @ 150000 unit tarif · IDR)')).toBeVisible()
+    expect(postAttemptsB).toBe(1)
+    expect(countAudits(b.ws, 'agreed_price_recorded')).toBe(1)
+    await page.unrouteAll({ behavior: 'wait' })
+  })
+
+  test('harga draf R1-2a: konfirmasi baru diblokir selama GET fakta ditahan', async ({ page }) => {
+    const { email, ws, token, customer, item } = await priceSetup(page, 'r1c-a')
+    await seedPriceOne(page.request, ws, token, item.id, '2047-01-01T00:00:00Z', '2047-02-01T00:00:00Z', '150000')
+    const draft = await seedDraftOne(page.request, ws, token, customer.id, item.id, '2047-01-01T00:00:00Z', '2047-01-03T00:00:00Z')
+    await uiLogin(page, email)
+    await gotoAuthed(page, `/workspaces/${ws}/rental-prices/${draft.id}`, email)
+    await expect(page.getByRole('button', { name: 'Catat harga ini' })).toHaveCount(1)
+    // GET fakta refresh ditahan; bacaan belum selesai = bukan tanpa-fakta.
+    let factHeldCount = 0
+    let releaseFact!: () => void
+    const factHeld = new Promise<void>((resolve) => { releaseFact = resolve })
+    await page.route(
+      (url) => url.pathname.startsWith('/api/'),
+      async (route) => {
+        const u = new URL(route.request().url())
+        if (route.request().method() === 'GET' && u.pathname.endsWith('/agreed-price')) {
+          factHeldCount++
+          await factHeld
+        }
+        await route.continue()
+      }
+    )
+    await page.locator('section[aria-labelledby="quote-heading"]').getByRole('button', { name: 'Muat ulang harga' }).click()
+    await expect.poll(() => factHeldCount, { timeout: 10000 }).toBe(1)
+    await expect(page.getByRole('button', { name: 'Catat harga ini' })).toHaveCount(0)
+    releaseFact()
+    await expect(page.getByRole('button', { name: 'Catat harga ini' })).toHaveCount(1)
+    await page.getByRole('button', { name: 'Catat harga ini' }).click()
+    await page.getByRole('button', { name: 'Catat harga ini' }).click()
+    await expect(page.getByRole('heading', { name: 'Harga tercatat' })).toBeVisible()
+    await page.unrouteAll({ behavior: 'wait' })
+  })
+
+  test('harga draf R1-2b: tulis panel diblokir selama refresh ditahan; tanpa POST', async ({ page }) => {
+    const { email, ws, token, customer, item } = await priceSetup(page, 'r1c-b')
+    await seedPriceOne(page.request, ws, token, item.id, '2047-01-01T00:00:00Z', '2047-02-01T00:00:00Z', '150000')
+    const draft = await seedDraftOne(page.request, ws, token, customer.id, item.id, '2047-01-01T00:00:00Z', '2047-01-03T00:00:00Z')
+    await uiLogin(page, email)
+    await gotoAuthed(page, `/workspaces/${ws}/rental-prices/${draft.id}`, email)
+    await page.getByRole('button', { name: 'Catat harga ini' }).click()
+    await expect(page.getByRole('heading', { name: 'Konfirmasi pencatatan harga' })).toBeVisible()
+    // Refresh ditahan di GET fakta; tombol tulis panel nonaktif dan
+    // handler menolak kiriman pertama selama bacaan belum selesai.
+    let factHeldCount = 0
+    let postAttempts = 0
+    let releaseFact!: () => void
+    const factHeld = new Promise<void>((resolve) => { releaseFact = resolve })
+    await page.route(
+      (url) => url.pathname.startsWith('/api/'),
+      async (route) => {
+        const u = new URL(route.request().url())
+        if (route.request().method() === 'GET' && u.pathname.endsWith('/agreed-price')) {
+          factHeldCount++
+          await factHeld
+        }
+        if (route.request().method() === 'POST' && u.pathname.endsWith('/accept-price')) {
+          postAttempts++
+        }
+        await route.continue()
+      }
+    )
+    await page.locator('section[aria-labelledby="quote-heading"]').getByRole('button', { name: 'Muat ulang harga' }).click()
+    await expect.poll(() => factHeldCount, { timeout: 10000 }).toBe(1)
+    await expect(page.getByRole('button', { name: 'Catat harga ini' })).toBeDisabled()
+    await page.evaluate(() => {
+      const btn = Array.from(document.querySelectorAll('button')).find(b => b.textContent?.trim() === 'Catat harga ini')
+      btn?.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
+    })
+    await page.waitForTimeout(500)
+    expect(postAttempts).toBe(0)
+    releaseFact()
+    await expect(page.getByRole('button', { name: 'Catat harga ini' })).toBeEnabled()
+    await page.getByRole('button', { name: 'Catat harga ini' }).click()
+    await expect(page.getByRole('heading', { name: 'Harga tercatat' })).toBeVisible()
+    expect(postAttempts).toBe(1)
+    await page.unrouteAll({ behavior: 'wait' })
   })
 })

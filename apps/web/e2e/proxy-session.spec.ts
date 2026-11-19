@@ -2,6 +2,7 @@
 // Setup fixture memakai API server (bukan UI); psql HANYA untuk fault
 // injection. Rahasia (token, kode undangan) tidak pernah di-log.
 import { execFileSync } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
 import http from 'node:http'
 import { expect, request as pwRequest, test } from '@playwright/test'
 
@@ -676,6 +677,278 @@ test.describe.serial('proxy + sesi', () => {
     expect(ok.body).toContain('layanan tidak tersedia')
     expect(ok.body).not.toContain('127.0.0.1')
     const bad = await rawGet(`/api/workspaces/${wsId}/rental/contracts?limit=0`, 3001)
+    expect(bad.status).toBe(400)
+    expect(bad.body).toContain('permintaan tidak valid')
+  })
+
+  test('proxy: harga draf GET quote + POST accept-price + GET agreed-price diteruskan', async ({ request }) => {
+    const grantCli = process.env.E2E_GRANT_CLI || ''
+    const operatorUrl = process.env.E2E_OPERATOR_DATABASE_URL || ''
+    expect(grantCli.length).toBeGreaterThan(0)
+    expect(operatorUrl.length).toBeGreaterThan(0)
+    const out = execFileSync(grantCli, ['--workspace', wsId, '--module', 'rental.basic', '--version', '0.1.0', '--reason', 'tes E2E proxy harga'], {
+      encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env, UMNIA_OPERATOR_DATABASE_URL: operatorUrl },
+    })
+    expect(out.startsWith('granted ') || out.startsWith('already_granted') || out.startsWith('legacy_existing')).toBe(true)
+    const auth = { Authorization: `Bearer ${ownerToken}` }
+    const act = await request.post(`/api/workspaces/${wsId}/modules/rental.basic/activate`, {
+      headers: auth, data: { version: '0.1.0' }
+    })
+    expect(act.status()).toBe(200)
+    const customer = await request.post(`/api/workspaces/${wsId}/customers`, {
+      headers: auth, data: { display_name: `Proxy Harga Pelanggan ${RUN}` }
+    })
+    expect(customer.status()).toBe(201)
+    const customerId = ((await customer.json()) as { id: string }).id
+    const item = await request.post(`/api/workspaces/${wsId}/catalog/items`, {
+      headers: auth, data: { sku: 'PRX-HRG', name: 'Proxy Harga Barang', unit: 'pcs' }
+    })
+    expect(item.status()).toBe(201)
+    const itemId = ((await item.json()) as { id: string }).id
+    const price = await request.post(`/api/workspaces/${wsId}/catalog/items/${itemId}/prices`, {
+      headers: { ...auth, 'Idempotency-Key': `prx-hrg-price-${RUN}` },
+      data: { valid_from: '2048-01-01T00:00:00Z', valid_to: '2048-03-01T00:00:00Z', amount_minor: '150000', currency: 'IDR' }
+    })
+    expect(price.status()).toBe(201)
+    const priceId = ((await price.json()) as { id: string }).id
+    const mkDraft = async (from: string, to: string, key: string) => {
+      const d = await request.post(`/api/workspaces/${wsId}/rental/contracts`, {
+        headers: { ...auth, 'Idempotency-Key': key },
+        data: { customer_id: customerId, catalog_item_id: itemId, starts_at: from, ends_at: to }
+      })
+      expect(d.status()).toBe(201)
+      return ((await d.json()) as { id: string }).id
+    }
+    const draftId = await mkDraft('2048-01-01T00:00:00Z', '2048-01-03T00:00:00Z', `prx-hrg-draft-${RUN}`)
+    const quote = await request.get(`/api/workspaces/${wsId}/rental/contracts/${draftId}/quote`, { headers: auth })
+    expect(quote.status()).toBe(200)
+    const q = (await quote.json()) as { draft_id: string, price_version_id: string, amount_minor: string, currency: string, unit: string, units: number, total_minor: string }
+    expect(q.draft_id).toBe(draftId)
+    expect(q.price_version_id).toBe(priceId)
+    expect(q.amount_minor).toBe('150000')
+    expect(q.currency).toBe('IDR')
+    expect(q.unit).toBe('24h')
+    expect(q.units).toBe(2)
+    expect(q.total_minor).toBe('300000')
+    // Tanpa kunci: backend menolak 400 — proxy tidak membuat kunci.
+    const noKey = await request.post(`/api/workspaces/${wsId}/rental/contracts/${draftId}/accept-price`, {
+      headers: auth, data: { expected_price_version_id: priceId, expected_total_minor: '300000' }
+    })
+    expect(noKey.status()).toBe(400)
+    const key = `prx-hrg-key-${RUN}`
+    const first = await request.post(`/api/workspaces/${wsId}/rental/contracts/${draftId}/accept-price`, {
+      headers: { ...auth, 'Idempotency-Key': key },
+      data: { expected_price_version_id: priceId, expected_total_minor: '300000' }
+    })
+    expect(first.status()).toBe(201)
+    const firstBody = (await first.json()) as { id: string, client_request_id: string, pricing_rule_version_id: string }
+    expect(firstBody.client_request_id).toBe(key)
+    expect(firstBody.pricing_rule_version_id).toBe('elapsed_24h_ceil_v1')
+    const replay = await request.post(`/api/workspaces/${wsId}/rental/contracts/${draftId}/accept-price`, {
+      headers: { ...auth, 'Idempotency-Key': key },
+      data: { expected_price_version_id: priceId, expected_total_minor: '300000' }
+    })
+    expect(replay.status()).toBe(200)
+    expect(((await replay.json()) as { id: string }).id).toBe(firstBody.id)
+    const fact = await request.get(`/api/workspaces/${wsId}/rental/contracts/${draftId}/agreed-price`, { headers: auth })
+    expect(fact.status()).toBe(200)
+    expect(((await fact.json()) as { id: string }).id).toBe(firstBody.id)
+    // Tiga 409 berbeda (backend nyata).
+    const draft2 = await mkDraft('2048-01-05T00:00:00Z', '2048-01-07T00:00:00Z', `prx-hrg-draft2-${RUN}`)
+    const keyMismatch = await request.post(`/api/workspaces/${wsId}/rental/contracts/${draft2}/accept-price`, {
+      headers: { ...auth, 'Idempotency-Key': key },
+      data: { expected_price_version_id: priceId, expected_total_minor: '300000' }
+    })
+    expect(keyMismatch.status()).toBe(409)
+    expect(((await keyMismatch.json()) as { error: string }).error).toBe('kunci idempotency sudah dipakai untuk permintaan yang berbeda')
+    const existingFact = await request.post(`/api/workspaces/${wsId}/rental/contracts/${draftId}/accept-price`, {
+      headers: { ...auth, 'Idempotency-Key': `prx-hrg-key2-${RUN}` },
+      data: { expected_price_version_id: priceId, expected_total_minor: '300000' }
+    })
+    expect(existingFact.status()).toBe(409)
+    expect(((await existingFact.json()) as { error: string }).error).toBe('draft ini sudah memiliki harga yang disepakati')
+    const wrongVersion = await request.post(`/api/workspaces/${wsId}/rental/contracts/${draft2}/accept-price`, {
+      headers: { ...auth, 'Idempotency-Key': `prx-hrg-key3-${RUN}` },
+      data: { expected_price_version_id: '00000000-0000-4000-8000-000000000001', expected_total_minor: '300000' }
+    })
+    expect(wrongVersion.status()).toBe(409)
+    expect(((await wrongVersion.json()) as { error: string }).error).toBe('harga yang diharapkan tidak cocok dengan penawaran saat ini')
+    const wrongTotal = await request.post(`/api/workspaces/${wsId}/rental/contracts/${draft2}/accept-price`, {
+      headers: { ...auth, 'Idempotency-Key': `prx-hrg-key4-${RUN}` },
+      data: { expected_price_version_id: priceId, expected_total_minor: '1' }
+    })
+    expect(wrongTotal.status()).toBe(409)
+    expect(((await wrongTotal.json()) as { error: string }).error).toBe('harga yang diharapkan tidak cocok dengan penawaran saat ini')
+    // Kasir baca 200; tulis 403. Nonanggota 403.
+    const cashierQuote = await request.get(`/api/workspaces/${wsId}/rental/contracts/${draft2}/quote`, {
+      headers: { Authorization: `Bearer ${otherToken}` }
+    })
+    expect(cashierQuote.status()).toBe(200)
+    const cashierFact = await request.get(`/api/workspaces/${wsId}/rental/contracts/${draftId}/agreed-price`, {
+      headers: { Authorization: `Bearer ${otherToken}` }
+    })
+    expect(cashierFact.status()).toBe(200)
+    const cashierPost = await request.post(`/api/workspaces/${wsId}/rental/contracts/${draft2}/accept-price`, {
+      headers: { Authorization: `Bearer ${otherToken}`, 'Idempotency-Key': `prx-hrg-key5-${RUN}` },
+      data: { expected_price_version_id: priceId, expected_total_minor: '300000' }
+    })
+    expect(cashierPost.status()).toBe(403)
+    const nomemberEmail = `proxy-nomember-hrg-${RUN}@e2e.umnia.local`
+    const reg3 = await request.post('/api/auth/register', { data: { email: nomemberEmail, password: PASSWORD } })
+    expect(reg3.status()).toBe(201)
+    const login3 = await request.post('/api/auth/login', { data: { email: nomemberEmail, password: PASSWORD } })
+    expect(login3.status()).toBe(200)
+    const nomemberToken = ((await login3.json()) as { token: string }).token
+    const nomemberQuote = await request.get(`/api/workspaces/${wsId}/rental/contracts/${draftId}/quote`, {
+      headers: { Authorization: `Bearer ${nomemberToken}` }
+    })
+    expect(nomemberQuote.status()).toBe(403)
+    // 404 berbeda: draf hilang vs tanpa tarif vs tanpa fakta.
+    const ghost = '00000000-0000-4000-8000-000000000001'
+    const ghostQuote = await request.get(`/api/workspaces/${wsId}/rental/contracts/${ghost}/quote`, { headers: auth })
+    expect(ghostQuote.status()).toBe(404)
+    expect(((await ghostQuote.json()) as { error: string }).error).toBe('draft tidak ditemukan')
+    const ghostFact = await request.get(`/api/workspaces/${wsId}/rental/contracts/${ghost}/agreed-price`, { headers: auth })
+    expect(ghostFact.status()).toBe(404)
+    expect(((await ghostFact.json()) as { error: string }).error).toBe('draft tidak ditemukan')
+    const item2 = await request.post(`/api/workspaces/${wsId}/catalog/items`, {
+      headers: auth, data: { sku: 'PRX-HRG2', name: 'Proxy Harga Barang Tanpa Tarif', unit: 'pcs' }
+    })
+    expect(item2.status()).toBe(201)
+    const item2Id = ((await item2.json()) as { id: string }).id
+    const draftNoTariff = await request.post(`/api/workspaces/${wsId}/rental/contracts`, {
+      headers: { ...auth, 'Idempotency-Key': `prx-hrg-draft3-${RUN}` },
+      data: { customer_id: customerId, catalog_item_id: item2Id, starts_at: '2048-01-01T00:00:00Z', ends_at: '2048-01-03T00:00:00Z' }
+    })
+    expect(draftNoTariff.status()).toBe(201)
+    const draftNoTariffId = ((await draftNoTariff.json()) as { id: string }).id
+    const noTariffQuote = await request.get(`/api/workspaces/${wsId}/rental/contracts/${draftNoTariffId}/quote`, { headers: auth })
+    expect(noTariffQuote.status()).toBe(404)
+    expect(((await noTariffQuote.json()) as { error: string }).error).toBe('harga efektif tidak ditemukan')
+    const noFact = await request.get(`/api/workspaces/${wsId}/rental/contracts/${draft2}/agreed-price`, { headers: auth })
+    expect(noFact.status()).toBe(404)
+    expect(((await noFact.json()) as { error: string }).error).toBe('harga yang disepakati tidak ditemukan')
+  })
+
+  test('proxy: harga draf quote 422 + uang eksak di atas 2^53 + nol + maksimum; batas 24 jam mikrodetik', async ({ request }) => {
+    const auth = { Authorization: `Bearer ${ownerToken}` }
+    const customer = await request.post(`/api/workspaces/${wsId}/customers`, {
+      headers: auth, data: { display_name: `Proxy Harga Uang ${RUN}` }
+    })
+    expect(customer.status()).toBe(201)
+    const customerId = ((await customer.json()) as { id: string }).id
+    const mkItem = async (sku: string) => {
+      const item = await request.post(`/api/workspaces/${wsId}/catalog/items`, {
+        headers: auth, data: { sku, name: `Proxy ${sku}`, unit: 'pcs' }
+      })
+      expect(item.status()).toBe(201)
+      return ((await item.json()) as { id: string }).id
+    }
+    const mkPrice = async (itemId: string, from: string, to: string, amount: string) => {
+      const price = await request.post(`/api/workspaces/${wsId}/catalog/items/${itemId}/prices`, {
+        headers: { ...auth, 'Idempotency-Key': randomUUID() },
+        data: { valid_from: from, valid_to: to, amount_minor: amount, currency: 'IDR' }
+      })
+      expect(price.status()).toBe(201)
+      return ((await price.json()) as { id: string }).id
+    }
+    const mkDraft = async (itemId: string, from: string, to: string) => {
+      const d = await request.post(`/api/workspaces/${wsId}/rental/contracts`, {
+        headers: { ...auth, 'Idempotency-Key': randomUUID() },
+        data: { customer_id: customerId, catalog_item_id: itemId, starts_at: from, ends_at: to }
+      })
+      expect(d.status()).toBe(201)
+      return ((await d.json()) as { id: string }).id
+    }
+    const getQuote = async (draftId: string) => {
+      const q = await request.get(`/api/workspaces/${wsId}/rental/contracts/${draftId}/quote`, { headers: auth })
+      return { status: q.status(), body: (await q.json()) as { amount_minor: string, total_minor: string, units: number, price_version_id: string } }
+    }
+    // Overflow 422: tarif maksimum × 2 unit.
+    const itemOv = await mkItem('PRX-OVF')
+    await mkPrice(itemOv, '2048-01-01T00:00:00Z', '2048-02-01T00:00:00Z', '9223372036854775807')
+    const draftOv = await mkDraft(itemOv, '2048-01-01T00:00:00Z', '2048-01-03T00:00:00Z')
+    const qOv = await getQuote(draftOv)
+    expect(qOv.status).toBe(422)
+    expect((qOv.body as unknown as { error: string }).error).toBe('total di luar batas yang dapat diwakili')
+    // Di atas 2^53: string eksak dipertahankan (tanpa float).
+    const itemBig = await mkItem('PRX-BIG')
+    const priceBig = await mkPrice(itemBig, '2048-01-01T00:00:00Z', '2048-02-01T00:00:00Z', '9007199254740993')
+    const draftBig = await mkDraft(itemBig, '2048-01-01T00:00:00Z', '2048-01-02T00:00:00Z')
+    const qBig = await getQuote(draftBig)
+    expect(qBig.status).toBe(200)
+    expect(qBig.body.units).toBe(1)
+    expect(qBig.body.total_minor).toBe('9007199254740993')
+    expect(qBig.body.price_version_id).toBe(priceBig)
+    const accBig = await request.post(`/api/workspaces/${wsId}/rental/contracts/${draftBig}/accept-price`, {
+      headers: { ...auth, 'Idempotency-Key': `prx-big-${RUN}` },
+      data: { expected_price_version_id: priceBig, expected_total_minor: '9007199254740993' }
+    })
+    expect(accBig.status()).toBe(201)
+    expect(((await accBig.json()) as { total_minor: string }).total_minor).toBe('9007199254740993')
+    // Nol dan maksimum (1 unit) eksak.
+    const itemZero = await mkItem('PRX-ZERO')
+    const priceZero = await mkPrice(itemZero, '2048-01-01T00:00:00Z', '2048-02-01T00:00:00Z', '0')
+    const draftZero = await mkDraft(itemZero, '2048-01-01T00:00:00Z', '2048-01-02T00:00:00Z')
+    const qZero = await getQuote(draftZero)
+    expect(qZero.status).toBe(200)
+    expect(qZero.body.total_minor).toBe('0')
+    const accZero = await request.post(`/api/workspaces/${wsId}/rental/contracts/${draftZero}/accept-price`, {
+      headers: { ...auth, 'Idempotency-Key': `prx-zero-${RUN}` },
+      data: { expected_price_version_id: priceZero, expected_total_minor: '0' }
+    })
+    expect(accZero.status()).toBe(201)
+    const itemMax = await mkItem('PRX-MAX')
+    const priceMax = await mkPrice(itemMax, '2048-01-01T00:00:00Z', '2048-02-01T00:00:00Z', '9223372036854775807')
+    const draftMax = await mkDraft(itemMax, '2048-01-01T00:00:00Z', '2048-01-02T00:00:00Z')
+    const qMax = await getQuote(draftMax)
+    expect(qMax.status).toBe(200)
+    expect(qMax.body.total_minor).toBe('9223372036854775807')
+    // Batas 24 jam: tepat 24 jam = 1 unit; 24 jam + 1 mikrodetik = 2 unit.
+    const itemMicro = await mkItem('PRX-MICRO')
+    await mkPrice(itemMicro, '2048-01-01T00:00:00Z', '2048-02-01T00:00:00Z', '150000')
+    const draftMicro = await mkDraft(itemMicro, '2048-01-01T00:00:00Z', '2048-01-02T00:00:00.000001Z')
+    const qMicro = await getQuote(draftMicro)
+    expect(qMicro.status).toBe(200)
+    expect(qMicro.body.units).toBe(2)
+    expect(qMicro.body.total_minor).toBe('300000')
+  })
+
+  test('proxy: query harga draf 400; UUID buruk 400/404; upstream mati 502', async ({ request }) => {
+    const auth = { Authorization: `Bearer ${ownerToken}` }
+    const ghost = '00000000-0000-4000-8000-000000000001'
+    for (const path of [
+      `/api/workspaces/${wsId}/rental/contracts/${ghost}/quote`,
+      `/api/workspaces/${wsId}/rental/contracts/${ghost}/agreed-price`
+    ]) {
+      const res = await rawGet(`${path}?limit=10`, 3000, auth)
+      expect(res.status, `${path}?limit=10`).toBe(400)
+      expect(res.body).toContain('permintaan tidak valid')
+    }
+    const postQ = await request.post(`/api/workspaces/${wsId}/rental/contracts/${ghost}/accept-price?limit=10`, {
+      headers: { ...auth, 'Idempotency-Key': `prx-hrg-q-${RUN}` },
+      data: { expected_price_version_id: ghost, expected_total_minor: '1' }
+    })
+    expect(postQ.status()).toBe(400)
+    // UUID buruk tanpa query: jalur tak dikenal (404); ber-query: 400 dulu.
+    const badQuote = await rawGet(`/api/workspaces/${wsId}/rental/contracts/bukan-uuid/quote`, 3000, auth)
+    expect(badQuote.status).toBe(404)
+    const badQuoteQ = await rawGet(`/api/workspaces/${wsId}/rental/contracts/bukan-uuid/quote?limit=10`, 3000, auth)
+    expect(badQuoteQ.status).toBe(400)
+    const badPost = await request.post(`/api/workspaces/${wsId}/rental/contracts/bukan-uuid/accept-price`, {
+      headers: { ...auth, 'Idempotency-Key': `prx-hrg-q2-${RUN}` },
+      data: { expected_price_version_id: ghost, expected_total_minor: '1' }
+    })
+    expect(badPost.status()).toBe(404)
+    const extra = await rawGet(`/api/workspaces/${wsId}/rental/contracts/${ghost}/quote/extra`, 3000, auth)
+    expect(extra.status).toBe(404)
+    // Upstream mati 502; query invalid tetap 400 lokal.
+    const ok = await rawGet(`/api/workspaces/${wsId}/rental/contracts/${ghost}/quote`, 3001, auth)
+    expect(ok.status).toBe(502)
+    expect(ok.body).toContain('layanan tidak tersedia')
+    expect(ok.body).not.toContain('127.0.0.1')
+    const bad = await rawGet(`/api/workspaces/${wsId}/rental/contracts/${ghost}/quote?limit=0`, 3001, auth)
     expect(bad.status).toBe(400)
     expect(bad.body).toContain('permintaan tidak valid')
   })

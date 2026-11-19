@@ -1,0 +1,61 @@
+{
+  "generated_by": "owner-flow.spec.ts f2-ui-05",
+  "files": [
+    {
+      "file": "01-price-360.png",
+      "viewport": "360",
+      "state": "recorded-fact-live",
+      "provenance": "live",
+      "sha256": "56e95b0675a9c34453154df4e44c8db6798fa24a77bdca93140772f4a75400de"
+    },
+    {
+      "file": "01-price-768.png",
+      "viewport": "768",
+      "state": "recorded-fact-live",
+      "provenance": "live",
+      "sha256": "ccfc592a51d54a1be483672496c4e583b872dd85895e978bd96924b04dbf32ff"
+    },
+    {
+      "file": "01-price-1440.png",
+      "viewport": "1440",
+      "state": "recorded-fact-live",
+      "provenance": "live",
+      "sha256": "89661c1b29c8f3225eeafa1d19276d1c6e5eb9b18e5e144b9e2d661944994b15"
+    },
+    {
+      "file": "04-price-nofact-360.png",
+      "viewport": "360",
+      "state": "nofact-confirmation-live",
+      "provenance": "live",
+      "sha256": "73aab6ea1b3f97a4c6b94638056d038b9ad8200fddb105eabd69b2b6987cde38"
+    },
+    {
+      "file": "05-price-noperm-360.png",
+      "viewport": "360",
+      "state": "no-permission-live",
+      "provenance": "live",
+      "sha256": "ec39fa058e86013dbcc1d00dc8a6e7d7946839f30e39b5f0a09a29fe528768da"
+    },
+    {
+      "file": "06-price-unknown-360.png",
+      "viewport": "360",
+      "state": "unknown-mocked",
+      "provenance": "mocked-route",
+      "sha256": "d4aa335781da7da06a871b3cc18f4dfc20639d0c7f3eaf4047c148596d26b18c"
+    },
+    {
+      "file": "07-price-loading-360.png",
+      "viewport": "360",
+      "state": "loading-mocked",
+      "provenance": "mocked-route",
+      "sha256": "1b88f62f02bd867cdebda77c7c9cd50d260fd0a02b29eadaf408805bd731c67d"
+    },
+    {
+      "file": "08-price-error-360.png",
+      "viewport": "360",
+      "state": "error-mocked",
+      "provenance": "mocked-route",
+      "sha256": "b2a469bd2080ba60f1ee4e8c093083833230ed2801b6e74bc4f48c5bf2c95957"
+    }
+  ]
+}

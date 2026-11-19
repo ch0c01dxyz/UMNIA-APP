@@ -30,3 +30,8 @@ HANDOFF_TO_REVIEWER:
 ```
 
 Pernyataan faktual tanpa bukti ditandai UNKNOWN. Model lain yang setuju bukan bukti. Kode tanpa test yang dibutuhkan bukan PASS.
+
+
+## Current delivery contract
+
+Follow `AGENTS.md`, `docs/development/current-status.md` and `docs/development/github-workflow.md`. Continue from the verified implementation checkpoint. Authorized implementation or maintenance includes a task branch, focused validation, commit and push; no routine manual patch transfer or separate publication approval round. A review-only task does not authorize product edits. Report the full SHA and actual GitHub checks. Merge and deployment still require explicit authorization. Keep temporary logs and personal handoffs under ignored `.local/`.

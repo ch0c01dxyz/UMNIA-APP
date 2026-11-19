@@ -1,6 +1,0 @@
-
-=== fixed-isolated-api: tenant isolation on an isolated fixture (MF4 coverage) ===
-CHECK PASS: fixed isolated-api: workflow exits 0 on the isolated fixture
-CHECK PASS: fixed isolated-api: 14/14 steps pass (got 14)
-
---- 2 checks, failures: 0 ---

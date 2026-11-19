@@ -1,7 +1,0 @@
-ERROR:  role "umnia_business" cannot be dropped because some objects depend on it
-DETAIL:  owner of database review_restored
-owner of database review_mech
-owner of database review_fail_noflag
-17 objects in database review_restored
-2 objects in database review_mech
-2 objects in database review_fail_noflag

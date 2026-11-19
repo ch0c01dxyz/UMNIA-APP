@@ -1,5 +1,7 @@
 # F1-UPGRADE-SAFETY-REVIEW — laporan perbaikan (2026-11-06)
 
+> Historical report. Its original evidence package is [pinned in Git history](https://github.com/ch0c01dxyz/UMNIA-APP/tree/be34a24e6f73e04c77263cecb1d43dd59e72c616/docs/reviews/f1-upgrade-safety-review). See the [review index](README.md) for relocated helpers and current status.
+
 STATUS: SELESAI (perbaikan MF1–MF4 terverifikasi pada harness; eksekusi Windows nyata MASIH NOT RUN) | TASK_ID: F1-UPGRADE-SAFETY-REVIEW | FILES CHANGED: lihat §7 | TESTS: baseline repro 17 checks lolos, fixed 36 checks lolos, check-deployment 18/0/0 | RISK / BLOCKERS: `docker compose up` + skrip upgrade di host Windows nyata dan PowerShell 5.1 belum pernah dijalankan | NEXT ACTION: review leader, lalu CI untuk commit baru, lalu uji Windows nyata sebelum klaim F1 gate lolos
 
 ## 1. Baseline dan lingkungan (OBSERVED)

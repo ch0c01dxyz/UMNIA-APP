@@ -13,3 +13,8 @@ Baca task packet, ADR terkait, `AGENTS.md`, kode sebelum/sesudah, hasil CI, `doc
 - Linux non-Docker/Windows Docker sesuai scope.
 
 Putuskan `APPROVED`, `CHANGES_REQUESTED`, atau `BLOCKED`. Setiap temuan: severity, lokasi file/line, reproducer atau bukti dan saran terkecil. Unknown tests bukan PASS; reviewer boleh mewajibkan QA tambahan. T3 perlu eskalasi leader/human.
+
+
+## Current delivery contract
+
+Follow `AGENTS.md`, `docs/development/current-status.md` and `docs/development/github-workflow.md`. Continue from the verified implementation checkpoint. Authorized implementation or maintenance includes a task branch, focused validation, commit and push; no routine manual patch transfer or separate publication approval round. A review-only task does not authorize product edits. Report the full SHA and actual GitHub checks. Merge and deployment still require explicit authorization. Keep temporary logs and personal handoffs under ignored `.local/`.

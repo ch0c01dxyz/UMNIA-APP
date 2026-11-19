@@ -284,7 +284,7 @@ WHERE routine_schema = 'app' AND routine_name = 'register_subject';
 Jalur dump/restore ini diuji pada database uji (fixture workspace
 dipertahankan, role runtime NOSUPERUSER/NOBYPASSRLS, hak EXECUTE 6/6,
 API lolos), bukan pada data pengguna. Lihat laporan
-`docs/reviews/f1-foundation-remediation-review/REVIEW.md`,
+[historical foundation review](https://github.com/ch0c01dxyz/UMNIA-APP/blob/be34a24e6f73e04c77263cecb1d43dd59e72c616/docs/reviews/f1-foundation-remediation-review/REVIEW.md),
 `docs/reviews/f1-windows-review-fixes.md`,
 `docs/reviews/f1-upgrade-safety-review.md` (skrip upgrade diperbaiki:
 identitas sumber terverifikasi, preflight tanpa mutasi, quiesce

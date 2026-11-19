@@ -6,3 +6,11 @@ services/business-api/business-api
 services/business-api/grant-entitlement
 deploy/windows/tests/bin/
 deploy/operator-roster.env
+
+# Local working evidence, transfers and host-owned session memory.
+/.local/
+/.harness-memory/
+/output.txt
+/*.log
+/*.patch
+/*-bundle.tar.gz

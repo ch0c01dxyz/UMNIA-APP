@@ -3,7 +3,7 @@
 Applies to frontier leaders, Flash coding workers, reviewers, QA workers, and UI agents in any compatible harness.
 
 1. **Start with `FAST_TRACK.md` and the relevant task only.** Open detailed domain docs as needed; do not delay coding by reading everything.
-2. The repository is **not** an implemented app yet. Specs, SQL reference files and JSON examples are **not** evidence of runtime success.
+2. Distinguish implemented code from specifications. Specs, SQL reference files and JSON examples are **not** evidence of runtime success. Read `docs/development/current-status.md` for the latest verified implementation checkpoint.
 3. Frontier orchestrates architecture/interface/QA, Flash implements small frozen tasks. Frontier codes directly only when security/complexity requires. Never self-approve security-critical code.
 4. Maintain creativity: propose alternatives in `PROPOSALS`, but distinguish observation from hypothesis and do not change frozen scope silently.
 5. Never invent SDK APIs, command output, citations, model abilities, installed plugins or passed tests. If unknown, label UNKNOWN, inspect actual environment, and report blocker.
@@ -17,8 +17,18 @@ Applies to frontier leaders, Flash coding workers, reviewers, QA workers, and UI
 
 ## Start sequence
 
-`FAST_TRACK.md` -> F1-01 -> implement, test and merge. Continue independent tasks in parallel and use the next phase when dependencies are met.
+`FAST_TRACK.md` -> `docs/development/current-status.md` -> current authorized task. Continue from accepted work; merge only with authorization.
 
 ## Non-negotiable report
 
 `TASK_ID | FILES CHANGED | TESTS (pass/fail) | RISK / BLOCKERS | NEXT ACTION` (tambahkan bukti keamanan/detail hanya saat relevan).
+
+## GitHub delivery
+
+- Use GitHub task branches, commits and exact-SHA CI for authorized work. Implement, validate, commit and push the bounded change directly, without a separate patch-transfer or publication approval round. Specific user instructions still control scope and permissions.
+- Confirm the intended base and existing work before editing. Keep one writer per checkout; never discard another worker's changes.
+- Review the actual diff and full commit SHA. Report the branch, commit, comparison or PR URL, checks and limitations.
+- Merge, deploy, force-push and history rewriting require explicit authorization. Never weaken checks to obtain a pass.
+- Keep concise decisions and acceptance records in Git. Put raw logs, probes, transfer bundles and personal handoffs under ignored `.local/`. Leave host-owned `.harness-memory/` in place and untracked.
+- Reuse matching accepted evidence; use manual transfer packets only when GitHub is unavailable or the user requests them.
+- Follow `docs/development/github-workflow.md`.

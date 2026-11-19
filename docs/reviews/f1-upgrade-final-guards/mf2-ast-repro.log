@@ -1,9 +1,0 @@
-extracted function extent:
-function Get-ServiceContainerOrNull($Project, $Service) {
-  # '' bila service tidak ada / tidak berjalan (bukan error fatal di sini).
-  try { $id = Invoke-ComposeCapture $Project @('ps', '-q', $Service) } catch { return '' }
-  if ([string]::IsNullOrWhiteSpace($id)) { return '' }
-  return $id.Trim()
-}
-returned: '' (no exception propagated)
-MF2 REPRODUCED: Docker error swallowed into empty return

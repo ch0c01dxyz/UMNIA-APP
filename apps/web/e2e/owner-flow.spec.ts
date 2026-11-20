@@ -6204,6 +6204,163 @@ test.describe.serial('alur pemilik', () => {
     await page.unrouteAll({ behavior: 'wait' })
   })
 
+  test('serah terima R2: GET holds mengganti held menjadi expired lalu released; hold tidak lagi ditawarkan', async ({ page }) => {
+    const { email, ws, token, customer, item, asset, draft } = await seedCustodyReady(page, 'r2-hold-recon')
+    const hold = await createHold(page, ws, draft.id, email, randomUUID(), asset.id)
+    expect(hold.status).toBe(201)
+    const realHold = hold.body as HoldRow
+    await uiLogin(page, email)
+    await gotoAuthed(page, `/workspaces/${ws}/rental-custody/${draft.id}`, email)
+    await page.getByLabel('Unit').selectOption(asset.id)
+    await expect(page.getByText('Hold aktif untuk unit ini.')).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Serahkan unit' })).toBeVisible()
+    // GET terbaru mengembalikan ID yang sama dengan status efektif berubah.
+    let holdStatus: 'expired' | 'released' = 'expired'
+    await page.route((url) => url.pathname.startsWith('/api/'), async (route) => {
+      const u = new URL(route.request().url())
+      if (route.request().method() === 'GET' && u.pathname.endsWith('/rental/holds')) {
+        await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ items: [{ ...realHold, status: holdStatus }] }) })
+      } else await route.continue()
+    })
+    await page.getByRole('button', { name: 'Muat ulang data' }).click()
+    await expect(page.getByText('Hold aktif untuk unit ini.')).toHaveCount(0)
+    await expect(page.getByRole('button', { name: 'Serahkan unit' })).toHaveCount(0)
+    await expect(page.getByRole('button', { name: 'Buat hold' })).toBeVisible()
+    // Status efektif berubah lagi (released): tetap tidak ditawarkan.
+    holdStatus = 'released'
+    await page.getByRole('button', { name: 'Muat ulang data' }).click()
+    await expect(page.getByText('Hold aktif untuk unit ini.')).toHaveCount(0)
+    await expect(page.getByRole('button', { name: 'Serahkan unit' })).toHaveCount(0)
+    await expect(page.getByRole('button', { name: 'Buat hold' })).toBeVisible()
+    await page.unrouteAll({ behavior: 'wait' })
+  })
+
+  test('serah terima R2: hold kedaluwarsa ditolak 409; hold pengganti lalu serah terima baru', async ({ page }) => {
+    const { email, ws, token, customer, item, asset, draft } = await seedCustodyReady(page, 'r2-hand-409')
+    const hold = await createHold(page, ws, draft.id, email, randomUUID(), asset.id)
+    expect(hold.status).toBe(201)
+    const holdId = (hold.body as HoldRow).id
+    await uiLogin(page, email)
+    await gotoAuthed(page, `/workspaces/${ws}/rental-custody/${draft.id}`, email)
+    await page.getByLabel('Unit').selectOption(asset.id)
+    await expect(page.getByText('Hold aktif untuk unit ini.')).toBeVisible()
+    // Hold kedaluwarsa sesudah halaman dimuat (bukti server nyata, bukan
+    // injeksi): POST handover berikutnya ditolak 409 `hold tidak aktif`.
+    psql(`UPDATE rental_holds SET expires_at = now() - interval '1 hour' WHERE id='${holdId}'`)
+    const seenHandKeys = new Set<string>()
+    let handPostCount = 0
+    let holdPostCount = 0
+    await page.route((url) => url.pathname.startsWith('/api/'), async (route) => {
+      const u = new URL(route.request().url())
+      if (route.request().method() === 'POST' && u.pathname.endsWith('/handover')) {
+        handPostCount++
+        const k = route.request().headers()['idempotency-key']
+        if (k) seenHandKeys.add(k)
+        await route.continue()
+      } else if (route.request().method() === 'POST' && u.pathname.endsWith('/holds')) {
+        holdPostCount++
+        await route.continue()
+      } else await route.continue()
+    })
+    await page.getByRole('button', { name: 'Serahkan unit' }).click()
+    await expect(page.getByRole('heading', { name: 'Konfirmasi serah terima' })).toBeVisible()
+    await page.getByRole('button', { name: 'Serahkan unit' }).click()
+    // Penolakan definitif: alasan server tampil, hold lama tidak lagi
+    // ditawarkan, panel konfirmasi tertutup, hold pengganti bisa dibuat.
+    await expect(page.getByText(/hold tidak aktif/)).toBeVisible()
+    await expect(page.getByText('Hold aktif untuk unit ini.')).toHaveCount(0)
+    await expect(page.getByRole('heading', { name: 'Konfirmasi serah terima' })).toHaveCount(0)
+    await expect(page.getByRole('button', { name: 'Serahkan unit' })).toHaveCount(0)
+    await expect(page.getByRole('button', { name: 'Buat hold' })).toBeVisible()
+    expect(handPostCount).toBe(1)
+    // Hold pengganti lewat UI (konfirmasi pengguna), lalu serah terima baru.
+    await page.getByRole('button', { name: 'Buat hold' }).click()
+    await expect(page.getByRole('heading', { name: 'Konfirmasi pembuatan hold' })).toBeVisible()
+    await page.getByRole('button', { name: 'Buat hold' }).click()
+    await expect(page.getByText('Hold aktif untuk unit ini.')).toBeVisible()
+    expect(holdPostCount).toBe(1)
+    await page.getByRole('button', { name: 'Serahkan unit' }).click()
+    await expect(page.getByRole('heading', { name: 'Konfirmasi serah terima' })).toBeVisible()
+    await page.getByRole('button', { name: 'Serahkan unit' }).click()
+    await expect(page.getByText('Unit sedang dipinjam')).toBeVisible()
+    // Dua POST handover dengan DUA kunci berbeda: upaya baru, bukan
+    // kirim-ulang kunci yang ditolak.
+    expect(handPostCount).toBe(2)
+    expect(seenHandKeys.size).toBe(2)
+    await page.unrouteAll({ behavior: 'wait' })
+  })
+
+  test('serah terima R2: 409 saat kirim-ulang tidak melepas kunci sebelum GET custody membuktikan', async ({ page }) => {
+    const { email, ws, token, customer, item, asset, draft } = await seedCustodyReady(page, 'r2-hand-retry409')
+    const hold = await createHold(page, ws, draft.id, email, randomUUID(), asset.id)
+    expect(hold.status).toBe(201)
+    const holdId = (hold.body as HoldRow).id
+    await uiLogin(page, email)
+    let custodyMode: 'real' | 'fail500' = 'real'
+    let custodyGetCount = 0
+    const seenHandKeys = new Set<string>()
+    let handPostCount = 0
+    let handPhase = 0 // 0 = POST pertama digagalkan, 1-2 = kirim-ulang dijawab 409, 3+ = diteruskan
+    await page.route((url) => url.pathname.startsWith('/api/'), async (route) => {
+      const u = new URL(route.request().url())
+      if (route.request().method() === 'GET' && u.pathname.endsWith('/custody')) {
+        custodyGetCount++
+        if (custodyMode === 'fail500') await route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: 'gagal' }) })
+        else await route.continue()
+      } else if (route.request().method() === 'POST' && u.pathname.endsWith('/handover')) {
+        handPostCount++
+        const k = route.request().headers()['idempotency-key']
+        if (k) seenHandKeys.add(k)
+        if (handPhase === 0) { handPhase = 1; await route.abort() }
+        else if (handPhase <= 2) { handPhase++; await route.fulfill({ status: 409, contentType: 'application/json', body: JSON.stringify({ error: 'hold tidak aktif' }) }) }
+        else await route.continue()
+      } else await route.continue()
+    })
+    await gotoAuthed(page, `/workspaces/${ws}/rental-custody/${draft.id}`, email)
+    await page.getByLabel('Unit').selectOption(asset.id)
+    await page.getByRole('button', { name: 'Serahkan unit' }).click()
+    await page.getByRole('button', { name: 'Serahkan unit' }).click()
+    await expect(page.getByRole('heading', { name: 'Hasil serah terima tidak diketahui' })).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Mulai serah terima baru' })).toHaveCount(0)
+    const custodyGetsAfterLoad = custodyGetCount
+    // Fase A: GET custody gagal saat konfirmasi — kunci dipertahankan,
+    // panel unknown tetap tampil, tidak ada catatan penolakan. (Alasan
+    // server tetap tampil sebagai "Kirim ulang ditolak" di panel unknown;
+    // yang diuji di sini adalah catatan pelepasannya belum ada.)
+    custodyMode = 'fail500'
+    await page.getByRole('button', { name: 'Kirim lagi (permintaan sama)' }).click()
+    await expect(page.getByRole('button', { name: 'Kirim lagi (permintaan sama)' })).toBeEnabled()
+    await expect(page.getByRole('heading', { name: 'Hasil serah terima tidak diketahui' })).toBeVisible()
+    await expect(page.getByText(/Hold lama tidak dapat dipakai lagi/)).toHaveCount(0)
+    await expect(page.getByRole('button', { name: 'Buat hold' })).toHaveCount(0)
+    expect(custodyGetCount).toBeGreaterThan(custodyGetsAfterLoad)
+    // Fase B: GET custody spesifik (tanpa custody) + 409 — kombinasi
+    // keduanya adalah bukti otoritatif: kunci dilepas, hold lama berhenti
+    // ditawarkan, hold pengganti bisa dibuat.
+    custodyMode = 'real'
+    await page.getByRole('button', { name: 'Kirim lagi (permintaan sama)' }).click()
+    await expect(page.getByText(/hold tidak aktif/)).toBeVisible()
+    await expect(page.getByText(/Hold lama tidak dapat dipakai lagi/)).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'Hasil serah terima tidak diketahui' })).toHaveCount(0)
+    await expect(page.getByText('Hold aktif untuk unit ini.')).toHaveCount(0)
+    await expect(page.getByRole('button', { name: 'Buat hold' })).toBeVisible()
+    // Dua kirim-ulang memakai kunci yang SAMA (satu kunci asli).
+    expect(handPostCount).toBe(3)
+    expect(seenHandKeys.size).toBe(1)
+    // Hold pengganti + serah terima baru dengan kunci baru (hold lama
+    // sudah kedaluwarsa di DB supaya lazy expiry mengizinkan pengganti).
+    psql(`UPDATE rental_holds SET expires_at = now() - interval '1 hour' WHERE id='${holdId}'`)
+    await page.getByRole('button', { name: 'Buat hold' }).click()
+    await page.getByRole('button', { name: 'Buat hold' }).click()
+    await expect(page.getByText('Hold aktif untuk unit ini.')).toBeVisible()
+    await page.getByRole('button', { name: 'Serahkan unit' }).click()
+    await page.getByRole('button', { name: 'Serahkan unit' }).click()
+    await expect(page.getByText('Unit sedang dipinjam')).toBeVisible()
+    expect(handPostCount).toBe(4)
+    expect(seenHandKeys.size).toBe(2)
+    await page.unrouteAll({ behavior: 'wait' })
+  })
+
   test('screenshot f2-ui-06: tiga utama + tanpa-fakta + tanpa-izin + tak-diketahui + muat + galat + manifest', async ({ page }) => {
     const mkdirSync = (await import('node:fs')).mkdirSync
     const writeFileSync = (await import('node:fs')).writeFileSync

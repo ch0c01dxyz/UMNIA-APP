@@ -38,6 +38,22 @@
 // Kiriman pertama hold/handover mensyaratkan hasil baca no-custody yang
 // spesifik (custodyMissing), bukan sekadar `!custody` — GET custody yang
 // gagal atau DTO-nya cacat tidak boleh membuka jalan tulis.
+//
+// R2: observasi GET terbaru untuk ID hold yang sama menggantikan cache
+// (status efektif server expired/released menggantikan held) — merge
+// tidak lagi hanya menambah ID baru. Refresh holds terbatas (halaman yang
+// sudah dimuat + satu halaman berikut) jalan di setiap muat-ulang, juga
+// tanpa upaya hold, supaya serah terima yang perlu pulih melihat status
+// efektif terbaru; tanpa hitung TTL di klien, tanpa scan tanpa batas,
+// dan satu halaman kosong bukan bukti hold hilang. HTTP 409 `hold tidak
+// aktif` pada handover adalah penolakan definitif (server memeriksa
+// replay dulu, lalu menolak sebelum mutasi): alasan server ditampilkan,
+// hold lama berhenti dipakai, dan hold pengganti + handover berikutnya
+// butuh konfirmasi pengguna. Pada kirim-ulang sesudah unknown, 409 yang
+// sama hanya melepas kunci sesudah GET custody mengonfirmasi tidak ada
+// custody dengan kunci itu — 409 saja, absensi daftar saja, atau GET
+// custody 404 saja tidak cukup; bila bacaan gagal/cacat, snapshot dan
+// kunci dipertahankan.
 // Kunci return (`return_client_request_id`) TIDAK PERNAH dibandingkan
 // dengan kunci handover. Hanya 201 atau replay 200 dengan baris yang
 // valid yang mengonfirmasi tulis; return hanya 200. Hasil tak diketahui
@@ -73,6 +89,7 @@ const CUSTODY_NO_CUSTODY = 'custody tidak ditemukan'
 const CUSTODY_INVALID = 'Catatan serah terima yang diterima tidak valid.'
 const KEY_MISMATCH = 'kunci idempotency sudah dipakai untuk permintaan yang berbeda'
 const CUSTODY_EXISTS = 'draft ini sudah memiliki custody'
+const HOLD_INACTIVE = 'hold tidak aktif'
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const MONEY_RE = /^(0|[1-9][0-9]*)$/
 const CURRENCY_RE = /^[A-Z]{3}$/
@@ -367,6 +384,12 @@ const holdExhausted = ref(false)
 const holdListLoading = ref(false)
 const holdLoadError = ref<string | null>(null)
 const holdStarted = ref(false)
+// Hold yang server tolak definitif sebagai tidak aktif (409 handover):
+// berhenti ditawarkan sampai halaman dimuat ulang, apa pun kata cache
+// GET berikutnya — penolakan server lebih segar daripada observasi
+// daftar. Bukan status yang ditebak: status efektif tetap dibaca dari
+// GET; set ini hanya mengecualikan pemakaian ulang hold itu.
+const deadHoldIds = ref<string[]>([])
 
 // Tahap hold.
 const holdAttempt = ref<HoldAttempt | null>(null)
@@ -386,6 +409,7 @@ const handPostDenied = ref<string | null>(null)
 const handReplayError = ref<string | null>(null)
 const handSettleError = ref<string | null>(null)
 const handRecoveryError = ref<string | null>(null)
+const handInactiveNote = ref<string | null>(null)
 const handBusy = ref(false)
 
 // Tahap return.
@@ -422,7 +446,8 @@ const currentHold = computed(() => {
   if (!selectedAssetId.value) return null
   return holdRows.value.find(h => h.draft_id.toLowerCase() === draftId.value.toLowerCase()
     && h.asset_id.toLowerCase() === selectedAssetId.value.toLowerCase()
-    && h.status === 'held') ?? null
+    && h.status === 'held'
+    && !deadHoldIds.value.includes(h.id)) ?? null
 })
 const showHoldsMore = computed(() => !!selectedAssetId.value && !currentHold.value && !holdExhausted.value
   && holdStarted.value && !custody.value && (!holdAttempt.value || holdUnknown.value))
@@ -642,6 +667,8 @@ function denyRead(message: string) {
   clearHandStage()
   clearRetStage()
   holdDeadNote.value = null
+  handInactiveNote.value = null
+  deadHoldIds.value = []
   handRecoveryError.value = null
   retRecoveryError.value = null
   returnOutcome.value = ''
@@ -720,6 +747,8 @@ function resetState() {
   clearHandStage()
   clearRetStage()
   holdDeadNote.value = null
+  handInactiveNote.value = null
+  deadHoldIds.value = []
   handRecoveryError.value = null
   retRecoveryError.value = null
   returnOutcome.value = ''
@@ -1121,12 +1150,14 @@ async function fetchHoldsPage(offset: number): Promise<HoldRow[]> {
 }
 
 function mergeHoldRows(items: HoldRow[]) {
-  const seen = new Set(holdRows.value.map(r => r.id))
+  // Rekonsiliasi: observasi GET terbaru untuk ID yang sama MENGGANTIKAN
+  // baris cache — status efektif server (expired/released) menggantikan
+  // held yang tersimpan. Tanpa ini, hold yang sudah mati tetap
+  // ditawarkan sampai halaman dimuat ulang.
   for (const row of items) {
-    if (!seen.has(row.id)) {
-      holdRows.value.push(row)
-      seen.add(row.id)
-    }
+    const i = holdRows.value.findIndex(h => h.id === row.id)
+    if (i >= 0) holdRows.value[i] = row
+    else holdRows.value.push(row)
   }
 }
 
@@ -1168,7 +1199,7 @@ async function loadHoldsPage() {
 // bisa langsung jalan tanpa membuat hold baru.
 function adoptLiveHold() {
   if (selectedAssetId.value) return
-  const live = holdRows.value.find(h => h.draft_id.toLowerCase() === draftId.value.toLowerCase() && h.status === 'held')
+  const live = holdRows.value.find(h => h.draft_id.toLowerCase() === draftId.value.toLowerCase() && h.status === 'held' && !deadHoldIds.value.includes(h.id))
   if (live) selectedAssetId.value = live.asset_id
 }
 
@@ -1240,6 +1271,21 @@ async function reloadHoldsLoaded() {
   }
 }
 
+// Baca ulang holds secara terbatas: halaman yang sudah dimuat +
+// satu halaman berikut, lalu cocokkan attempt hold. Tanpa POST, tanpa
+// rantai otomatis; satu halaman kosong bukan bukti hold hilang.
+// Dipakai muat-ulang dan pemulihan 409 — mergeHoldRows merekonsiliasi
+// status efektif server untuk ID yang sama.
+async function refreshHoldsBounded() {
+  await reloadHoldsLoaded()
+  if (readDenied.value) return
+  if (!holdExhausted.value) {
+    await loadHoldsPage()
+    if (readDenied.value) return
+  }
+  await settleHoldFromRows()
+}
+
 // Muat-ulang GET saja (fakta + custody + baca ulang holds terbatas):
 // tidak mengganti snapshot, tidak mengonfirmasi apa pun, tidak menulis.
 // Dipakai tombol "Muat ulang data" dan sesudah retirement. Penyelesaian
@@ -1263,20 +1309,14 @@ async function refreshReads(failureMessage: string) {
     if (gen !== refreshGen) return
     // Tahap hold: baca ulang daftar holds dari server (terbatas: halaman
     // yang sudah dimuat + satu halaman berikut), lalu cocokkan kunci.
-    // Tidak ditemukan di halaman yang dimuat: bukan bukti tidak ada.
+    // Jalan di setiap muat-ulang — juga tanpa upaya hold — supaya serah
+    // terima yang perlu pulih melihat status efektif terbaru. Tidak
+    // ditemukan di halaman yang dimuat: bukan bukti tidak ada.
     // Ketidakpastian dipertahankan; pengguna bisa memuat halaman holds
     // berikut atau mengirim ulang dengan kunci yang sama.
-    if (holdAttempt.value) {
-      await reloadHoldsLoaded()
-      if (readDenied.value) return
-      if (gen !== refreshGen) return
-      if (holdAttempt.value && !holdExhausted.value) {
-        await loadHoldsPage()
-        if (readDenied.value) return
-        if (gen !== refreshGen) return
-      }
-      await settleHoldFromRows()
-    }
+    await refreshHoldsBounded()
+    if (readDenied.value) return
+    if (gen !== refreshGen) return
     // Tahap handover: cocokkan kunci + identitas custody.
     if (handAttempt.value && custody.value) {
       if (isValidCustodyForHandoverAttempt(custody.value, wsId.value, handAttempt.value)) {
@@ -1421,6 +1461,7 @@ async function confirmHold(row: HoldRow, gen: number) {
   selectedAssetId.value = row.asset_id
   clearHoldStage()
   holdDeadNote.value = null
+  handInactiveNote.value = null
   await nextTick()
   if (staleHold(gen)) return
   custodyHeading.value?.focus()
@@ -1433,6 +1474,7 @@ async function confirmHand(row: CustodyRow, gen: number) {
   if (i >= 0) holdRows.value[i] = { ...holdRows.value[i], status: 'consumed' }
   clearHandStage()
   handRecoveryError.value = null
+  handInactiveNote.value = null
   await nextTick()
   if (staleHand(gen)) return
   custodyHeading.value?.focus()
@@ -1688,6 +1730,16 @@ async function resendHold() {
   await submitHold(true)
 }
 
+// Tandai hold sebagai tidak aktif definitif (409 handover): berhenti
+// ditawarkan, tampilkan alasan server, tutup attempt. Kunci baru boleh
+// dibuat sesudahnya — hold pengganti + handover berikutnya butuh
+// konfirmasi pengguna.
+function markHoldInactive(holdId: string, message: string) {
+  if (!deadHoldIds.value.includes(holdId)) deadHoldIds.value.push(holdId)
+  clearHandStage()
+  handInactiveNote.value = `Serah terima ditolak: ${message}. Hold lama tidak dapat dipakai lagi; buat hold baru bila masih perlu.`
+}
+
 async function submitHand(resend = false) {
   const s = session
   if (!s || handInFlight) return
@@ -1736,6 +1788,41 @@ async function submitHand(resend = false) {
     }
     if (err instanceof ApiError && err.status === 409 && err.message === CUSTODY_EXISTS) {
       await recoverCustody('hand')
+      return
+    }
+    if (err instanceof ApiError && err.status === 409 && err.message === HOLD_INACTIVE) {
+      // Penolakan definitif: server memeriksa replay dulu, lalu menolak
+      // hold tidak aktif sebelum mutasi — tulis ini tidak terjadi.
+      if (!resend) {
+        markHoldInactive(a.holdId, err.message)
+        handGen++
+        await refreshHoldsBounded()
+        await nextTick()
+        custodyHeading.value?.focus()
+        return
+      }
+      // Kirim-ulang sesudah unknown: 409 membuktikan replay tidak cocok,
+      // tetapi kunci hanya dilepas sesudah bacaan otoritatif mengonfirmasi
+      // tidak ada custody dengan kunci ini. Absensi dari daftar atau GET
+      // custody 404 saja tidak cukup.
+      handReplayError.value = err.message
+      if (!refreshing.value) {
+        await refreshReads('Data gagal dimuat ulang. Coba muat ulang data.')
+        if (staleHand(gen)) return
+        if (!handAttempt.value) return
+        if (custodyMissing.value) {
+          markHoldInactive(a.holdId, err.message)
+          handGen++
+          await nextTick()
+          custodyHeading.value?.focus()
+          return
+        }
+      }
+      // Bacaan gagal/cacat, atau muat-ulang sedang berjalan:
+      // ketidakpastian dipertahankan; kirim-ulang tetap tersedia.
+      handUnknown.value = true
+      await nextTick()
+      if (!staleHand(gen)) formAlert.value?.focus()
       return
     }
     if (err instanceof ApiError && (err.status === 400 || err.status === 403 || err.status === 404 || err.status === 422)) {
@@ -2083,6 +2170,7 @@ async function resendRet() {
             <p v-if="canHandover && !handAttempt">
               <button type="button" class="btn" :disabled="handBusy" @click="openHandConfirmation">Serahkan unit</button>
             </p>
+            <p v-if="handInactiveNote" class="hint">{{ handInactiveNote }}</p>
             <div v-if="handAttempt && !handUnknown && handConflict === null" class="alert" role="alert">
               <h3 ref="formAlert" tabindex="-1">Konfirmasi serah terima</h3>
               <p>

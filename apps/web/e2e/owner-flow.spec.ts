@@ -21,6 +21,7 @@ const SHOTS_UI02 = path.join(path.dirname(fileURLToPath(import.meta.url)), '..',
 const SHOTS_UI03 = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'design', 'screenshots', 'f2-ui-03')
 const SHOTS_UI04 = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'design', 'screenshots', 'f2-ui-04')
 const SHOTS_UI05 = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'design', 'screenshots', 'f2-ui-05')
+const SHOTS_UI06 = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'design', 'screenshots', 'f2-ui-06')
 
 const ownerEmail = `pemilik-${RUN}@e2e.umnia.local`
 const staffEmail = `staf-${RUN}@e2e.umnia.local`
@@ -226,9 +227,9 @@ async function seedAssets(req: APIRequestContext, ws: string, token: string, ite
   }
 }
 
-async function listAssetRows(page: Page, ws: string): Promise<Array<{ id: string, catalog_item_id: string, serial: string }>> {
+async function listAssetRows(page: Page, ws: string, email: string = ownerEmail): Promise<Array<{ id: string, catalog_item_id: string, serial: string }>> {
   const res = await page.request.get(`/api/workspaces/${ws}/assets?limit=100`, {
-    headers: { Authorization: `Bearer ${await apiToken(page.request, ownerEmail)}` }
+    headers: { Authorization: `Bearer ${await apiToken(page.request, email)}` }
   })
   expect(res.status()).toBe(200)
   const body = await res.json() as { items: Array<{ id: string, catalog_item_id: string, serial: string }> }
@@ -413,6 +414,102 @@ async function priceSetup(page: Page, tag: string): Promise<{ email: string, ws:
 
 function countAudits(ws: string, action: string): number {
   return Number(psql(`SELECT count(*) FROM audit_events WHERE workspace_id='${ws}' AND action='${action}'`).trim())
+}
+
+// F2-UI-06: baris hold/custody + panggilan API nyata untuk tes serah terima.
+interface HoldRow { id: string, workspace_id: string, draft_id: string, asset_id: string, client_request_id: string, status: string, starts_at: string, ends_at: string, expires_at: string, created_at: string, updated_at: string }
+interface CustodyRow { id: string, workspace_id: string, rental_contract_id: string, rental_agreed_price_id: string, asset_id: string, hold_id: string, client_request_id: string, return_client_request_id: string | null, status: string, handed_out_at: string, returned_at: string | null, handed_out_by: string, returned_by: string | null, resolved_at: string | null, resolved_by: string | null }
+
+async function getCustody(page: Page, ws: string, draftId: string, email: string = ownerEmail): Promise<{ status: number, body: any }> {
+  const res = await page.request.get(`/api/workspaces/${ws}/rental/contracts/${draftId}/custody`, {
+    headers: { Authorization: `Bearer ${await apiToken(page.request, email)}` }
+  })
+  return { status: res.status(), body: await res.json() }
+}
+
+async function getHolds(page: Page, ws: string, email: string = ownerEmail, query = ''): Promise<{ status: number, body: any }> {
+  const res = await page.request.get(`/api/workspaces/${ws}/rental/holds${query}`, {
+    headers: { Authorization: `Bearer ${await apiToken(page.request, email)}` }
+  })
+  return { status: res.status(), body: await res.json() }
+}
+
+async function createHold(page: Page, ws: string, draftId: string, email: string, key: string, assetId: string): Promise<{ status: number, body: any }> {
+  const res = await page.request.post(`/api/workspaces/${ws}/rental/contracts/${draftId}/holds`, {
+    headers: { Authorization: `Bearer ${await apiToken(page.request, email)}`, 'Idempotency-Key': key },
+    data: { asset_id: assetId }
+  })
+  return { status: res.status(), body: await res.json() }
+}
+
+async function handoverCustody(page: Page, ws: string, draftId: string, email: string, key: string, assetId: string, holdId: string): Promise<{ status: number, body: any }> {
+  const res = await page.request.post(`/api/workspaces/${ws}/rental/contracts/${draftId}/handover`, {
+    headers: { Authorization: `Bearer ${await apiToken(page.request, email)}`, 'Idempotency-Key': key },
+    data: { asset_id: assetId, hold_id: holdId }
+  })
+  return { status: res.status(), body: await res.json() }
+}
+
+async function returnCustody(page: Page, ws: string, draftId: string, email: string, key: string, outcome: string): Promise<{ status: number, body: any }> {
+  const res = await page.request.post(`/api/workspaces/${ws}/rental/contracts/${draftId}/return`, {
+    headers: { Authorization: `Bearer ${await apiToken(page.request, email)}`, 'Idempotency-Key': key },
+    data: { outcome }
+  })
+  return { status: res.status(), body: await res.json() }
+}
+
+// F2-UI-06: workspace + pemilik mandiri per tes custody (tanpa ws bersama)
+// supaya tiap tes custody bisa jalan sendiri lewat --grep.
+async function custodySetup(page: Page, tag: string): Promise<{ email: string, ws: string, token: string, customer: { id: string, display_name: string }, item: { id: string, sku: string, name: string, status: string }, asset: { id: string, catalog_item_id: string, serial: string } }> {
+  const { email, ws, token } = await draftSetup(page, `cu-${tag}`)
+  await seedCustomers(page.request, ws, token, 1, `CU${tag}`)
+  await seedItems(page.request, ws, token, 1, `CU${tag}`)
+  const customer = await customerByName(page, ws, `CU${tag} 1`, email)
+  const item = await catalogItemBySku(page, ws, `CU${tag}-1`, email)
+  await seedAssets(page.request, ws, token, item.id, 1, `CU${tag}`)
+  const assets = await listAssetRows(page, ws, email)
+  const asset = assets.find(a => a.catalog_item_id === item.id)
+  if (!asset) throw new Error('aset custody tidak ditemukan sesudah seed')
+  return { email, ws, token, customer, item, asset }
+}
+
+// Draf + harga disepakati siap serah terima (tarif 150000, draf 2 unit,
+// total 300000 — contoh kerja yang sama dengan tes harga).
+// F2-UI-06: jendela handover ketat server — cutoff harus di dalam
+// [starts_at, ends_at). Tanggal relatif supaya tes tidak basi (draf 2047
+// tidak akan pernah bisa diserahkan). Tarif 150000, draf 48 jam = 2 unit,
+// total 300000 — sama seperti contoh harga.
+function custodyWindow(): { priceFrom: string, priceTo: string, draftFrom: string, draftTo: string } {
+  // Pola backend (seedCustodyRefs): tarif valid_from sedikit di masa depan
+  // (tanpa backdate), draf mulai sesudah tarif berlaku, 48 jam tepat =
+  // 2 unit. `now` ditangkap TEPAT sebelum seed harga — bukan di awal
+  // setup — supaya valid_from belum lewat saat POST harga tiba.
+  const now = Date.now()
+  const hour = 3600000
+  return {
+    priceFrom: new Date(now + 5 * 1000).toISOString(),
+    priceTo: new Date(now + 73 * hour).toISOString(),
+    draftFrom: new Date(now + 15 * 1000).toISOString(),
+    draftTo: new Date(now + 15 * 1000 + 48 * hour).toISOString()
+  }
+}
+
+async function seedCustodyReady(page: Page, tag: string): Promise<{ email: string, ws: string, token: string, customer: { id: string, display_name: string }, item: { id: string, sku: string, name: string, status: string }, asset: { id: string, catalog_item_id: string, serial: string }, draft: DraftRow, fact: FactRow }> {
+  const s = await custodySetup(page, tag)
+  const w = custodyWindow()
+  await seedPriceOne(page.request, s.ws, s.token, s.item.id, w.priceFrom, w.priceTo, '150000')
+  const draft = await seedDraftOne(page.request, s.ws, s.token, s.customer.id, s.item.id, w.draftFrom, w.draftTo)
+  const quote = await getQuote(page, s.ws, draft.id, s.email)
+  expect(quote.status).toBe(200)
+  const accepted = await acceptPrice(page, s.ws, draft.id, s.email, randomUUID(), (quote.body as QuoteRow).price_version_id, '300000')
+  expect(accepted.status).toBe(201)
+  const fact = accepted.body as FactRow
+  // Tunggu jendela handover terbuka (cutoff server sudah di dalam
+  // [draftFrom, draftTo)) sebelum tes memakai draf ini — pola waitUntil
+  // backend, bukan sleep buta.
+  const waitMs = new Date(w.draftFrom).getTime() - Date.now() + 500
+  if (waitMs > 0) await new Promise(r => setTimeout(r, waitMs))
+  return { ...s, draft, fact }
 }
 
 test.describe.serial('alur pemilik', () => {
@@ -5331,5 +5428,593 @@ test.describe.serial('alur pemilik', () => {
     await expect(page.getByRole('heading', { name: 'Harga tercatat' })).toBeVisible()
     expect(postAttempts).toBe(1)
     await page.unrouteAll({ behavior: 'wait' })
+  })
+
+  test('serah terima: tautan Serah terima membuka halaman custody; hold → handover 201 → custody out → return 200 terminal', async ({ page }) => {
+    const { email, ws, token, customer, item, asset, draft } = await seedCustodyReady(page, 'happy')
+    await uiLogin(page, email)
+    await gotoAuthed(page, `/workspaces/${ws}/rentals`, email)
+    await page.getByRole('link', { name: 'Serah terima' }).click()
+    await expect(page).toHaveURL(new RegExp(`/workspaces/${ws}/rental-custody/${draft.id}`))
+    await expect(page.locator('h1')).toBeVisible()
+    await expect(page.getByText('Belum ada serah terima untuk draf ini.')).toBeVisible()
+    await expect(page.getByText('Harga yang dicatat: 300000 unit tarif · IDR (2 × 24 jam @ 150000 unit tarif · IDR)')).toBeVisible()
+    await page.getByLabel('Unit').selectOption(asset.id)
+    await page.getByRole('button', { name: 'Buat hold' }).click()
+    await expect(page.getByRole('heading', { name: 'Konfirmasi pembuatan hold' })).toBeVisible()
+    await page.getByRole('button', { name: 'Buat hold' }).click()
+    await expect(page.getByText('Hold aktif untuk unit ini.')).toBeVisible()
+    await page.getByRole('button', { name: 'Serahkan unit' }).click()
+    await expect(page.getByRole('heading', { name: 'Konfirmasi serah terima' })).toBeVisible()
+    await page.getByRole('button', { name: 'Serahkan unit' }).click()
+    await expect(page.getByText('Unit sedang dipinjam')).toBeVisible()
+    await page.getByLabel('Utuh').check()
+    await page.getByRole('button', { name: 'Kembalikan unit' }).click()
+    await expect(page.getByRole('heading', { name: 'Konfirmasi pengembalian' })).toBeVisible()
+    await page.getByRole('button', { name: 'Kembalikan unit' }).click()
+    await expect(page.getByText('Sudah dikembalikan')).toBeVisible()
+    const got = await getCustody(page, ws, draft.id, email)
+    expect(got.status).toBe(200)
+    const c = got.body as CustodyRow
+    expect(c.status).toBe('returned')
+    expect(c.returned_at).not.toBeNull()
+    expect(c.resolved_at).not.toBeNull()
+    expect(c.returned_by).toBeTruthy()
+    expect(countAudits(ws, 'rental_handed_over')).toBe(1)
+    expect(countAudits(ws, 'rental_returned')).toBe(1)
+    const holds = await getHolds(page, ws, email)
+    expect(holds.status).toBe(200)
+    const held = (holds.body.items as HoldRow[]).find(h => h.asset_id === asset.id)
+    expect(held?.status).toBe('consumed')
+  })
+
+  test('serah terima: return Rusak mengubah kondisi aset; return Hilang memakai resolved', async ({ page }) => {
+    // Rusak: unit kembali dengan kondisi rusak; resolved terisi.
+    const a = await seedCustodyReady(page, 'rusak')
+    const holdA = await createHold(page, a.ws, a.draft.id, a.email, randomUUID(), a.asset.id)
+    expect(holdA.status).toBe(201)
+    const handA = await handoverCustody(page, a.ws, a.draft.id, a.email, randomUUID(), a.asset.id, (holdA.body as HoldRow).id)
+    expect(handA.status).toBe(201)
+    await uiLogin(page, a.email)
+    await gotoAuthed(page, `/workspaces/${a.ws}/rental-custody/${a.draft.id}`, a.email)
+    await expect(page.getByText('Unit sedang dipinjam')).toBeVisible()
+    await page.getByLabel('Rusak').check()
+    await page.getByRole('button', { name: 'Kembalikan unit' }).click()
+    await page.getByRole('button', { name: 'Kembalikan unit' }).click()
+    await expect(page.getByText('Dikembalikan rusak')).toBeVisible()
+    expect(psql(`SELECT condition FROM physical_assets WHERE id='${a.asset.id}'`).trim()).toBe('damaged')
+    expect(countAudits(a.ws, 'rental_returned_damaged')).toBe(1)
+    // Hilang: returned_* tetap null; resolved_* terisi.
+    const b = await seedCustodyReady(page, 'hilang')
+    const holdB = await createHold(page, b.ws, b.draft.id, b.email, randomUUID(), b.asset.id)
+    expect(holdB.status).toBe(201)
+    const handB = await handoverCustody(page, b.ws, b.draft.id, b.email, randomUUID(), b.asset.id, (holdB.body as HoldRow).id)
+    expect(handB.status).toBe(201)
+    await uiLogin(page, b.email)
+    await gotoAuthed(page, `/workspaces/${b.ws}/rental-custody/${b.draft.id}`, b.email)
+    await page.getByLabel('Hilang').check()
+    await page.getByRole('button', { name: 'Kembalikan unit' }).click()
+    await page.getByRole('button', { name: 'Kembalikan unit' }).click()
+    await expect(page.getByText('Dinyatakan hilang')).toBeVisible()
+    const gotB = await getCustody(page, b.ws, b.draft.id, b.email)
+    expect(gotB.status).toBe(200)
+    const cb = gotB.body as CustodyRow
+    expect(cb.status).toBe('lost')
+    expect(cb.returned_at).toBeNull()
+    expect(cb.returned_by).toBeNull()
+    expect(cb.resolved_at).not.toBeNull()
+    expect(cb.resolved_by).toBeTruthy()
+    expect(psql(`SELECT condition FROM physical_assets WHERE id='${b.asset.id}'`).trim()).toBe('lost')
+    expect(countAudits(b.ws, 'rental_loss_declared')).toBe(1)
+  })
+
+  test('serah terima: replay identik hold/handover/return; kunci dipakai ulang 409; tanpa audit ganda', async ({ page }) => {
+    const { email, ws, token, customer, item, asset, draft } = await seedCustodyReady(page, 'replay')
+    const holdKey = randomUUID()
+    const hold1 = await createHold(page, ws, draft.id, email, holdKey, asset.id)
+    expect(hold1.status).toBe(201)
+    const holdId = (hold1.body as HoldRow).id
+    const holdReplay = await createHold(page, ws, draft.id, email, holdKey, asset.id)
+    expect(holdReplay.status).toBe(200)
+    expect((holdReplay.body as HoldRow).id).toBe(holdId)
+    const holdMisuse = await createHold(page, ws, draft.id, email, holdKey, randomUUID())
+    expect(holdMisuse.status).toBe(409)
+    expect(holdMisuse.body.error).toBe('kunci idempotency sudah dipakai untuk permintaan yang berbeda')
+    const handKey = randomUUID()
+    const hand1 = await handoverCustody(page, ws, draft.id, email, handKey, asset.id, holdId)
+    expect(hand1.status).toBe(201)
+    const custodyId = (hand1.body as CustodyRow).id
+    const handReplay = await handoverCustody(page, ws, draft.id, email, handKey, asset.id, holdId)
+    expect(handReplay.status).toBe(200)
+    expect((handReplay.body as CustodyRow).id).toBe(custodyId)
+    const handMisuse = await handoverCustody(page, ws, draft.id, email, handKey, asset.id, randomUUID())
+    expect(handMisuse.status).toBe(409)
+    expect(handMisuse.body.error).toBe('kunci idempotency sudah dipakai untuk permintaan yang berbeda')
+    const retKey = randomUUID()
+    const ret1 = await returnCustody(page, ws, draft.id, email, retKey, 'returned')
+    expect(ret1.status).toBe(200)
+    expect((ret1.body as CustodyRow).id).toBe(custodyId)
+    const retReplay = await returnCustody(page, ws, draft.id, email, retKey, 'returned')
+    expect(retReplay.status).toBe(200)
+    expect((retReplay.body as CustodyRow).id).toBe(custodyId)
+    const retMisuse = await returnCustody(page, ws, draft.id, email, retKey, 'damaged')
+    expect(retMisuse.status).toBe(409)
+    expect(retMisuse.body.error).toBe('kunci idempotency sudah dipakai untuk permintaan yang berbeda')
+    expect(countAudits(ws, 'rental_handed_over')).toBe(1)
+    expect(countAudits(ws, 'rental_returned')).toBe(1)
+    await uiLogin(page, email)
+    await gotoAuthed(page, `/workspaces/${ws}/rental-custody/${draft.id}`, email)
+    await expect(page.getByText('Sudah dikembalikan')).toBeVisible()
+  })
+
+  test('serah terima: kasir baca custody; tulis 403; tanpa fakta handover 409; hold kedaluwarsa/salah 409', async ({ page }) => {
+    const { email, ws, token, customer, item, asset, draft } = await seedCustodyReady(page, 'izin')
+    const cashierEmail = `kasir-cu-${RUN}@e2e.umnia.local`
+    const code = await uiInvite(page, ws, cashierEmail, 'cashier', email)
+    await uiRegister(page, cashierEmail)
+    await uiLogin(page, cashierEmail)
+    await gotoAuthed(page, `/invites/accept?workspace_id=${ws}`, cashierEmail)
+    await page.getByLabel('Kode undangan').fill(code)
+    await page.locator('form button[type="submit"]').click()
+    await expect(page).toHaveURL(new RegExp(`/workspaces/${ws}/members`))
+    await gotoAuthed(page, `/workspaces/${ws}/rental-custody/${draft.id}`, cashierEmail)
+    await expect(page.locator('h1')).toBeVisible()
+    await page.getByLabel('Unit').selectOption(asset.id)
+    await page.getByRole('button', { name: 'Buat hold' }).click()
+    await page.getByRole('button', { name: 'Buat hold' }).click()
+    await expect(page.getByText('tidak punya izin mengelola data usaha')).toBeVisible()
+    await expect(page).toHaveURL(new RegExp(`/workspaces/${ws}/rental-custody/${draft.id}`))
+    // Tanpa fakta: handover diblokir di halaman; server menolak 409.
+    const nf = await custodySetup(page, 'tanpafakta')
+    const draftNf = await seedDraftOne(page.request, nf.ws, nf.token, nf.customer.id, nf.item.id, '2047-01-01T00:00:00Z', '2047-01-03T00:00:00Z')
+    await uiLogin(page, nf.email)
+    await gotoAuthed(page, `/workspaces/${nf.ws}/rental-custody/${draftNf.id}`, nf.email)
+    await expect(page.getByText('Belum ada harga yang dicatat untuk draf ini.')).toBeVisible()
+    expect(await page.getByRole('button', { name: 'Buat hold' }).count()).toBe(0)
+    const holdNf = await createHold(page, nf.ws, draftNf.id, nf.email, randomUUID(), nf.asset.id)
+    expect(holdNf.status).toBe(201)
+    const handNf = await handoverCustody(page, nf.ws, draftNf.id, nf.email, randomUUID(), nf.asset.id, (holdNf.body as HoldRow).id)
+    expect(handNf.status).toBe(409)
+    expect(handNf.body.error).toBe('harga yang disepakati belum dicatat')
+    // Hold kedaluwarsa: status efektif expired; handover 409.
+    const holdExp = await createHold(page, ws, draft.id, email, randomUUID(), asset.id)
+    expect(holdExp.status).toBe(201)
+    psql(`UPDATE rental_holds SET expires_at = now() - interval '1 hour' WHERE id='${(holdExp.body as HoldRow).id}'`)
+    const handExp = await handoverCustody(page, ws, draft.id, email, randomUUID(), asset.id, (holdExp.body as HoldRow).id)
+    expect(handExp.status).toBe(409)
+    expect(handExp.body.error).toBe('hold tidak aktif')
+    // Hold salah: hold milik aset lain dipakai untuk aset ini.
+    await seedAssets(page.request, ws, token, item.id, 1, 'CUsalah')
+    const assets = await listAssetRows(page, ws, email)
+    const otherAsset = assets.find(a => a.id !== asset.id)
+    if (!otherAsset) throw new Error('aset kedua tidak ditemukan')
+    const holdWrong = await createHold(page, ws, draft.id, email, randomUUID(), otherAsset.id)
+    expect(holdWrong.status).toBe(201)
+    const handWrong = await handoverCustody(page, ws, draft.id, email, randomUUID(), asset.id, (holdWrong.body as HoldRow).id)
+    expect(handWrong.status).toBe(409)
+    expect(handWrong.body.error).toBe('hold tidak cocok dengan draft atau aset')
+  })
+
+  test('serah terima: return sesudah deactivate tetap 200; handover sesudah deactivate 403', async ({ page }) => {
+    const { email, ws, token, customer, item, asset, draft } = await seedCustodyReady(page, 'nonaktif')
+    // Draf kedua + fakta disiapkan SEBELUM deactivate (accept butuh rental aktif).
+    await seedPriceOne(page.request, ws, token, item.id, '2047-01-01T00:00:00Z', '2047-02-01T00:00:00Z', '150000')
+    const draft2 = await seedDraftOne(page.request, ws, token, customer.id, item.id, '2047-01-01T00:00:00Z', '2047-01-03T00:00:00Z')
+    const quote2 = await getQuote(page, ws, draft2.id, email)
+    expect(quote2.status).toBe(200)
+    const accepted2 = await acceptPrice(page, ws, draft2.id, email, randomUUID(), (quote2.body as QuoteRow).price_version_id, '300000')
+    expect(accepted2.status).toBe(201)
+    const hold1 = await createHold(page, ws, draft.id, email, randomUUID(), asset.id)
+    expect(hold1.status).toBe(201)
+    const hand1 = await handoverCustody(page, ws, draft.id, email, randomUUID(), asset.id, (hold1.body as HoldRow).id)
+    expect(hand1.status).toBe(201)
+    psql(`UPDATE module_installations SET status='inactive', deactivated_at=now() WHERE workspace_id='${ws}' AND module_id='rental.basic'`)
+    await uiLogin(page, email)
+    await gotoAuthed(page, `/workspaces/${ws}/rental-custody/${draft.id}`, email)
+    await expect(page.getByText('Unit sedang dipinjam')).toBeVisible()
+    await page.getByLabel('Utuh').check()
+    await page.getByRole('button', { name: 'Kembalikan unit' }).click()
+    await page.getByRole('button', { name: 'Kembalikan unit' }).click()
+    await expect(page.getByText('Sudah dikembalikan')).toBeVisible()
+    const got = await getCustody(page, ws, draft.id, email)
+    expect(got.status).toBe(200)
+    expect((got.body as CustodyRow).status).toBe('returned')
+    // Handover draf kedua sesudah deactivate: guard menyempit TIDAK berlaku
+    // untuk handover — server menolak 403, dan UI menampilkan penolakan itu.
+    await gotoAuthed(page, `/workspaces/${ws}/rental-custody/${draft2.id}`, email)
+    await page.getByLabel('Unit').selectOption(asset.id)
+    await page.getByRole('button', { name: 'Buat hold' }).click()
+    await page.getByRole('button', { name: 'Buat hold' }).click()
+    await expect(page.getByText('rental belum aktif di workspace ini')).toBeVisible()
+  })
+
+  test('serah terima: respons hilang ketiga stage lalu kirim-ulang kunci sama 200/201', async ({ page }) => {
+    const { email, ws, token, customer, item, asset, draft } = await seedCustodyReady(page, 'hilang-resp')
+    await uiLogin(page, email)
+    await gotoAuthed(page, `/workspaces/${ws}/rental-custody/${draft.id}`, email)
+    await page.getByLabel('Unit').selectOption(asset.id)
+    // Hold hilang.
+    await page.route((url) => url.pathname.startsWith('/api/'), async (route) => {
+      const u = new URL(route.request().url())
+      if (route.request().method() === 'POST' && u.pathname.endsWith('/holds')) await route.abort()
+      else await route.continue()
+    })
+    await page.getByRole('button', { name: 'Buat hold' }).click()
+    await page.getByRole('button', { name: 'Buat hold' }).click()
+    await expect(page.getByRole('heading', { name: 'Hasil pembuatan hold tidak diketahui' })).toBeVisible()
+    await page.unrouteAll({ behavior: 'wait' })
+    await page.getByRole('button', { name: 'Kirim lagi (permintaan sama)' }).click()
+    await expect(page.getByText('Hold aktif untuk unit ini.')).toBeVisible()
+    // Handover hilang.
+    await page.route((url) => url.pathname.startsWith('/api/'), async (route) => {
+      const u = new URL(route.request().url())
+      if (route.request().method() === 'POST' && u.pathname.endsWith('/handover')) await route.abort()
+      else await route.continue()
+    })
+    await page.getByRole('button', { name: 'Serahkan unit' }).click()
+    await page.getByRole('button', { name: 'Serahkan unit' }).click()
+    await expect(page.getByRole('heading', { name: 'Hasil serah terima tidak diketahui' })).toBeVisible()
+    await page.unrouteAll({ behavior: 'wait' })
+    await page.getByRole('button', { name: 'Kirim lagi (permintaan sama)' }).click()
+    await expect(page.getByText('Unit sedang dipinjam')).toBeVisible()
+    // Return hilang.
+    await page.route((url) => url.pathname.startsWith('/api/'), async (route) => {
+      const u = new URL(route.request().url())
+      if (route.request().method() === 'POST' && u.pathname.endsWith('/return')) await route.abort()
+      else await route.continue()
+    })
+    await page.getByLabel('Utuh').check()
+    await page.getByRole('button', { name: 'Kembalikan unit' }).click()
+    await page.getByRole('button', { name: 'Kembalikan unit' }).click()
+    await expect(page.getByRole('heading', { name: 'Hasil pengembalian tidak diketahui' })).toBeVisible()
+    await page.unrouteAll({ behavior: 'wait' })
+    await page.getByRole('button', { name: 'Kirim lagi (permintaan sama)' }).click()
+    await expect(page.getByText('Sudah dikembalikan')).toBeVisible()
+    expect(countAudits(ws, 'rental_handed_over')).toBe(1)
+    expect(countAudits(ws, 'rental_returned')).toBe(1)
+  })
+
+  test('serah terima: sukses malformed tetap tidak diketahui; fakta kunci-sama tak cocok tidak dipromosikan', async ({ page }) => {
+    const { email, ws, token, customer, item, asset, draft, fact } = await seedCustodyReady(page, 'cacat')
+    const hold = await createHold(page, ws, draft.id, email, randomUUID(), asset.id)
+    expect(hold.status).toBe(201)
+    const holdId = (hold.body as HoldRow).id
+    await uiLogin(page, email)
+    await gotoAuthed(page, `/workspaces/${ws}/rental-custody/${draft.id}`, email)
+    // Sukses 201 malformed (DTO kosong) bukan bukti tercatat.
+    await page.route((url) => url.pathname.startsWith('/api/'), async (route) => {
+      const u = new URL(route.request().url())
+      if (route.request().method() === 'POST' && u.pathname.endsWith('/handover')) {
+        await route.fulfill({ status: 201, contentType: 'application/json', body: '{}' })
+      } else await route.continue()
+    })
+    await page.getByRole('button', { name: 'Serahkan unit' }).click()
+    await page.getByRole('button', { name: 'Serahkan unit' }).click()
+    await expect(page.getByRole('heading', { name: 'Hasil serah terima tidak diketahui' })).toBeVisible()
+    await expect(page.getByText('Unit sedang dipinjam')).toHaveCount(0)
+    await page.unrouteAll({ behavior: 'wait' })
+    await page.getByRole('button', { name: 'Kirim lagi (permintaan sama)' }).click()
+    await expect(page.getByText('Unit sedang dipinjam')).toBeVisible()
+    // Fakta kunci-sama tak cocok: GET custody dipalsukan dengan kunci
+    // attempt yang sama tetapi aset berbeda — tidak boleh dipromosikan.
+    const b = await seedCustodyReady(page, 'cacat2')
+    const holdB = await createHold(page, b.ws, b.draft.id, b.email, randomUUID(), b.asset.id)
+    expect(holdB.status).toBe(201)
+    const holdBId = (holdB.body as HoldRow).id
+    await uiLogin(page, b.email)
+    await gotoAuthed(page, `/workspaces/${b.ws}/rental-custody/${b.draft.id}`, b.email)
+    let capturedKey = ''
+    await page.route((url) => url.pathname.startsWith('/api/'), async (route) => {
+      const u = new URL(route.request().url())
+      if (route.request().method() === 'POST' && u.pathname.endsWith('/handover')) {
+        capturedKey = route.request().headers()['idempotency-key'] ?? ''
+        await route.abort()
+      } else await route.continue()
+    })
+    await page.getByRole('button', { name: 'Serahkan unit' }).click()
+    await page.getByRole('button', { name: 'Serahkan unit' }).click()
+    await expect(page.getByRole('heading', { name: 'Hasil serah terima tidak diketahui' })).toBeVisible()
+    expect(capturedKey).not.toBe('')
+    await page.unrouteAll({ behavior: 'wait' })
+    await page.route((url) => url.pathname.startsWith('/api/'), async (route) => {
+      const u = new URL(route.request().url())
+      if (route.request().method() === 'GET' && u.pathname.endsWith('/custody')) {
+        await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({
+          id: randomUUID(), workspace_id: b.ws, rental_contract_id: b.draft.id,
+          rental_agreed_price_id: b.fact.id, asset_id: randomUUID(), hold_id: holdBId,
+          client_request_id: capturedKey, return_client_request_id: null, status: 'out',
+          handed_out_at: '2047-01-02T00:00:00Z', returned_at: null, handed_out_by: randomUUID(),
+          returned_by: null, resolved_at: null, resolved_by: null
+        }) })
+      } else await route.continue()
+    })
+    await page.getByRole('button', { name: 'Muat ulang data' }).click()
+    await expect(page.getByText('kunci yang sama tetapi tidak cocok')).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'Hasil serah terima tidak diketahui' })).toBeVisible()
+    await expect(page.getByText('Unit sedang dipinjam')).toHaveCount(0)
+    await page.unrouteAll({ behavior: 'wait' })
+    await page.getByRole('button', { name: 'Kirim lagi (permintaan sama)' }).click()
+    await expect(page.getByText('Unit sedang dipinjam')).toBeVisible()
+  })
+
+  test('serah terima: GET menyelesaikan handover memagari POST lama; tanpa panel pemulihan', async ({ page }) => {
+    const { email, ws, token, customer, item, asset, draft, fact } = await seedCustodyReady(page, 'pagar')
+    const hold = await createHold(page, ws, draft.id, email, randomUUID(), asset.id)
+    expect(hold.status).toBe(201)
+    const holdId = (hold.body as HoldRow).id
+    await uiLogin(page, email)
+    await gotoAuthed(page, `/workspaces/${ws}/rental-custody/${draft.id}`, email)
+    let capturedKey = ''
+    let releasePost!: () => void
+    const postHeld = new Promise<void>((resolve) => { releasePost = resolve })
+    await page.route((url) => url.pathname.startsWith('/api/'), async (route) => {
+      const u = new URL(route.request().url())
+      if (route.request().method() === 'POST' && u.pathname.endsWith('/handover')) {
+        capturedKey = route.request().headers()['idempotency-key'] ?? ''
+        await postHeld
+        await route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: 'transaksi gagal' }) })
+      } else await route.continue()
+    })
+    await page.getByRole('button', { name: 'Serahkan unit' }).click()
+    await page.getByRole('button', { name: 'Serahkan unit' }).click()
+    await expect.poll(() => capturedKey, { timeout: 10000 }).not.toBe('')
+    // GET custody dipalsukan dengan fakta yang cocok: settlement otoritatif.
+    await page.route((url) => url.pathname.startsWith('/api/'), async (route) => {
+      const u = new URL(route.request().url())
+      if (route.request().method() === 'GET' && u.pathname.endsWith('/custody')) {
+        await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({
+          id: randomUUID(), workspace_id: ws, rental_contract_id: draft.id,
+          rental_agreed_price_id: fact.id, asset_id: asset.id, hold_id: holdId,
+          client_request_id: capturedKey, return_client_request_id: null, status: 'out',
+          handed_out_at: '2047-01-02T00:00:00Z', returned_at: null, handed_out_by: randomUUID(),
+          returned_by: null, resolved_at: null, resolved_by: null
+        }) })
+      } else await route.continue()
+    })
+    await page.getByRole('button', { name: 'Muat ulang data' }).click()
+    await expect(page.getByText('Unit sedang dipinjam')).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'Hasil serah terima tidak diketahui' })).toHaveCount(0)
+    // POST lama akhirnya 500 — sudah dipagari, panel pemulihan tidak muncul.
+    releasePost()
+    await page.waitForTimeout(800)
+    await expect(page.getByRole('heading', { name: 'Hasil serah terima tidak diketahui' })).toHaveCount(0)
+    await expect(page.getByText('Unit sedang dipinjam')).toBeVisible()
+    await page.unrouteAll({ behavior: 'wait' })
+  })
+
+  test('serah terima: tulis pertama diblokir selama bacaan ditahan; return tetap bisa saat bacaan konteks gagal', async ({ page }) => {
+    const { email, ws, token, customer, item, asset, draft } = await seedCustodyReady(page, 'siap-baca')
+    const hold = await createHold(page, ws, draft.id, email, randomUUID(), asset.id)
+    expect(hold.status).toBe(201)
+    const hand = await handoverCustody(page, ws, draft.id, email, randomUUID(), asset.id, (hold.body as HoldRow).id)
+    expect(hand.status).toBe(201)
+    await uiLogin(page, email)
+    await gotoAuthed(page, `/workspaces/${ws}/rental-custody/${draft.id}`, email)
+    await expect(page.getByText('Unit sedang dipinjam')).toBeVisible()
+    await page.getByLabel('Utuh').check()
+    // Refresh ditahan di GET fakta; tombol tulis panel nonaktif dan
+    // handler menolak kiriman pertama selama bacaan belum selesai.
+    let factHeldCount = 0
+    let postAttempts = 0
+    let releaseFact!: () => void
+    const factHeld = new Promise<void>((resolve) => { releaseFact = resolve })
+    await page.route((url) => url.pathname.startsWith('/api/'), async (route) => {
+      const u = new URL(route.request().url())
+      if (route.request().method() === 'GET' && u.pathname.endsWith('/agreed-price')) {
+        factHeldCount++
+        await factHeld
+      }
+      if (route.request().method() === 'POST' && u.pathname.endsWith('/return')) postAttempts++
+      await route.continue()
+    })
+    await page.getByRole('button', { name: 'Muat ulang data' }).click()
+    await expect.poll(() => factHeldCount, { timeout: 10000 }).toBe(1)
+    await expect(page.getByRole('button', { name: 'Kembalikan unit' })).toBeDisabled()
+    await page.evaluate(() => {
+      const btn = Array.from(document.querySelectorAll('button')).find(b => b.textContent?.trim() === 'Kembalikan unit')
+      btn?.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
+    })
+    await page.waitForTimeout(500)
+    expect(postAttempts).toBe(0)
+    releaseFact()
+    await expect(page.getByRole('button', { name: 'Kembalikan unit' })).toBeEnabled()
+    await page.getByRole('button', { name: 'Kembalikan unit' }).click()
+    await expect(page.getByRole('heading', { name: 'Konfirmasi pengembalian' })).toBeVisible()
+    await page.getByRole('button', { name: 'Kembalikan unit' }).click()
+    await expect(page.getByText('Sudah dikembalikan')).toBeVisible()
+    expect(postAttempts).toBe(1)
+    await page.unrouteAll({ behavior: 'wait' })
+    // Bacaan konteks (fakta/aset/hold) gagal total — return tetap bisa.
+    const b = await seedCustodyReady(page, 'konteks-gagal')
+    const holdB = await createHold(page, b.ws, b.draft.id, b.email, randomUUID(), b.asset.id)
+    expect(holdB.status).toBe(201)
+    const handB = await handoverCustody(page, b.ws, b.draft.id, b.email, randomUUID(), b.asset.id, (holdB.body as HoldRow).id)
+    expect(handB.status).toBe(201)
+    await page.route((url) => url.pathname.startsWith('/api/'), async (route) => {
+      const u = new URL(route.request().url())
+      if (route.request().method() === 'GET' && (u.pathname.endsWith('/agreed-price') || u.pathname.endsWith('/assets') || u.pathname.endsWith('/rental/holds'))) {
+        await route.abort()
+      } else await route.continue()
+    })
+    await uiLogin(page, b.email)
+    await gotoAuthed(page, `/workspaces/${b.ws}/rental-custody/${b.draft.id}`, b.email)
+    await expect(page.getByText('Unit sedang dipinjam')).toBeVisible()
+    await page.getByLabel('Rusak').check()
+    await page.getByRole('button', { name: 'Kembalikan unit' }).click()
+    await page.getByRole('button', { name: 'Kembalikan unit' }).click()
+    await expect(page.getByText('Dikembalikan rusak')).toBeVisible()
+    await page.unrouteAll({ behavior: 'wait' })
+  })
+
+  test('serah terima: hold di luar 50 pertama butuh paging eksplisit; tanpa rantai otomatis', async ({ page }) => {
+    const { email, ws, token, customer, item } = await custodySetup(page, 'paging')
+    await seedAssets(page.request, ws, token, item.id, 50, 'CUpage')
+    const allAssets = await listAssetRows(page, ws, email)
+    expect(allAssets.length).toBe(51)
+    await seedDrafts(page.request, ws, token, customer.id, item.id, 51)
+    const drafts = await listDraftRows(page, ws, email)
+    expect(drafts.length).toBe(51)
+    // Satu hold per draf; hold target adalah yang terakhir dibuat.
+    for (let i = 0; i < 51; i++) {
+      const h = await createHold(page, ws, drafts[i].id, email, randomUUID(), allAssets[i].id)
+      expect(h.status, `hold ${i + 1}`).toBe(201)
+    }
+    const targetDraft = drafts[50]
+    const targetAsset = allAssets[50]
+    // Tarif lebar (2040–2050) menutupi periode draf ke-51 apa pun; total
+    // diambil dari quote agar accept memakai angka server yang sama.
+    await seedPriceOne(page.request, ws, token, item.id, '2040-01-01T00:00:00Z', '2050-01-01T00:00:00Z', '150000')
+    const quote = await getQuote(page, ws, targetDraft.id, email)
+    expect(quote.status).toBe(200)
+    const accepted = await acceptPrice(page, ws, targetDraft.id, email, randomUUID(), (quote.body as QuoteRow).price_version_id, (quote.body as QuoteRow).total_minor)
+    expect(accepted.status).toBe(201)
+    await uiLogin(page, email)
+    await gotoAuthed(page, `/workspaces/${ws}/rental-custody/${targetDraft.id}`, email)
+    await page.getByLabel('Unit').selectOption(targetAsset.id)
+    // Halaman pertama (50 baris) tidak memuat hold target; halaman
+    // TIDAK otomatis merangkak — tombol eksplisit yang memuat lanjut.
+    await expect(page.getByRole('button', { name: 'Muat lebih banyak hold' })).toBeVisible()
+    await expect(page.getByText('Hold aktif untuk unit ini.')).toHaveCount(0)
+    await page.getByRole('button', { name: 'Muat lebih banyak hold' }).click()
+    await expect(page.getByText('Hold aktif untuk unit ini.')).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Serahkan unit' })).toBeEnabled()
+  })
+
+  test('serah terima: navigasi + fokus keyboard 44px di 360/768/1440', async ({ page }) => {
+    const { email, ws, token, customer, item, asset, draft } = await seedCustodyReady(page, 'kbd')
+    await uiLogin(page, email)
+    await page.setViewportSize({ width: 360, height: 640 })
+    await gotoAuthed(page, `/workspaces/${ws}/rental-custody/${draft.id}`, email)
+    await expect(page.locator('h1')).toBeVisible()
+    // Tunggu navigasi workspace selesai dimuat: h1 tampil selama `Memuat…`,
+    // dan Tab dari Keluar hanya mendarat di Anggota bila tautan sudah ada.
+    await expect(page.getByRole('link', { name: 'Anggota', exact: true })).toBeVisible()
+    await page.getByRole('button', { name: 'Keluar' }).focus()
+    await page.keyboard.press('Tab')
+    const focused = await page.evaluate(() => document.activeElement?.textContent)
+    expect(focused).toBe('Anggota')
+    const outline = await page.evaluate(() => {
+      const el = document.activeElement as HTMLElement | null
+      return el ? getComputedStyle(el).outlineWidth : ''
+    })
+    expect(outline).toBe('2px')
+    for (const size of [{ width: 360, height: 640 }, { width: 768, height: 1024 }, { width: 1440, height: 900 }]) {
+      await page.setViewportSize(size)
+      await page.waitForTimeout(300)
+      const boxes = await page.locator('section[aria-labelledby="custody-heading"] button:visible').evaluateAll((els) =>
+        els.map((el) => { const r = (el as HTMLElement).getBoundingClientRect(); return { w: r.width, h: r.height } }))
+      expect(boxes.length).toBeGreaterThan(0)
+      for (const b of boxes) {
+        expect(b.w).toBeGreaterThanOrEqual(44)
+        expect(b.h).toBeGreaterThanOrEqual(44)
+      }
+    }
+  })
+
+  test('serah terima: tautan lanjut login menolak URL luar (tanpa open redirect)', async ({ page }) => {
+    const { email, ws, token, customer, item, asset, draft } = await seedCustodyReady(page, 'lanjut')
+    const target = `/workspaces/${ws}/rental-custody/${draft.id}`
+    await page.goto(`/login?next=${encodeURIComponent(target)}`)
+    await page.getByLabel('Email').fill(email)
+    await page.getByLabel('Kata sandi').fill(PASSWORD)
+    await page.locator('form button[type="submit"]').click()
+    await expect(page).toHaveURL(new RegExp(target.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+    await expect(page.locator('h1')).toBeVisible()
+    await uiLogout(page)
+    await page.goto('/login?next=https://evil.example/x')
+    await page.getByLabel('Email').fill(email)
+    await page.getByLabel('Kata sandi').fill(PASSWORD)
+    await page.locator('form button[type="submit"]').click()
+    await expect(page).toHaveURL(/\/workspaces\/new/)
+    await uiLogout(page)
+    await page.goto(`/login?next=/workspaces/${ws}/rental-custody/bukan-uuid`)
+    await page.getByLabel('Email').fill(email)
+    await page.getByLabel('Kata sandi').fill(PASSWORD)
+    await page.locator('form button[type="submit"]').click()
+    await expect(page).toHaveURL(/\/workspaces\/new/)
+  })
+
+  test('screenshot f2-ui-06: tiga utama + tanpa-fakta + tanpa-izin + tak-diketahui + muat + galat + manifest', async ({ page }) => {
+    const mkdirSync = (await import('node:fs')).mkdirSync
+    const writeFileSync = (await import('node:fs')).writeFileSync
+    const readFileSync = (await import('node:fs')).readFileSync
+    const createHash = (await import('node:crypto')).createHash
+    mkdirSync(SHOTS_UI06, { recursive: true })
+    const manifest: Array<{ file: string, viewport: string, state: string, provenance: string }> = []
+    const sha = (name: string) => createHash('sha256').update(readFileSync(path.join(SHOTS_UI06, name))).digest('hex')
+    const shot = async (name: string, state: string, provenance: string, width: number) => {
+      const file = `${name}-${width}.png`
+      await page.screenshot({ path: path.join(SHOTS_UI06, file), fullPage: true })
+      manifest.push({ file, viewport: `${width}`, state, provenance })
+    }
+    // 01: custody out live, tiga lebar.
+    const a = await seedCustodyReady(page, 'shot')
+    const holdA = await createHold(page, a.ws, a.draft.id, a.email, randomUUID(), a.asset.id)
+    expect(holdA.status).toBe(201)
+    const handA = await handoverCustody(page, a.ws, a.draft.id, a.email, randomUUID(), a.asset.id, (holdA.body as HoldRow).id)
+    expect(handA.status).toBe(201)
+    await uiLogin(page, a.email)
+    for (const width of [360, 768, 1440]) {
+      await page.setViewportSize({ width, height: width === 360 ? 640 : width === 768 ? 1024 : 900 })
+      await gotoAuthed(page, `/workspaces/${a.ws}/rental-custody/${a.draft.id}`, a.email)
+      await expect(page.getByText('Unit sedang dipinjam')).toBeVisible()
+      await expect(page.getByRole('button', { name: 'Kembalikan unit' })).toBeVisible()
+      await shot('01-custody', 'out-live', 'live', width)
+    }
+    // 04: tanpa fakta (handover diblokir).
+    const b = await custodySetup(page, 'shot-nofact')
+    const draftB = await seedDraftOne(page.request, b.ws, b.token, b.customer.id, b.item.id, '2047-01-01T00:00:00Z', '2047-01-03T00:00:00Z')
+    await page.setViewportSize({ width: 360, height: 640 })
+    await uiLogin(page, b.email)
+    await gotoAuthed(page, `/workspaces/${b.ws}/rental-custody/${draftB.id}`, b.email)
+    await expect(page.getByText('Belum ada harga yang dicatat untuk draf ini.')).toBeVisible()
+    await shot('04-custody-nofact', 'nofact-live', 'live', 360)
+    // 05: tanpa izin (bukan anggota).
+    const otherEmail = `lain-cu-${RUN}@e2e.umnia.local`
+    await uiRegister(page, otherEmail)
+    await gotoAuthed(page, `/workspaces/${a.ws}/rental-custody/${a.draft.id}`, otherEmail)
+    await expect(page.getByText('bukan anggota workspace ini')).toBeVisible()
+    await shot('05-custody-noperm', 'no-permission-live', 'live', 360)
+    // 06: tak-diketahui (injeksi: POST handover dibatalkan).
+    const c = await seedCustodyReady(page, 'shot-unknown')
+    const holdC = await createHold(page, c.ws, c.draft.id, c.email, randomUUID(), c.asset.id)
+    expect(holdC.status).toBe(201)
+    await uiLogin(page, c.email)
+    await gotoAuthed(page, `/workspaces/${c.ws}/rental-custody/${c.draft.id}`, c.email)
+    await page.route((url) => url.pathname.startsWith('/api/'), async (route) => {
+      const u = new URL(route.request().url())
+      if (route.request().method() === 'POST' && u.pathname.endsWith('/handover')) await route.abort()
+      else await route.continue()
+    })
+    await page.getByRole('button', { name: 'Serahkan unit' }).click()
+    await page.getByRole('button', { name: 'Serahkan unit' }).click()
+    await expect(page.getByRole('heading', { name: 'Hasil serah terima tidak diketahui' })).toBeVisible()
+    await shot('06-custody-unknown', 'unknown-mocked', 'mocked-route', 360)
+    await page.unrouteAll({ behavior: 'wait' })
+    // 07: muat (injeksi: GET custody ditahan).
+    await page.route((url) => url.pathname.startsWith('/api/'), async (route) => {
+      const u = new URL(route.request().url())
+      if (route.request().method() === 'GET' && u.pathname.endsWith('/custody')) {
+        await new Promise((r) => setTimeout(r, 2500))
+      }
+      await route.continue()
+    })
+    await gotoAuthed(page, `/workspaces/${c.ws}/rental-custody/${c.draft.id}`, c.email)
+    await expect(page.getByText('Memuat…')).toBeVisible()
+    await shot('07-custody-loading', 'loading-mocked', 'mocked-route', 360)
+    await page.unrouteAll({ behavior: 'wait' })
+    // 08: galat (injeksi: GET dibatalkan).
+    await page.route((url) => url.pathname.startsWith('/api/'), async (route) => {
+      const u = new URL(route.request().url())
+      if (route.request().method() === 'GET') await route.abort()
+      else await route.continue()
+    })
+    await gotoAuthed(page, `/workspaces/${c.ws}/rental-custody/${c.draft.id}`, c.email)
+    await expect(page.getByText('Layanan tidak tersedia')).toBeVisible()
+    await shot('08-custody-error', 'error-mocked', 'mocked-route', 360)
+    await page.unrouteAll({ behavior: 'wait' })
+    const files = manifest.map((m) => ({ ...m, sha256: sha(m.file) }))
+    writeFileSync(path.join(SHOTS_UI06, 'manifest.json'), JSON.stringify({ generated_by: 'owner-flow.spec.ts f2-ui-06', files }, null, 2) + '\n')
+    expect(files.length).toBe(8)
   })
 })

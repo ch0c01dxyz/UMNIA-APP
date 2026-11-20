@@ -952,4 +952,290 @@ test.describe.serial('proxy + sesi', () => {
     expect(bad.status).toBe(400)
     expect(bad.body).toContain('permintaan tidak valid')
   })
+
+  test('proxy: serah terima GET custody + POST holds + POST handover + POST return diteruskan', async ({ request }) => {
+    const grantCli = process.env.E2E_GRANT_CLI || ''
+    const operatorUrl = process.env.E2E_OPERATOR_DATABASE_URL || ''
+    expect(grantCli.length).toBeGreaterThan(0)
+    expect(operatorUrl.length).toBeGreaterThan(0)
+    const out = execFileSync(grantCli, ['--workspace', wsId, '--module', 'rental.basic', '--version', '0.1.0', '--reason', 'tes E2E proxy custody'], {
+      encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env, UMNIA_OPERATOR_DATABASE_URL: operatorUrl },
+    })
+    expect(out.startsWith('granted ') || out.startsWith('already_granted') || out.startsWith('legacy_existing')).toBe(true)
+    const auth = { Authorization: `Bearer ${ownerToken}` }
+    const act = await request.post(`/api/workspaces/${wsId}/modules/rental.basic/activate`, {
+      headers: auth, data: { version: '0.1.0' }
+    })
+    expect(act.status()).toBe(200)
+    const customer = await request.post(`/api/workspaces/${wsId}/customers`, {
+      headers: auth, data: { display_name: `Proxy Custody Pelanggan ${RUN}` }
+    })
+    expect(customer.status()).toBe(201)
+    const customerId = ((await customer.json()) as { id: string }).id
+    const item = await request.post(`/api/workspaces/${wsId}/catalog/items`, {
+      headers: auth, data: { sku: 'PRX-CUS', name: 'Proxy Custody Barang', unit: 'pcs' }
+    })
+    expect(item.status()).toBe(201)
+    const itemId = ((await item.json()) as { id: string }).id
+    const mkAsset = async (serial: string) => {
+      const a = await request.post(`/api/workspaces/${wsId}/assets`, {
+        headers: auth, data: { catalog_item_id: itemId, serial }
+      })
+      expect(a.status()).toBe(201)
+      return ((await a.json()) as { id: string }).id
+    }
+    const assetId = await mkAsset(`PRX-CUS-1-${RUN}`)
+    const asset2Id = await mkAsset(`PRX-CUS-2-${RUN}`)
+    // Jendela handover ketat server: tarif valid_from sedikit di masa depan
+    // (tanpa backdate), draf mulai sesudah tarif berlaku, 48 jam tepat =
+    // 2 unit, total 300000. `nowMs` ditangkap tepat sebelum seed harga.
+    const nowMs = Date.now()
+    const hourMs = 3600000
+    const winFrom = new Date(nowMs + 15 * 1000).toISOString()
+    const winTo = new Date(nowMs + 15 * 1000 + 48 * hourMs).toISOString()
+    // Draf ketiga butuh quote (ada fact) untuk uji hold kedaluwarsa/salah:
+    // periodenya harus tercakup jendela tarif relatif DAN tidak tumpang
+    // tindih dengan periode hold2 (asset2, draf utama) — EXCLUDE
+    // rental_holds_no_overlap menolak hold baru pada periode itu.
+    const win3From = new Date(nowMs + 49 * hourMs).toISOString()
+    const win3To = new Date(nowMs + 72 * hourMs).toISOString()
+    const priceFrom = new Date(nowMs + 5 * 1000).toISOString()
+    const priceTo = new Date(nowMs + 73 * hourMs).toISOString()
+    const price = await request.post(`/api/workspaces/${wsId}/catalog/items/${itemId}/prices`, {
+      headers: { ...auth, 'Idempotency-Key': `prx-cus-price-${RUN}` },
+      data: { valid_from: priceFrom, valid_to: priceTo, amount_minor: '150000', currency: 'IDR' }
+    })
+    expect(price.status()).toBe(201)
+    const priceId = ((await price.json()) as { id: string }).id
+    const mkDraft = async (from: string, to: string, key: string) => {
+      const d = await request.post(`/api/workspaces/${wsId}/rental/contracts`, {
+        headers: { ...auth, 'Idempotency-Key': key },
+        data: { customer_id: customerId, catalog_item_id: itemId, starts_at: from, ends_at: to }
+      })
+      expect(d.status()).toBe(201)
+      return ((await d.json()) as { id: string }).id
+    }
+    const mkFact = async (draftId: string, key: string) => {
+      const q = await request.get(`/api/workspaces/${wsId}/rental/contracts/${draftId}/quote`, { headers: auth })
+      expect(q.status()).toBe(200)
+      const qb = (await q.json()) as { price_version_id: string, total_minor: string }
+      const f = await request.post(`/api/workspaces/${wsId}/rental/contracts/${draftId}/accept-price`, {
+        headers: { ...auth, 'Idempotency-Key': key },
+        data: { expected_price_version_id: qb.price_version_id, expected_total_minor: qb.total_minor }
+      })
+      expect(f.status()).toBe(201)
+      return ((await f.json()) as { id: string }).id
+    }
+    const draftId = await mkDraft(winFrom, winTo, `prx-cus-draft-${RUN}`)
+    await mkFact(draftId, `prx-cus-fact-${RUN}`)
+    // Tanpa custody: 404 spesifik (bukan fakta kosong).
+    const noCustody = await request.get(`/api/workspaces/${wsId}/rental/contracts/${draftId}/custody`, { headers: auth })
+    expect(noCustody.status()).toBe(404)
+    expect(((await noCustody.json()) as { error: string }).error).toBe('custody tidak ditemukan')
+    // Tanpa kunci: backend menolak 400 — proxy tidak membuat kunci.
+    const holdNoKey = await request.post(`/api/workspaces/${wsId}/rental/contracts/${draftId}/holds`, {
+      headers: auth, data: { asset_id: assetId }
+    })
+    expect(holdNoKey.status()).toBe(400)
+    const holdKey = `prx-cus-hold-${RUN}`
+    const hold = await request.post(`/api/workspaces/${wsId}/rental/contracts/${draftId}/holds`, {
+      headers: { ...auth, 'Idempotency-Key': holdKey }, data: { asset_id: assetId }
+    })
+    expect(hold.status()).toBe(201)
+    const holdBody = (await hold.json()) as { id: string, workspace_id: string, draft_id: string, asset_id: string, client_request_id: string, status: string, expires_at: string }
+    expect(holdBody.workspace_id).toBe(wsId)
+    expect(holdBody.draft_id).toBe(draftId)
+    expect(holdBody.asset_id).toBe(assetId)
+    expect(holdBody.client_request_id).toBe(holdKey)
+    expect(holdBody.status).toBe('held')
+    expect(typeof holdBody.expires_at).toBe('string')
+    const holdReplay = await request.post(`/api/workspaces/${wsId}/rental/contracts/${draftId}/holds`, {
+      headers: { ...auth, 'Idempotency-Key': holdKey }, data: { asset_id: assetId }
+    })
+    expect(holdReplay.status()).toBe(200)
+    expect(((await holdReplay.json()) as { id: string }).id).toBe(holdBody.id)
+    const handNoKey = await request.post(`/api/workspaces/${wsId}/rental/contracts/${draftId}/handover`, {
+      headers: auth, data: { asset_id: assetId, hold_id: holdBody.id }
+    })
+    expect(handNoKey.status()).toBe(400)
+    // Tunggu jendela handover terbuka sebelum POST handover pertama.
+    const waitMs = new Date(winFrom).getTime() - Date.now() + 500
+    if (waitMs > 0) await new Promise(r => setTimeout(r, waitMs))
+    const handKey = `prx-cus-hand-${RUN}`
+    const hand = await request.post(`/api/workspaces/${wsId}/rental/contracts/${draftId}/handover`, {
+      headers: { ...auth, 'Idempotency-Key': handKey }, data: { asset_id: assetId, hold_id: holdBody.id }
+    })
+    expect(hand.status()).toBe(201)
+    const handBody = (await hand.json()) as { id: string, rental_contract_id: string, asset_id: string, hold_id: string, client_request_id: string, return_client_request_id: string | null, status: string, handed_out_at: string, returned_at: string | null, resolved_at: string | null }
+    expect(handBody.rental_contract_id).toBe(draftId)
+    expect(handBody.asset_id).toBe(assetId)
+    expect(handBody.hold_id).toBe(holdBody.id)
+    expect(handBody.client_request_id).toBe(handKey)
+    expect(handBody.return_client_request_id).toBeNull()
+    expect(handBody.status).toBe('out')
+    expect(handBody.returned_at).toBeNull()
+    expect(handBody.resolved_at).toBeNull()
+    const handReplay = await request.post(`/api/workspaces/${wsId}/rental/contracts/${draftId}/handover`, {
+      headers: { ...auth, 'Idempotency-Key': handKey }, data: { asset_id: assetId, hold_id: holdBody.id }
+    })
+    expect(handReplay.status()).toBe(200)
+    expect(((await handReplay.json()) as { id: string }).id).toBe(handBody.id)
+    const gotCustody = await request.get(`/api/workspaces/${wsId}/rental/contracts/${draftId}/custody`, { headers: auth })
+    expect(gotCustody.status()).toBe(200)
+    expect(((await gotCustody.json()) as { id: string }).id).toBe(handBody.id)
+    const retNoKey = await request.post(`/api/workspaces/${wsId}/rental/contracts/${draftId}/return`, {
+      headers: auth, data: { outcome: 'returned' }
+    })
+    expect(retNoKey.status()).toBe(400)
+    const retKey = `prx-cus-ret-${RUN}`
+    const ret = await request.post(`/api/workspaces/${wsId}/rental/contracts/${draftId}/return`, {
+      headers: { ...auth, 'Idempotency-Key': retKey }, data: { outcome: 'returned' }
+    })
+    expect(ret.status()).toBe(200)
+    const retBody = (await ret.json()) as { id: string, status: string, return_client_request_id: string | null, returned_at: string | null, resolved_at: string | null }
+    expect(retBody.id).toBe(handBody.id)
+    expect(retBody.status).toBe('returned')
+    expect(retBody.return_client_request_id).toBe(retKey)
+    expect(retBody.returned_at).not.toBeNull()
+    expect(retBody.resolved_at).not.toBeNull()
+    const retReplay = await request.post(`/api/workspaces/${wsId}/rental/contracts/${draftId}/return`, {
+      headers: { ...auth, 'Idempotency-Key': retKey }, data: { outcome: 'returned' }
+    })
+    expect(retReplay.status()).toBe(200)
+    expect(((await retReplay.json()) as { id: string }).id).toBe(handBody.id)
+    // 409 berbeda (backend nyata).
+    const draft2 = await mkDraft('2048-01-05T00:00:00Z', '2048-01-07T00:00:00Z', `prx-cus-draft2-${RUN}`)
+    const holdMisuse = await request.post(`/api/workspaces/${wsId}/rental/contracts/${draft2}/holds`, {
+      headers: { ...auth, 'Idempotency-Key': holdKey }, data: { asset_id: assetId }
+    })
+    expect(holdMisuse.status()).toBe(409)
+    expect(((await holdMisuse.json()) as { error: string }).error).toBe('kunci idempotency sudah dipakai untuk permintaan yang berbeda')
+    const hold2 = await request.post(`/api/workspaces/${wsId}/rental/contracts/${draftId}/holds`, {
+      headers: { ...auth, 'Idempotency-Key': `prx-cus-hold2-${RUN}` }, data: { asset_id: asset2Id }
+    })
+    expect(hold2.status()).toBe(201)
+    const hold2Id = ((await hold2.json()) as { id: string }).id
+    const handExists = await request.post(`/api/workspaces/${wsId}/rental/contracts/${draftId}/handover`, {
+      headers: { ...auth, 'Idempotency-Key': `prx-cus-hand2-${RUN}` }, data: { asset_id: asset2Id, hold_id: hold2Id }
+    })
+    expect(handExists.status()).toBe(409)
+    expect(((await handExists.json()) as { error: string }).error).toBe('draft ini sudah memiliki custody')
+    const holdNoFact = await request.post(`/api/workspaces/${wsId}/rental/contracts/${draft2}/holds`, {
+      headers: { ...auth, 'Idempotency-Key': `prx-cus-hold3-${RUN}` }, data: { asset_id: asset2Id }
+    })
+    expect(holdNoFact.status()).toBe(201)
+    const handNoFact = await request.post(`/api/workspaces/${wsId}/rental/contracts/${draft2}/handover`, {
+      headers: { ...auth, 'Idempotency-Key': `prx-cus-hand3-${RUN}` }, data: { asset_id: asset2Id, hold_id: ((await holdNoFact.json()) as { id: string }).id }
+    })
+    expect(handNoFact.status()).toBe(409)
+    expect(((await handNoFact.json()) as { error: string }).error).toBe('harga yang disepakati belum dicatat')
+    const draft3 = await mkDraft(win3From, win3To, `prx-cus-draft3-${RUN}`)
+    await mkFact(draft3, `prx-cus-fact3-${RUN}`)
+    const hold3 = await request.post(`/api/workspaces/${wsId}/rental/contracts/${draft3}/holds`, {
+      headers: { ...auth, 'Idempotency-Key': `prx-cus-hold4-${RUN}` }, data: { asset_id: asset2Id }
+    })
+    expect(hold3.status()).toBe(201)
+    const hold3Id = ((await hold3.json()) as { id: string }).id
+    psql(`UPDATE rental_holds SET expires_at = now() - interval '1 hour' WHERE id='${hold3Id}'`)
+    const handExpired = await request.post(`/api/workspaces/${wsId}/rental/contracts/${draft3}/handover`, {
+      headers: { ...auth, 'Idempotency-Key': `prx-cus-hand4-${RUN}` }, data: { asset_id: asset2Id, hold_id: hold3Id }
+    })
+    expect(handExpired.status()).toBe(409)
+    expect(((await handExpired.json()) as { error: string }).error).toBe('hold tidak aktif')
+    const handWrong = await request.post(`/api/workspaces/${wsId}/rental/contracts/${draft3}/handover`, {
+      headers: { ...auth, 'Idempotency-Key': `prx-cus-hand5-${RUN}` }, data: { asset_id: assetId, hold_id: hold3Id }
+    })
+    expect(handWrong.status()).toBe(409)
+    expect(((await handWrong.json()) as { error: string }).error).toBe('hold tidak cocok dengan draft atau aset')
+    const retTerminal = await request.post(`/api/workspaces/${wsId}/rental/contracts/${draftId}/return`, {
+      headers: { ...auth, 'Idempotency-Key': `prx-cus-ret2-${RUN}` }, data: { outcome: 'damaged' }
+    })
+    expect(retTerminal.status()).toBe(409)
+    expect(((await retTerminal.json()) as { error: string }).error).toBe('draft ini sudah dikembalikan')
+    // Kasir baca 200, tulis 403; nonanggota baca 403.
+    const cashierAuth = { Authorization: `Bearer ${otherToken}` }
+    const cashierCustody = await request.get(`/api/workspaces/${wsId}/rental/contracts/${draftId}/custody`, { headers: cashierAuth })
+    expect(cashierCustody.status()).toBe(200)
+    const cashierHolds = await request.get(`/api/workspaces/${wsId}/rental/holds?limit=10`, { headers: cashierAuth })
+    expect(cashierHolds.status()).toBe(200)
+    const cashierHold = await request.post(`/api/workspaces/${wsId}/rental/contracts/${draft3}/holds`, {
+      headers: { ...cashierAuth, 'Idempotency-Key': `prx-cus-kasir-${RUN}` }, data: { asset_id: asset2Id }
+    })
+    expect(cashierHold.status()).toBe(403)
+    const cashierHand = await request.post(`/api/workspaces/${wsId}/rental/contracts/${draft3}/handover`, {
+      headers: { ...cashierAuth, 'Idempotency-Key': `prx-cus-kasir2-${RUN}` }, data: { asset_id: asset2Id, hold_id: hold3Id }
+    })
+    expect(cashierHand.status()).toBe(403)
+    const cashierRet = await request.post(`/api/workspaces/${wsId}/rental/contracts/${draftId}/return`, {
+      headers: { ...cashierAuth, 'Idempotency-Key': `prx-cus-kasir3-${RUN}` }, data: { outcome: 'returned' }
+    })
+    expect(cashierRet.status()).toBe(403)
+    const ghostEmail = `proxy-hantu-${RUN}@e2e.umnia.local`
+    const regGhost = await request.post('/api/auth/register', { data: { email: ghostEmail, password: PASSWORD } })
+    expect(regGhost.status()).toBe(201)
+    const loginGhost = await request.post('/api/auth/login', { data: { email: ghostEmail, password: PASSWORD } })
+    expect(loginGhost.status()).toBe(200)
+    const ghostAuth = { Authorization: `Bearer ${((await loginGhost.json()) as { token: string }).token}` }
+    const ghostCustody = await request.get(`/api/workspaces/${wsId}/rental/contracts/${draftId}/custody`, { headers: ghostAuth })
+    expect(ghostCustody.status()).toBe(403)
+    // 404 berbeda.
+    const ghost = randomUUID()
+    const ghostDraftCustody = await request.get(`/api/workspaces/${wsId}/rental/contracts/${ghost}/custody`, { headers: auth })
+    expect(ghostDraftCustody.status()).toBe(404)
+    expect(((await ghostDraftCustody.json()) as { error: string }).error).toBe('draft tidak ditemukan')
+    const ghostHoldHand = await request.post(`/api/workspaces/${wsId}/rental/contracts/${draft3}/handover`, {
+      headers: { ...auth, 'Idempotency-Key': `prx-cus-hand6-${RUN}` }, data: { asset_id: asset2Id, hold_id: ghost }
+    })
+    expect(ghostHoldHand.status()).toBe(404)
+    expect(((await ghostHoldHand.json()) as { error: string }).error).toBe('hold tidak ditemukan')
+    const ghostAssetHold = await request.post(`/api/workspaces/${wsId}/rental/contracts/${draft3}/holds`, {
+      headers: { ...auth, 'Idempotency-Key': `prx-cus-hold5-${RUN}` }, data: { asset_id: ghost }
+    })
+    expect(ghostAssetHold.status()).toBe(404)
+    expect(((await ghostAssetHold.json()) as { error: string }).error).toBe('aset tidak ditemukan')
+  })
+
+  test('proxy: query holds + UUID buruk + upstream mati', async ({ request }) => {
+    const auth = { Authorization: `Bearer ${ownerToken}` }
+    const ghost = randomUUID()
+    const ok = await request.get(`/api/workspaces/${wsId}/rental/holds?limit=10`, { headers: auth })
+    expect(ok.status()).toBe(200)
+    for (const q of ['?limit=0', '?limit=101', '?foo=1', '?limit=10&limit=20', '?offset=abc', '?limit=10&']) {
+      const res = await request.get(`/api/workspaces/${wsId}/rental/holds${q}`, { headers: auth })
+      expect(res.status(), `holds${q}`).toBe(400)
+      expect(await res.text()).toContain('permintaan tidak valid')
+    }
+    for (const path of [
+      `/api/workspaces/${wsId}/rental/contracts/${ghost}/custody?limit=10`,
+      `/api/workspaces/${wsId}/rental/contracts/${ghost}/holds?limit=10`,
+      `/api/workspaces/${wsId}/rental/contracts/${ghost}/handover?limit=10`,
+      `/api/workspaces/${wsId}/rental/contracts/${ghost}/return?limit=10`
+    ]) {
+      const res = await request.get(path, { headers: auth })
+      expect(res.status(), path).toBe(400)
+      expect(await res.text()).toContain('permintaan tidak valid')
+    }
+    const postQ = await request.post(`/api/workspaces/${wsId}/rental/contracts/${ghost}/holds?limit=10`, {
+      headers: { ...auth, 'Idempotency-Key': `prx-cus-q-${RUN}` }, data: { asset_id: ghost }
+    })
+    expect(postQ.status()).toBe(400)
+    const badCustody = await rawGet(`/api/workspaces/${wsId}/rental/contracts/bukan-uuid/custody`, 3000, auth)
+    expect(badCustody.status).toBe(404)
+    const badCustodyQ = await rawGet(`/api/workspaces/${wsId}/rental/contracts/bukan-uuid/custody?limit=10`, 3000, auth)
+    expect(badCustodyQ.status).toBe(400)
+    const badHand = await request.post(`/api/workspaces/${wsId}/rental/contracts/bukan-uuid/handover`, {
+      headers: { ...auth, 'Idempotency-Key': `prx-cus-q2-${RUN}` }, data: { asset_id: ghost, hold_id: ghost }
+    })
+    expect(badHand.status()).toBe(404)
+    const extra = await rawGet(`/api/workspaces/${wsId}/rental/contracts/${ghost}/custody/extra`, 3000, auth)
+    expect(extra.status).toBe(404)
+    const dead = await rawGet(`/api/workspaces/${wsId}/rental/contracts/${ghost}/custody`, 3001, auth)
+    expect(dead.status).toBe(502)
+    expect(dead.body).toContain('layanan tidak tersedia')
+    expect(dead.body).not.toContain('127.0.0.1')
+    const deadBad = await rawGet(`/api/workspaces/${wsId}/rental/contracts/${ghost}/custody?limit=0`, 3001, auth)
+    expect(deadBad.status).toBe(400)
+    expect(deadBad.body).toContain('permintaan tidak valid')
+  })
 })

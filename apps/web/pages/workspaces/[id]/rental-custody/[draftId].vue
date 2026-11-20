@@ -28,6 +28,16 @@
 // bukti tidak ada. Replay boleh mengembalikan hold yang sudah terminal
 // (200 bukan berarti hold masih bisa dipakai) dan custody yang sudah
 // terminal (jangan tolak riwayat valid hanya karena status bukan `out`).
+//
+// R1: state unknown TERKUNCI — tidak ada jalur "Mulai ... baru" dari
+// panel unknown (retirement hanya dari konflik kunci definitif, dan
+// handler menolak retirement saat unknown). Refresh membaca ulang daftar
+// holds dari server secara terbatas (halaman yang sudah dimuat + satu
+// halaman berikut) dan pagination manual diizinkan saat unknown, supaya
+// hold yang tercatat sesudah respons hilang bisa diselesaikan lewat GET.
+// Kiriman pertama hold/handover mensyaratkan hasil baca no-custody yang
+// spesifik (custodyMissing), bukan sekadar `!custody` — GET custody yang
+// gagal atau DTO-nya cacat tidak boleh membuka jalan tulis.
 // Kunci return (`return_client_request_id`) TIDAK PERNAH dibandingkan
 // dengan kunci handover. Hanya 201 atau replay 200 dengan baris yang
 // valid yang mengonfirmasi tulis; return hanya 200. Hasil tak diketahui
@@ -415,13 +425,13 @@ const currentHold = computed(() => {
     && h.status === 'held') ?? null
 })
 const showHoldsMore = computed(() => !!selectedAssetId.value && !currentHold.value && !holdExhausted.value
-  && holdStarted.value && !custody.value && !holdAttempt.value)
-const canHold = computed(() => !!fact.value && !custody.value && contextOk.value
+  && holdStarted.value && !custody.value && (!holdAttempt.value || holdUnknown.value))
+const canHold = computed(() => !!fact.value && custodyMissing.value && contextOk.value
   && !!selectedAssetId.value && !currentHold.value
   && !holdAttempt.value && !holdUnknown.value && holdConflict.value === null && !holdBusy.value
   && !handAttempt.value && !handUnknown.value
   && !factLoading.value && !custodyLoading.value && !refreshing.value)
-const canHandover = computed(() => !!fact.value && !custody.value && contextOk.value
+const canHandover = computed(() => !!fact.value && custodyMissing.value && contextOk.value
   && !!currentHold.value
   && !handAttempt.value && !handUnknown.value && handConflict.value === null && !handBusy.value
   && !holdAttempt.value && !holdUnknown.value
@@ -1100,7 +1110,26 @@ function resetDraftLookup() {
 // dulu). Tanpa rantai otomatis: halaman berikut hanya lewat tombol
 // "Muat lebih banyak hold". Tidak ditemukan di halaman yang dimuat BUKAN
 // bukti tidak ada. Galat baca (termasuk 403) hanya jadi galat lokal:
-// return tidak bergantung pada bacaan ini.
+// return tidak bergantung pada bacaan ini. Sesudah menggabungkan halaman,
+// attempt hold yang belum pasti dicocokkan ulang — pagination manual bisa
+// menyelesaikan hold yang tercatat sesudah respons hilang.
+async function fetchHoldsPage(offset: number): Promise<HoldRow[]> {
+  const s = session
+  if (!s) return []
+  const res = await apiFetch<{ items: HoldRow[] }>(s, `/api/workspaces/${wsId.value}/rental/holds?limit=${PAGE_LIMIT}&offset=${offset}`)
+  return res.data.items
+}
+
+function mergeHoldRows(items: HoldRow[]) {
+  const seen = new Set(holdRows.value.map(r => r.id))
+  for (const row of items) {
+    if (!seen.has(row.id)) {
+      holdRows.value.push(row)
+      seen.add(row.id)
+    }
+  }
+}
+
 async function loadHoldsPage() {
   const s = session
   if (!s || holdListInFlight) return
@@ -1111,18 +1140,13 @@ async function loadHoldsPage() {
   holdListLoading.value = true
   holdLoadError.value = null
   try {
-    const res = await apiFetch<{ items: HoldRow[] }>(s, `/api/workspaces/${wsId.value}/rental/holds?limit=${PAGE_LIMIT}&offset=${wantOffset}`)
+    const items = await fetchHoldsPage(wantOffset)
     if (gen !== holdListGen) return
-    const seen = new Set(holdRows.value.map(r => r.id))
-    for (const row of res.data.items) {
-      if (!seen.has(row.id)) {
-        holdRows.value.push(row)
-        seen.add(row.id)
-      }
-    }
-    holdOffset.value = wantOffset + res.data.items.length
-    holdExhausted.value = res.data.items.length < PAGE_LIMIT
+    mergeHoldRows(items)
+    holdOffset.value = wantOffset + items.length
+    holdExhausted.value = items.length < PAGE_LIMIT
     adoptLiveHold()
+    await settleHoldFromRows()
   } catch (err) {
     if (gen !== holdListGen) return
     if (err instanceof ApiError && err.status === 401) {
@@ -1148,13 +1172,81 @@ function adoptLiveHold() {
   if (live) selectedAssetId.value = live.asset_id
 }
 
-// Muat-ulang GET saja (fakta + custody + pindai holds yang sudah
-// dimuat): tidak mengganti snapshot, tidak mengonfirmasi apa pun, tidak
-// menulis. Dipakai tombol "Muat ulang data" dan sesudah retirement.
-// Penyelesaian per tahap, urut ketergantungan hold -> handover -> return.
-// Hold HANYA diselesaikan lewat daftar holds (GET custody tidak pernah
-// menyelesaikan hold). Setiap penyelesaian otoritatif memagari POST lama
-// tahap itu supaya hasil/salah lamanya tidak membangkitkan panel.
+// Cocokkan attempt hold dengan baris holds yang sudah dimuat.
+// Terkonfirmasi hidup / dinyatakan mati: kembalikan true (attempt selesai
+// dan POST lamanya dipagari lewat holdGen++). Kunci sama tetapi field
+// tidak cocok: setel holdSettleError, kembalikan false — snapshot/kunci/
+// ketidakpastian dipertahankan. Tidak ditemukan: bukan bukti tidak ada,
+// kembalikan false.
+async function settleHoldFromRows(): Promise<boolean> {
+  const a = holdAttempt.value
+  if (!a) return false
+  const found = holdRows.value.find(h => h.client_request_id === a.key)
+  if (!found) return false
+  if (isValidHoldForAttempt(found, wsId.value, a)) {
+    if (found.status === 'held') {
+      await confirmHold(found, holdGen)
+      // GET menyelesaikan attempt: pagar kelanjutan POST lama.
+      holdGen++
+    } else {
+      // Kunci sama, hold sudah terminal: permintaan lama selesai dengan
+      // hold yang tidak lagi aktif — bukan sukses, bukan ketidakpastian.
+      // Kunci baru boleh dibuat sesudahnya.
+      clearHoldStage()
+      holdDeadNote.value = 'Hold ini sudah tidak aktif dan tidak dapat dipakai. Buat hold baru bila masih perlu.'
+      holdGen++
+    }
+    return true
+  }
+  holdSettleError.value = 'Catatan hold yang dibaca memakai kunci yang sama tetapi tidak cocok dengan permintaan ini; pembuatan hold tetap tidak diketahui.'
+  return false
+}
+
+// Baca ulang halaman holds yang sudah dimuat (dari offset 0) dengan bacaan
+// server yang terbatas: hanya halaman yang pernah dimuat — tanpa POST dan
+// tanpa rantai otomatis. Cache bisa basi karena hold baru dibuat sesudah
+// halaman dimuat (daftar diurutkan created_at menaik, jadi hold baru
+// mendarat di halaman yang sudah dimuat atau tepat sesudahnya). Galat baca
+// (termasuk 403) hanya jadi galat lokal; attempt tetap unknown.
+async function reloadHoldsLoaded() {
+  const s = session
+  if (!s || holdListInFlight) return
+  const gen = holdListGen
+  const myLoad = ++holdListLoadGen
+  holdListInFlight = true
+  holdListLoading.value = true
+  holdLoadError.value = null
+  try {
+    const limit = Math.max(holdOffset.value, PAGE_LIMIT)
+    for (let off = 0; off < limit; off += PAGE_LIMIT) {
+      if (gen !== holdListGen) return
+      const items = await fetchHoldsPage(off)
+      if (gen !== holdListGen) return
+      mergeHoldRows(items)
+    }
+  } catch (err) {
+    if (gen !== holdListGen) return
+    if (err instanceof ApiError && err.status === 401) {
+      redirectToLogin(s, route.fullPath)
+      return
+    }
+    if (err instanceof ApiError) holdLoadError.value = err.message
+    else holdLoadError.value = 'Terjadi kesalahan. Coba lagi.'
+  } finally {
+    if (myLoad === holdListLoadGen) {
+      holdListInFlight = false
+      holdListLoading.value = false
+    }
+  }
+}
+
+// Muat-ulang GET saja (fakta + custody + baca ulang holds terbatas):
+// tidak mengganti snapshot, tidak mengonfirmasi apa pun, tidak menulis.
+// Dipakai tombol "Muat ulang data" dan sesudah retirement. Penyelesaian
+// per tahap, urut ketergantungan hold -> handover -> return. Hold HANYA
+// diselesaikan lewat daftar holds (GET custody tidak pernah menyelesaikan
+// hold). Setiap penyelesaian otoritatif memagari POST lama tahap itu supaya
+// hasil/salah lamanya tidak membangkitkan panel.
 async function refreshReads(failureMessage: string) {
   const s = session
   if (!s || refreshing.value) return
@@ -1169,30 +1261,21 @@ async function refreshReads(failureMessage: string) {
     await fetchCustody()
     if (readDenied.value) return
     if (gen !== refreshGen) return
-    // Tahap hold: cocokkan kunci di halaman holds yang sudah dimuat.
+    // Tahap hold: baca ulang daftar holds dari server (terbatas: halaman
+    // yang sudah dimuat + satu halaman berikut), lalu cocokkan kunci.
+    // Tidak ditemukan di halaman yang dimuat: bukan bukti tidak ada.
+    // Ketidakpastian dipertahankan; pengguna bisa memuat halaman holds
+    // berikut atau mengirim ulang dengan kunci yang sama.
     if (holdAttempt.value) {
-      const found = holdRows.value.find(h => h.client_request_id === holdAttempt.value!.key)
-      if (found && isValidHoldForAttempt(found, wsId.value, holdAttempt.value)) {
-        if (found.status === 'held') {
-          await confirmHold(found, holdGen)
-          // GET menyelesaikan attempt: pagar kelanjutan POST lama.
-          holdGen++
-        } else {
-          // Kunci sama, hold sudah terminal: permintaan lama selesai
-          // dengan hold yang tidak lagi aktif — bukan sukses, bukan
-          // ketidakpastian. Kunci baru boleh dibuat sesudahnya.
-          clearHoldStage()
-          holdDeadNote.value = 'Hold ini sudah tidak aktif dan tidak dapat dipakai. Buat hold baru bila masih perlu.'
-          holdGen++
-        }
-      } else if (found) {
-        // Kunci sama tetapi field tidak cocok: tidak mengonfirmasi apa
-        // pun. Snapshot/kunci/ketidakpastian dipertahankan.
-        holdSettleError.value = 'Catatan hold yang dibaca memakai kunci yang sama tetapi tidak cocok dengan permintaan ini; pembuatan hold tetap tidak diketahui.'
+      await reloadHoldsLoaded()
+      if (readDenied.value) return
+      if (gen !== refreshGen) return
+      if (holdAttempt.value && !holdExhausted.value) {
+        await loadHoldsPage()
+        if (readDenied.value) return
+        if (gen !== refreshGen) return
       }
-      // Tidak ditemukan di halaman yang dimuat: bukan bukti tidak ada.
-      // Ketidakpastian dipertahankan; pengguna bisa memuat halaman holds
-      // berikut atau mengirim ulang dengan kunci yang sama.
+      await settleHoldFromRows()
     }
     // Tahap handover: cocokkan kunci + identitas custody.
     if (handAttempt.value && custody.value) {
@@ -1382,7 +1465,7 @@ function attemptContext(): { customerId: string, customerLabel: string, itemId: 
 // Buka panel konfirmasi hold: buat kunci SEKALI dan bekukan snapshot dari
 // fakta + konteks draf + unit yang dipilih saat itu. Tanpa POST saat dibuka.
 function openHoldConfirmation() {
-  if (!canHold.value || holdAttempt.value) return
+  if (!canHold.value || !custodyMissing.value || holdAttempt.value) return
   const ctx = attemptContext()
   if (!ctx) return
   holdAttempt.value = {
@@ -1410,7 +1493,7 @@ function openHoldConfirmation() {
 
 // Buka panel konfirmasi serah terima: bekukan hold yang masih hidup.
 function openHandConfirmation() {
-  if (!canHandover.value || handAttempt.value) return
+  if (!canHandover.value || !custodyMissing.value || handAttempt.value) return
   const ctx = attemptContext()
   const hold = currentHold.value
   if (!ctx || !hold) return
@@ -1494,24 +1577,26 @@ function cancelRetConfirmation() {
 // Menebus snapshot secara eksplisit: pemulihan ditinggalkan, lalu baca
 // ulang keadaan saat ini sebelum kunci baru dibuat. Tulis sebelumnya
 // mungkin sudah tersimpan dan TIDAK dibatalkan oleh tindakan ini.
+// Hanya dari konflik kunci definitif: state unknown TERKUNCI —
+// retirement tidak boleh membuang snapshot yang hasilnya belum pasti.
 // Terkunci selama POST berjalan: kelanjutan POST lama tidak boleh
 // menghapus tahap baru atau mengumumkan simpan untuknya.
 async function retireHoldAttempt() {
-  if (holdBusy.value) return
+  if (holdBusy.value || holdUnknown.value) return
   clearHoldStage()
   holdDeadNote.value = null
   await refreshReads('Data gagal dimuat ulang. Coba muat ulang data.')
 }
 
 async function retireHandAttempt() {
-  if (handBusy.value) return
+  if (handBusy.value || handUnknown.value) return
   clearHandStage()
   resetDraftLookup()
   await refreshReads('Data gagal dimuat ulang. Coba muat ulang data.')
 }
 
 async function retireRetAttempt() {
-  if (retBusy.value) return
+  if (retBusy.value || retUnknown.value) return
   clearRetStage()
   await refreshReads('Data gagal dimuat ulang. Coba muat ulang data.')
 }
@@ -1530,7 +1615,7 @@ async function submitHold(resend = false) {
     // permintaan yang sudah dikirim, bukan kiriman baru, jadi tidak
     // diblokir oleh bacaan sesudahnya yang gagal/berubah.
     if (factLoading.value || custodyLoading.value || refreshing.value) return
-    if (!fact.value || custody.value) return
+    if (!fact.value || !custodyMissing.value) return
     if (!contextOk.value) return
   }
   const gen = holdGen
@@ -1612,7 +1697,7 @@ async function submitHand(resend = false) {
   if (!a) return
   if (!resend) {
     if (factLoading.value || custodyLoading.value || refreshing.value) return
-    if (!fact.value || custody.value) return
+    if (!fact.value || !custodyMissing.value) return
     if (!currentHold.value || currentHold.value.id !== a.holdId) return
     if (!contextOk.value) return
   }
@@ -1951,7 +2036,7 @@ async function resendRet() {
               </p>
               <p v-if="holdPostDenied" class="field-error">{{ holdPostDenied }}</p>
               <p>
-                <button type="button" class="btn" :disabled="holdBusy || refreshing" @click="submitHold(false)">
+                <button type="button" class="btn" :disabled="holdBusy || refreshing || !custodyMissing" @click="submitHold(false)">
                   {{ holdBusy ? 'Membuat…' : 'Buat hold' }}
                 </button>
                 <button type="button" class="btn btn-secondary" :disabled="holdBusy" @click="cancelHoldConfirmation">Batalkan</button>
@@ -1975,9 +2060,8 @@ async function resendRet() {
                 <button type="button" class="btn btn-secondary" :disabled="holdBusy" @click="resendHold">Kirim lagi (permintaan sama)</button>
               </p>
               <p>
-                <button type="button" class="btn btn-secondary" :disabled="holdBusy" @click="retireHoldAttempt">Mulai hold baru</button>
-                Mulai hold baru membatalkan pemulihan ini. Hold sebelumnya mungkin sudah
-                tersimpan dan tidak dibatalkan oleh tindakan ini.
+                Selama hasil belum pasti, permintaan ini terkunci: tidak ada kunci baru yang dibuat.
+                Muat ulang data atau kirim lagi dengan permintaan yang sama.
               </p>
             </div>
             <div v-if="holdConflict === 'key'" class="alert" role="alert">
@@ -2012,7 +2096,7 @@ async function resendRet() {
               </p>
               <p v-if="handPostDenied" class="field-error">{{ handPostDenied }}</p>
               <p>
-                <button type="button" class="btn" :disabled="handBusy || refreshing" @click="submitHand(false)">
+                <button type="button" class="btn" :disabled="handBusy || refreshing || !custodyMissing" @click="submitHand(false)">
                   {{ handBusy ? 'Menyerahkan…' : 'Serahkan unit' }}
                 </button>
                 <button type="button" class="btn btn-secondary" :disabled="handBusy" @click="cancelHandConfirmation">Batalkan</button>
@@ -2036,9 +2120,8 @@ async function resendRet() {
                 <button type="button" class="btn btn-secondary" :disabled="handBusy" @click="resendHand">Kirim lagi (permintaan sama)</button>
               </p>
               <p>
-                <button type="button" class="btn btn-secondary" :disabled="handBusy" @click="retireHandAttempt">Mulai serah terima baru</button>
-                Mulai serah terima baru membatalkan pemulihan ini. Serah terima sebelumnya mungkin sudah
-                tersimpan dan tidak dibatalkan oleh tindakan ini.
+                Selama hasil belum pasti, permintaan ini terkunci: tidak ada kunci baru yang dibuat.
+                Muat ulang data atau kirim lagi dengan permintaan yang sama.
               </p>
             </div>
             <div v-if="handConflict === 'key'" class="alert" role="alert">
@@ -2114,9 +2197,8 @@ async function resendRet() {
                 <button type="button" class="btn btn-secondary" :disabled="retBusy" @click="resendRet">Kirim lagi (permintaan sama)</button>
               </p>
               <p>
-                <button type="button" class="btn btn-secondary" :disabled="retBusy" @click="retireRetAttempt">Mulai pengembalian baru</button>
-                Mulai pengembalian baru membatalkan pemulihan ini. Pengembalian sebelumnya mungkin sudah
-                tersimpan dan tidak dibatalkan oleh tindakan ini.
+                Selama hasil belum pasti, permintaan ini terkunci: tidak ada kunci baru yang dibuat.
+                Muat ulang data atau kirim lagi dengan permintaan yang sama.
               </p>
             </div>
             <div v-if="retConflict === 'key'" class="alert" role="alert">

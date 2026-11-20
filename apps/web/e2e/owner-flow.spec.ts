@@ -5934,6 +5934,276 @@ test.describe.serial('alur pemilik', () => {
     await expect(page).toHaveURL(/\/workspaces\/new/)
   })
 
+
+  test('serah terima R1: hold tak-diketahui terkunci; kirim-ulang kunci sama tanpa kunci baru', async ({ page }) => {
+    const { email, ws, token, customer, item, asset, draft } = await seedCustodyReady(page, 'r1-hold-kunci')
+    await uiLogin(page, email)
+    await gotoAuthed(page, `/workspaces/${ws}/rental-custody/${draft.id}`, email)
+    await page.getByLabel('Unit').selectOption(asset.id)
+    const seenKeys = new Set<string>()
+    let postCount = 0
+    let aborted = false
+    await page.route((url) => url.pathname.startsWith('/api/'), async (route) => {
+      const u = new URL(route.request().url())
+      if (route.request().method() === 'POST' && u.pathname.endsWith('/holds')) {
+        postCount++
+        const k = route.request().headers()['idempotency-key']
+        if (k) seenKeys.add(k)
+        // Hanya POST pertama yang digagalkan; kirim-ulang diteruskan
+        // supaya tetap terhitung (rute tidak dilepas sebelum kirim-ulang).
+        if (!aborted) { aborted = true; await route.abort() }
+        else await route.continue()
+      } else await route.continue()
+    })
+    await page.getByRole('button', { name: 'Buat hold' }).click()
+    await page.getByRole('button', { name: 'Buat hold' }).click()
+    await expect(page.getByRole('heading', { name: 'Hasil pembuatan hold tidak diketahui' })).toBeVisible()
+    // State unknown terkunci: tidak ada jalur "Mulai hold baru".
+    await expect(page.getByRole('button', { name: 'Mulai hold baru' })).toHaveCount(0)
+    await expect(page.getByRole('button', { name: 'Kirim lagi (permintaan sama)' })).toBeVisible()
+    await page.getByRole('button', { name: 'Kirim lagi (permintaan sama)' }).click()
+    await expect(page.getByText('Hold aktif untuk unit ini.')).toBeVisible()
+    // Hanya dua POST (asli + kirim-ulang) dengan SATU kunci yang sama.
+    expect(postCount).toBe(2)
+    expect(seenKeys.size).toBe(1)
+    await page.unrouteAll({ behavior: 'wait' })
+  })
+
+  test('serah terima R1: handover tak-diketahui terkunci; kirim-ulang kunci sama tanpa kunci baru', async ({ page }) => {
+    const { email, ws, token, customer, item, asset, draft } = await seedCustodyReady(page, 'r1-hand-kunci')
+    const hold = await createHold(page, ws, draft.id, email, randomUUID(), asset.id)
+    expect(hold.status).toBe(201)
+    await uiLogin(page, email)
+    await gotoAuthed(page, `/workspaces/${ws}/rental-custody/${draft.id}`, email)
+    const seenKeys = new Set<string>()
+    let postCount = 0
+    let aborted = false
+    await page.route((url) => url.pathname.startsWith('/api/'), async (route) => {
+      const u = new URL(route.request().url())
+      if (route.request().method() === 'POST' && u.pathname.endsWith('/handover')) {
+        postCount++
+        const k = route.request().headers()['idempotency-key']
+        if (k) seenKeys.add(k)
+        if (!aborted) { aborted = true; await route.abort() }
+        else await route.continue()
+      } else await route.continue()
+    })
+    await page.getByRole('button', { name: 'Serahkan unit' }).click()
+    await page.getByRole('button', { name: 'Serahkan unit' }).click()
+    await expect(page.getByRole('heading', { name: 'Hasil serah terima tidak diketahui' })).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Mulai serah terima baru' })).toHaveCount(0)
+    await expect(page.getByRole('button', { name: 'Kirim lagi (permintaan sama)' })).toBeVisible()
+    await page.getByRole('button', { name: 'Kirim lagi (permintaan sama)' }).click()
+    await expect(page.getByText('Unit sedang dipinjam')).toBeVisible()
+    expect(postCount).toBe(2)
+    expect(seenKeys.size).toBe(1)
+    await page.unrouteAll({ behavior: 'wait' })
+  })
+
+  test('serah terima R1: return tak-diketahui terkunci; kirim-ulang kunci sama tanpa kunci baru', async ({ page }) => {
+    const { email, ws, token, customer, item, asset, draft } = await seedCustodyReady(page, 'r1-ret-kunci')
+    const hold = await createHold(page, ws, draft.id, email, randomUUID(), asset.id)
+    expect(hold.status).toBe(201)
+    const hand = await handoverCustody(page, ws, draft.id, email, randomUUID(), asset.id, (hold.body as HoldRow).id)
+    expect(hand.status).toBe(201)
+    await uiLogin(page, email)
+    await gotoAuthed(page, `/workspaces/${ws}/rental-custody/${draft.id}`, email)
+    await expect(page.getByText('Unit sedang dipinjam')).toBeVisible()
+    await page.getByLabel('Utuh').check()
+    const seenKeys = new Set<string>()
+    let postCount = 0
+    let aborted = false
+    await page.route((url) => url.pathname.startsWith('/api/'), async (route) => {
+      const u = new URL(route.request().url())
+      if (route.request().method() === 'POST' && u.pathname.endsWith('/return')) {
+        postCount++
+        const k = route.request().headers()['idempotency-key']
+        if (k) seenKeys.add(k)
+        if (!aborted) { aborted = true; await route.abort() }
+        else await route.continue()
+      } else await route.continue()
+    })
+    await page.getByRole('button', { name: 'Kembalikan unit' }).click()
+    await page.getByRole('button', { name: 'Kembalikan unit' }).click()
+    await expect(page.getByRole('heading', { name: 'Hasil pengembalian tidak diketahui' })).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Mulai pengembalian baru' })).toHaveCount(0)
+    await expect(page.getByRole('button', { name: 'Kirim lagi (permintaan sama)' })).toBeVisible()
+    await page.getByRole('button', { name: 'Kirim lagi (permintaan sama)' }).click()
+    await expect(page.getByText('Sudah dikembalikan')).toBeVisible()
+    expect(postCount).toBe(2)
+    expect(seenKeys.size).toBe(1)
+    await page.unrouteAll({ behavior: 'wait' })
+  })
+
+  test('serah terima R1: GET holds menyelesaikan hold hilang; POST lama terpagari', async ({ page }) => {
+    const { email, ws, token, customer, item, asset, draft } = await seedCustodyReady(page, 'r1-hold-get')
+    await uiLogin(page, email)
+    let capturedKey = ''
+    let postCount = 0
+    let postCaptured = false
+    let releasePost!: () => void
+    const postHeld = new Promise<void>((resolve) => { releasePost = resolve })
+    const craftedHold = () => ({
+      id: randomUUID(), workspace_id: ws, draft_id: draft.id, asset_id: asset.id,
+      client_request_id: capturedKey, status: 'held',
+      starts_at: draft.starts_at, ends_at: draft.ends_at,
+      expires_at: new Date(Date.now() + 24 * 3600 * 1000).toISOString(),
+      created_at: new Date().toISOString(), updated_at: new Date().toISOString()
+    })
+    await page.route((url) => url.pathname.startsWith('/api/'), async (route) => {
+      const u = new URL(route.request().url())
+      if (route.request().method() === 'POST' && u.pathname.endsWith('/holds')) {
+        postCount++
+        capturedKey = route.request().headers()['idempotency-key'] ?? ''
+        postCaptured = true
+        await postHeld
+        await route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: 'transaksi gagal' }) })
+      } else if (route.request().method() === 'GET' && u.pathname.endsWith('/rental/holds')) {
+        if (!postCaptured) await route.continue()
+        else await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ items: [craftedHold()] }) })
+      } else await route.continue()
+    })
+    await gotoAuthed(page, `/workspaces/${ws}/rental-custody/${draft.id}`, email)
+    await page.getByLabel('Unit').selectOption(asset.id)
+    await page.getByRole('button', { name: 'Buat hold' }).click()
+    await page.getByRole('button', { name: 'Buat hold' }).click()
+    await expect.poll(() => capturedKey, { timeout: 10000 }).not.toBe('')
+    // GET baru (Muat ulang data) menyelesaikan attempt tanpa POST kedua.
+    await page.getByRole('button', { name: 'Muat ulang data' }).click()
+    await expect(page.getByText('Hold aktif untuk unit ini.')).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'Hasil pembuatan hold tidak diketahui' })).toHaveCount(0)
+    // POST lama akhirnya 500 — sudah dipagari, panel pemulihan tidak muncul.
+    releasePost()
+    await page.waitForTimeout(800)
+    await expect(page.getByRole('heading', { name: 'Hasil pembuatan hold tidak diketahui' })).toHaveCount(0)
+    await expect(page.getByText('Hold aktif untuk unit ini.')).toBeVisible()
+    expect(postCount).toBe(1)
+    await page.unrouteAll({ behavior: 'wait' })
+  })
+
+  test('serah terima R1: hold hilang dipulihkan lewat pagination manual holds', async ({ page }) => {
+    const { email, ws, token, customer, item, asset, draft } = await seedCustodyReady(page, 'r1-hold-page')
+    await uiLogin(page, email)
+    let capturedKey = ''
+    let postCount = 0
+    const filler = () => ({
+      id: randomUUID(), workspace_id: ws, draft_id: randomUUID(), asset_id: randomUUID(),
+      client_request_id: randomUUID(), status: 'held',
+      starts_at: '2047-01-01T00:00:00Z', ends_at: '2047-01-03T00:00:00Z',
+      expires_at: '2047-01-02T00:00:00Z',
+      created_at: '2047-01-01T00:00:00Z', updated_at: '2047-01-01T00:00:00Z'
+    })
+    const page1 = Array.from({ length: 50 }, () => filler())
+    const page2 = Array.from({ length: 50 }, () => filler())
+    const craftedHold = () => ({
+      id: randomUUID(), workspace_id: ws, draft_id: draft.id, asset_id: asset.id,
+      client_request_id: capturedKey, status: 'held',
+      starts_at: draft.starts_at, ends_at: draft.ends_at,
+      expires_at: new Date(Date.now() + 24 * 3600 * 1000).toISOString(),
+      created_at: new Date().toISOString(), updated_at: new Date().toISOString()
+    })
+    await page.route((url) => url.pathname.startsWith('/api/'), async (route) => {
+      const u = new URL(route.request().url())
+      if (route.request().method() === 'POST' && u.pathname.endsWith('/holds')) {
+        postCount++
+        capturedKey = route.request().headers()['idempotency-key'] ?? ''
+        await route.abort()
+      } else if (route.request().method() === 'GET' && u.pathname.endsWith('/rental/holds')) {
+        const off = Number(u.searchParams.get('offset') ?? '0')
+        if (off === 0) await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ items: page1 }) })
+        else if (off === 50) await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ items: page2 }) })
+        else if (off === 100) await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ items: [craftedHold()] }) })
+        else await route.continue()
+      } else await route.continue()
+    })
+    await gotoAuthed(page, `/workspaces/${ws}/rental-custody/${draft.id}`, email)
+    await page.getByLabel('Unit').selectOption(asset.id)
+    await page.getByRole('button', { name: 'Buat hold' }).click()
+    await page.getByRole('button', { name: 'Buat hold' }).click()
+    await expect(page.getByRole('heading', { name: 'Hasil pembuatan hold tidak diketahui' })).toBeVisible()
+    // Refresh memuat satu halaman berikut (offset 50) tanpa kecocokan:
+    // upaya tetap unknown, bukan bukti tidak ada.
+    await page.getByRole('button', { name: 'Muat ulang data' }).click()
+    await expect(page.getByRole('heading', { name: 'Hasil pembuatan hold tidak diketahui' })).toBeVisible()
+    await expect(page.getByText('Hold aktif untuk unit ini.')).toHaveCount(0)
+    // Pagination manual memuat halaman offset 100 yang berisi hold yang cocok.
+    await page.getByRole('button', { name: 'Muat lebih banyak hold' }).click()
+    await expect(page.getByText('Hold aktif untuk unit ini.')).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'Hasil pembuatan hold tidak diketahui' })).toHaveCount(0)
+    expect(postCount).toBe(1)
+    await page.unrouteAll({ behavior: 'wait' })
+  })
+
+  test('serah terima R1: GET custody gagal/cacat memblokir kirim pertama; no-custody membuka kembali', async ({ page }) => {
+    const { email, ws, token, customer, item, asset, draft } = await seedCustodyReady(page, 'r1-cust-miss')
+    await uiLogin(page, email)
+    let custodyMode: 'real' | 'fail500' | 'malformed' = 'fail500'
+    let holdPostAttempts = 0
+    let handPostAttempts = 0
+    await page.route((url) => url.pathname.startsWith('/api/'), async (route) => {
+      const u = new URL(route.request().url())
+      if (route.request().method() === 'GET' && u.pathname.endsWith('/custody')) {
+        if (custodyMode === 'fail500') await route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: 'gagal' }) })
+        else if (custodyMode === 'malformed') await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({}) })
+        else await route.continue()
+      } else if (route.request().method() === 'POST' && u.pathname.endsWith('/holds')) {
+        holdPostAttempts++
+        await route.continue()
+      } else if (route.request().method() === 'POST' && u.pathname.endsWith('/handover')) {
+        handPostAttempts++
+        await route.continue()
+      } else await route.continue()
+    })
+    await gotoAuthed(page, `/workspaces/${ws}/rental-custody/${draft.id}`, email)
+    await page.getByLabel('Unit').selectOption(asset.id)
+    // GET custody gagal: pembuka hold tidak tampil (bukan tanpa-custody).
+    await expect(page.getByRole('button', { name: 'Buat hold' })).toHaveCount(0)
+    // GET no-custody spesifik berhasil: alur normal dapat dilanjutkan.
+    custodyMode = 'real'
+    await page.getByRole('button', { name: 'Muat ulang data' }).click()
+    await expect(page.getByRole('button', { name: 'Buat hold' })).toBeVisible()
+    // Panel dibuka, lalu GET custody cacat: tombol konfirmasi terkunci
+    // dan handler menolak kiriman pertama (klik sintetis pada tombol
+    // nonaktif tetap memicu handler Vue — bukti ada di handler, bukan
+    // hanya di atribut disabled).
+    await page.getByRole('button', { name: 'Buat hold' }).click()
+    await expect(page.getByRole('heading', { name: 'Konfirmasi pembuatan hold' })).toBeVisible()
+    custodyMode = 'malformed'
+    await page.getByRole('button', { name: 'Muat ulang data' }).click()
+    await expect(page.getByRole('button', { name: 'Buat hold' })).toBeDisabled()
+    await page.evaluate(() => {
+      const btn = Array.from(document.querySelectorAll('button')).find(b => b.textContent?.trim() === 'Buat hold')
+      btn?.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
+    })
+    await page.waitForTimeout(500)
+    expect(holdPostAttempts).toBe(0)
+    custodyMode = 'real'
+    await page.getByRole('button', { name: 'Muat ulang data' }).click()
+    await expect(page.getByRole('button', { name: 'Buat hold' })).toBeEnabled()
+    await page.getByRole('button', { name: 'Buat hold' }).click()
+    await expect(page.getByText('Hold aktif untuk unit ini.')).toBeVisible()
+    expect(holdPostAttempts).toBe(1)
+    // Handover: panel dibuka, GET custody gagal, kirim pertama terkunci.
+    await page.getByRole('button', { name: 'Serahkan unit' }).click()
+    await expect(page.getByRole('heading', { name: 'Konfirmasi serah terima' })).toBeVisible()
+    custodyMode = 'fail500'
+    await page.getByRole('button', { name: 'Muat ulang data' }).click()
+    await expect(page.getByRole('button', { name: 'Serahkan unit' })).toBeDisabled()
+    await page.evaluate(() => {
+      const btn = Array.from(document.querySelectorAll('button')).find(b => b.textContent?.trim() === 'Serahkan unit')
+      btn?.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
+    })
+    await page.waitForTimeout(500)
+    expect(handPostAttempts).toBe(0)
+    custodyMode = 'real'
+    await page.getByRole('button', { name: 'Muat ulang data' }).click()
+    await expect(page.getByRole('button', { name: 'Serahkan unit' })).toBeEnabled()
+    await page.getByRole('button', { name: 'Serahkan unit' }).click()
+    await expect(page.getByText('Unit sedang dipinjam')).toBeVisible()
+    expect(handPostAttempts).toBe(1)
+    await page.unrouteAll({ behavior: 'wait' })
+  })
+
   test('screenshot f2-ui-06: tiga utama + tanpa-fakta + tanpa-izin + tak-diketahui + muat + galat + manifest', async ({ page }) => {
     const mkdirSync = (await import('node:fs')).mkdirSync
     const writeFileSync = (await import('node:fs')).writeFileSync

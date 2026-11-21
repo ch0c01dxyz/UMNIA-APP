@@ -1,11 +1,12 @@
 <script setup lang="ts">
 // Draf sewa workspace (GET/POST /workspaces/{id}/rental/contracts +
 // GET pelanggan/katalog). LIST+CREATE saja; tanpa detail/edit/hapus,
-// tanpa stok/unit/ketersediaan, tanpa holds, tanpa pembayaran. Harga
-// draf dibaca/dicatat di halaman "Harga draf" lewat tautan "Lihat harga"
-// per baris riwayat; serah terima/pengembalian di halaman "Serah terima"
-// lewat tautan "Serah terima" per baris riwayat; halaman ini sendiri
-// tidak menampilkan quote/harga atau custody. Draf TIDAK mereservasi
+// tanpa stok/unit/ketersediaan, tanpa holds. Harga draf dibaca/dicatat
+// di halaman "Harga draf" lewat tautan "Lihat harga" per baris riwayat;
+// serah terima/pengembalian di halaman "Serah terima" lewat tautan
+// "Serah terima" per baris riwayat; pembayaran/pembalikan di halaman
+// "Pembayaran" lewat tautan "Pembayaran" per baris riwayat; halaman ini
+// sendiri tidak menampilkan quote/harga atau custody. Draf TIDAK mereservasi
 // barang, TIDAK menjamin ketersediaan, TIDAK memilih unit fisik, dan
 // TIDAK mengunci harga — salinan itu tampil tetap di halaman.
 //
@@ -1186,7 +1187,7 @@ async function resendCreate() {
           <p v-if="refreshing" role="status">Memuat daftar…</p>
           <p v-else-if="items.length === 0 && listLoaded && !reloadError" class="muted">Belum ada draf.</p>
           <ul v-else class="plain">
-            <li v-for="d in items" :key="d.id"><strong>{{ customerLabel(d.customer_id) }} — {{ catalogLabel(d.catalog_item_id) }}</strong><br>Periode yang dicatat: mulai {{ d.starts_at }}; berakhir {{ d.ends_at }} (UTC)<br>Status: Draf<br><NuxtLink class="btn btn-secondary" :to="`/workspaces/${wsId}/rental-prices/${d.id}`">Lihat harga</NuxtLink> <NuxtLink class="btn btn-secondary" :to="`/workspaces/${wsId}/rental-custody/${d.id}`">Serah terima</NuxtLink></li>
+            <li v-for="d in items" :key="d.id"><strong>{{ customerLabel(d.customer_id) }} — {{ catalogLabel(d.catalog_item_id) }}</strong><br>Periode yang dicatat: mulai {{ d.starts_at }}; berakhir {{ d.ends_at }} (UTC)<br>Status: Draf<br><NuxtLink class="btn btn-secondary" :to="`/workspaces/${wsId}/rental-prices/${d.id}`">Lihat harga</NuxtLink> <NuxtLink class="btn btn-secondary" :to="`/workspaces/${wsId}/rental-custody/${d.id}`">Serah terima</NuxtLink> <NuxtLink class="btn btn-secondary" :to="`/workspaces/${wsId}/rental-payments/${d.id}`">Pembayaran</NuxtLink></li>
           </ul>
           <p v-if="loadMoreError" class="alert" role="alert">{{ loadMoreError }}</p>
           <p v-if="hasMore">

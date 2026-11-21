@@ -1238,4 +1238,258 @@ test.describe.serial('proxy + sesi', () => {
     expect(deadBad.status).toBe(400)
     expect(deadBad.body).toContain('permintaan tidak valid')
   })
+
+  test('proxy: pembayaran GET payments + POST 4 tulis diteruskan + replay + kunci', async ({ request }) => {
+    const grantCli = process.env.E2E_GRANT_CLI || ''
+    const operatorUrl = process.env.E2E_OPERATOR_DATABASE_URL || ''
+    expect(grantCli.length).toBeGreaterThan(0)
+    expect(operatorUrl.length).toBeGreaterThan(0)
+    const auth = { Authorization: `Bearer ${ownerToken}` }
+    for (const mod of ['rental.basic', 'finance.basic']) {
+      const out = execFileSync(grantCli, ['--workspace', wsId, '--module', mod, '--version', '0.1.0', '--reason', 'tes E2E proxy pembayaran'], {
+        encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'],
+        env: { ...process.env, UMNIA_OPERATOR_DATABASE_URL: operatorUrl },
+      })
+      expect(out.startsWith('granted ') || out.startsWith('already_granted') || out.startsWith('legacy_existing')).toBe(true)
+      const act = await request.post(`/api/workspaces/${wsId}/modules/${mod}/activate`, {
+        headers: auth, data: { version: '0.1.0' }
+      })
+      expect(act.status()).toBe(200)
+    }
+    // Manajer kedua untuk approval dua aktor (lewat API undangan).
+    const mgr2Email = `proxy-man2-${RUN}@e2e.umnia.local`
+    const invite = await request.post(`/api/workspaces/${wsId}/invites`, {
+      headers: auth, data: { email: mgr2Email, role: 'manager' }
+    })
+    expect(invite.status()).toBe(201)
+    const inviteToken = ((await invite.json()) as { token: string }).token
+    const reg2 = await request.post('/api/auth/register', { data: { email: mgr2Email, password: PASSWORD } })
+    expect(reg2.status()).toBe(201)
+    const login2 = await request.post('/api/auth/login', { data: { email: mgr2Email, password: PASSWORD } })
+    expect(login2.status()).toBe(200)
+    const mgr2Token = ((await login2.json()) as { token: string }).token
+    const accept = await request.post('/api/invites/accept', {
+      headers: { Authorization: `Bearer ${mgr2Token}` },
+      data: { workspace_id: wsId, token: inviteToken }
+    })
+    expect(accept.status()).toBe(200)
+    const auth2 = { Authorization: `Bearer ${mgr2Token}` }
+    const customer = await request.post(`/api/workspaces/${wsId}/customers`, {
+      headers: auth, data: { display_name: `Proxy Pembayaran Pelanggan ${RUN}` }
+    })
+    expect(customer.status()).toBe(201)
+    const customerId = ((await customer.json()) as { id: string }).id
+    const item = await request.post(`/api/workspaces/${wsId}/catalog/items`, {
+      headers: auth, data: { sku: 'PRX-PAY', name: 'Proxy Pembayaran Barang', unit: 'pcs' }
+    })
+    expect(item.status()).toBe(201)
+    const itemId = ((await item.json()) as { id: string }).id
+    const price = await request.post(`/api/workspaces/${wsId}/catalog/items/${itemId}/prices`, {
+      headers: { ...auth, 'Idempotency-Key': `prx-pay-price-${RUN}` },
+      data: { valid_from: '2047-01-01T00:00:00Z', valid_to: '2047-02-01T00:00:00Z', amount_minor: '150000', currency: 'IDR' }
+    })
+    expect(price.status()).toBe(201)
+    const mkDraft = async (from: string, to: string, key: string) => {
+      const d = await request.post(`/api/workspaces/${wsId}/rental/contracts`, {
+        headers: { ...auth, 'Idempotency-Key': key },
+        data: { customer_id: customerId, catalog_item_id: itemId, starts_at: from, ends_at: to }
+      })
+      expect(d.status()).toBe(201)
+      return ((await d.json()) as { id: string }).id
+    }
+    const mkFact = async (draftId: string, key: string) => {
+      const q = await request.get(`/api/workspaces/${wsId}/rental/contracts/${draftId}/quote`, { headers: auth })
+      expect(q.status()).toBe(200)
+      const qb = (await q.json()) as { price_version_id: string, total_minor: string }
+      const f = await request.post(`/api/workspaces/${wsId}/rental/contracts/${draftId}/accept-price`, {
+        headers: { ...auth, 'Idempotency-Key': key },
+        data: { expected_price_version_id: qb.price_version_id, expected_total_minor: qb.total_minor }
+      })
+      expect(f.status()).toBe(201)
+      return ((await f.json()) as { id: string }).id
+    }
+    const draftId = await mkDraft('2047-01-01T00:00:00Z', '2047-01-03T00:00:00Z', `prx-pay-draft-${RUN}`)
+    const factId = await mkFact(draftId, `prx-pay-fact-${RUN}`)
+    const draftNoFact = await mkDraft('2047-01-05T00:00:00Z', '2047-01-07T00:00:00Z', `prx-pay-draft-nf-${RUN}`)
+    const ghost = randomUUID()
+    // GET awal: total 300000, paid 0, outstanding 300000, daftar kosong.
+    const hist0 = await request.get(`/api/workspaces/${wsId}/rental/contracts/${draftId}/payments`, { headers: auth })
+    expect(hist0.status()).toBe(200)
+    const h0 = (await hist0.json()) as { rental_contract_id: string, rental_agreed_price_id: string, currency: string, total_minor: string, paid_minor: string, outstanding_minor: string, payments: unknown[], reversals: unknown[], pending_payment_proposals: unknown[], pending_reversal_proposals: unknown[] }
+    expect(h0.rental_contract_id).toBe(draftId)
+    expect(h0.rental_agreed_price_id).toBe(factId)
+    expect(h0.currency).toBe('IDR')
+    expect(h0.total_minor).toBe('300000')
+    expect(h0.paid_minor).toBe('0')
+    expect(h0.outstanding_minor).toBe('300000')
+    expect(h0.payments).toEqual([])
+    expect(h0.pending_payment_proposals).toEqual([])
+    // Draf tanpa fakta: GET 409; draf hilang: GET 404.
+    const noFact = await request.get(`/api/workspaces/${wsId}/rental/contracts/${draftNoFact}/payments`, { headers: auth })
+    expect(noFact.status()).toBe(409)
+    expect(((await noFact.json()) as { error: string }).error).toBe('harga disepakati belum ada')
+    const missing = await request.get(`/api/workspaces/${wsId}/rental/contracts/${ghost}/payments`, { headers: auth })
+    expect(missing.status()).toBe(404)
+    expect(((await missing.json()) as { error: string }).error).toBe('draft tidak ditemukan')
+    // Tanpa kunci: backend menolak 400 — proxy tidak membuat kunci.
+    const noKey = await request.post(`/api/workspaces/${wsId}/rental/contracts/${draftId}/payment-proposals`, {
+      headers: auth, data: { amount_minor: '100000', currency: 'IDR', method: 'cash' }
+    })
+    expect(noKey.status()).toBe(400)
+    const propKey = `prx-pay-prop-${RUN}`
+    const prop = await request.post(`/api/workspaces/${wsId}/rental/contracts/${draftId}/payment-proposals`, {
+      headers: { ...auth, 'Idempotency-Key': propKey },
+      data: { amount_minor: '100000', currency: 'IDR', method: 'transfer', reference: 'INV-1' }
+    })
+    expect(prop.status()).toBe(201)
+    const propBody = (await prop.json()) as { id: string, rental_contract_id: string, rental_agreed_price_id: string, amount_minor: string, currency: string, method: string, reference: string | null, proposed_by: string, client_request_id: string, status: string }
+    expect(propBody.rental_contract_id).toBe(draftId)
+    expect(propBody.rental_agreed_price_id).toBe(factId)
+    expect(propBody.amount_minor).toBe('100000')
+    expect(propBody.currency).toBe('IDR')
+    expect(propBody.method).toBe('transfer')
+    expect(propBody.reference).toBe('INV-1')
+    expect(propBody.client_request_id).toBe(propKey)
+    expect(propBody.status).toBe('pending')
+    const propReplay = await request.post(`/api/workspaces/${wsId}/rental/contracts/${draftId}/payment-proposals`, {
+      headers: { ...auth, 'Idempotency-Key': propKey },
+      data: { amount_minor: '100000', currency: 'IDR', method: 'transfer', reference: 'INV-1' }
+    })
+    expect(propReplay.status()).toBe(200)
+    expect(((await propReplay.json()) as { id: string }).id).toBe(propBody.id)
+    const propMisuse = await request.post(`/api/workspaces/${wsId}/rental/contracts/${draftId}/payment-proposals`, {
+      headers: { ...auth, 'Idempotency-Key': propKey },
+      data: { amount_minor: '50000', currency: 'IDR', method: 'cash' }
+    })
+    expect(propMisuse.status()).toBe(409)
+    expect(((await propMisuse.json()) as { error: string }).error).toBe('kunci idempotency sudah dipakai untuk permintaan yang berbeda')
+    // Self-approval → 403; body approval bukan {} → 400.
+    const selfAppr = await request.post(`/api/workspaces/${wsId}/rental/contracts/${draftId}/payment-proposals/${propBody.id}/approvals`, {
+      headers: { ...auth, 'Idempotency-Key': `prx-pay-self-${RUN}` }, data: {}
+    })
+    expect(selfAppr.status()).toBe(403)
+    expect(((await selfAppr.json()) as { error: string }).error).toBe('penyetuju harus berbeda dari pengusul')
+    const badBody = await request.post(`/api/workspaces/${wsId}/rental/contracts/${draftId}/payment-proposals/${propBody.id}/approvals`, {
+      headers: { ...auth2, 'Idempotency-Key': `prx-pay-badbody-${RUN}` }, data: { amount_minor: '100000' }
+    })
+    expect(badBody.status()).toBe(400)
+    const apprKey = `prx-pay-appr-${RUN}`
+    const appr = await request.post(`/api/workspaces/${wsId}/rental/contracts/${draftId}/payment-proposals/${propBody.id}/approvals`, {
+      headers: { ...auth2, 'Idempotency-Key': apprKey }, data: {}
+    })
+    expect(appr.status()).toBe(201)
+    const apprBody = (await appr.json()) as { id: string, proposal_id: string, amount_minor: string, client_request_id: string, reversed: boolean, reversal_id: string | null }
+    expect(apprBody.proposal_id).toBe(propBody.id)
+    expect(apprBody.amount_minor).toBe('100000')
+    expect(apprBody.client_request_id).toBe(apprKey)
+    expect(apprBody.reversed).toBe(false)
+    expect(apprBody.reversal_id).toBeNull()
+    const apprReplay = await request.post(`/api/workspaces/${wsId}/rental/contracts/${draftId}/payment-proposals/${propBody.id}/approvals`, {
+      headers: { ...auth2, 'Idempotency-Key': apprKey }, data: {}
+    })
+    expect(apprReplay.status()).toBe(200)
+    expect(((await apprReplay.json()) as { id: string }).id).toBe(apprBody.id)
+    const apprAgain = await request.post(`/api/workspaces/${wsId}/rental/contracts/${draftId}/payment-proposals/${propBody.id}/approvals`, {
+      headers: { ...auth2, 'Idempotency-Key': `prx-pay-appr2-${RUN}` }, data: {}
+    })
+    expect(apprAgain.status()).toBe(409)
+    expect(((await apprAgain.json()) as { error: string }).error).toBe('proposal sudah disetujui')
+    // Kasir: GET 200, tulis 403.
+    const cashierAuth = { Authorization: `Bearer ${otherToken}` }
+    const cashierGet = await request.get(`/api/workspaces/${wsId}/rental/contracts/${draftId}/payments`, { headers: cashierAuth })
+    expect(cashierGet.status()).toBe(200)
+    const cashierProp = await request.post(`/api/workspaces/${wsId}/rental/contracts/${draftId}/payment-proposals`, {
+      headers: { ...cashierAuth, 'Idempotency-Key': `prx-pay-cash-${RUN}` },
+      data: { amount_minor: '1000', currency: 'IDR', method: 'cash' }
+    })
+    expect(cashierProp.status()).toBe(403)
+    // Over-cap: usulan 400000 boleh, approval → 409.
+    const bigProp = await request.post(`/api/workspaces/${wsId}/rental/contracts/${draftId}/payment-proposals`, {
+      headers: { ...auth, 'Idempotency-Key': `prx-pay-big-${RUN}` },
+      data: { amount_minor: '400000', currency: 'IDR', method: 'cash' }
+    })
+    expect(bigProp.status()).toBe(201)
+    const bigAppr = await request.post(`/api/workspaces/${wsId}/rental/contracts/${draftId}/payment-proposals/${((await bigProp.json()) as { id: string }).id}/approvals`, {
+      headers: { ...auth2, 'Idempotency-Key': `prx-pay-big-appr-${RUN}` }, data: {}
+    })
+    expect(bigAppr.status()).toBe(409)
+    expect(((await bigAppr.json()) as { error: string }).error).toBe('pembayaran melebihi sisa')
+    // Pembalikan penuh: usulkan 201, replay 200, setujui 201, replay 200.
+    const revKey = `prx-pay-rev-${RUN}`
+    const rev = await request.post(`/api/workspaces/${wsId}/rental/contracts/${draftId}/payments/${apprBody.id}/reversal-proposals`, {
+      headers: { ...auth, 'Idempotency-Key': revKey }, data: { reason: 'Salah catat' }
+    })
+    expect(rev.status()).toBe(201)
+    const revBody = (await rev.json()) as { id: string, payment_id: string, reason: string, client_request_id: string, status: string }
+    expect(revBody.payment_id).toBe(apprBody.id)
+    expect(revBody.reason).toBe('Salah catat')
+    expect(revBody.client_request_id).toBe(revKey)
+    expect(revBody.status).toBe('pending')
+    const revReplay = await request.post(`/api/workspaces/${wsId}/rental/contracts/${draftId}/payments/${apprBody.id}/reversal-proposals`, {
+      headers: { ...auth, 'Idempotency-Key': revKey }, data: { reason: 'Salah catat' }
+    })
+    expect(revReplay.status()).toBe(200)
+    expect(((await revReplay.json()) as { id: string }).id).toBe(revBody.id)
+    const revApprKey = `prx-pay-revappr-${RUN}`
+    const revAppr = await request.post(`/api/workspaces/${wsId}/rental/contracts/${draftId}/payments/${apprBody.id}/reversal-proposals/${revBody.id}/approvals`, {
+      headers: { ...auth2, 'Idempotency-Key': revApprKey }, data: {}
+    })
+    expect(revAppr.status()).toBe(201)
+    const revApprBody = (await revAppr.json()) as { id: string, payment_id: string, reversal_proposal_id: string, reason: string, client_request_id: string }
+    expect(revApprBody.payment_id).toBe(apprBody.id)
+    expect(revApprBody.reversal_proposal_id).toBe(revBody.id)
+    expect(revApprBody.reason).toBe('Salah catat')
+    expect(revApprBody.client_request_id).toBe(revApprKey)
+    const revApprReplay = await request.post(`/api/workspaces/${wsId}/rental/contracts/${draftId}/payments/${apprBody.id}/reversal-proposals/${revBody.id}/approvals`, {
+      headers: { ...auth2, 'Idempotency-Key': revApprKey }, data: {}
+    })
+    expect(revApprReplay.status()).toBe(200)
+    expect(((await revApprReplay.json()) as { id: string }).id).toBe(revApprBody.id)
+    // GET akhir: pembayaran reversed + reversal_id; paid kembali 0.
+    const hist1 = await request.get(`/api/workspaces/${wsId}/rental/contracts/${draftId}/payments`, { headers: auth })
+    expect(hist1.status()).toBe(200)
+    const h1 = (await hist1.json()) as { paid_minor: string, outstanding_minor: string, payments: Array<{ id: string, reversed: boolean, reversal_id: string | null }>, reversals: Array<{ id: string, payment_id: string }> }
+    expect(h1.paid_minor).toBe('0')
+    expect(h1.outstanding_minor).toBe('300000')
+    expect(h1.payments.length).toBe(1)
+    expect(h1.payments[0].reversed).toBe(true)
+    expect(h1.payments[0].reversal_id).toBe(revApprBody.id)
+    expect(h1.reversals.length).toBe(1)
+    expect(h1.reversals[0].payment_id).toBe(apprBody.id)
+  })
+
+  test('proxy: query pembayaran 400; UUID buruk 400/404; ringkasan di luar allowlist; upstream mati 502', async ({ request }) => {
+    const auth = { Authorization: `Bearer ${ownerToken}` }
+    const ghost = randomUUID()
+    for (const q of ['?limit=10', '?foo=1']) {
+      const res = await request.get(`/api/workspaces/${wsId}/rental/contracts/${ghost}/payments${q}`, { headers: auth })
+      expect(res.status(), `payments${q}`).toBe(400)
+      expect(await res.text()).toContain('permintaan tidak valid')
+    }
+    const postQ = await request.post(`/api/workspaces/${wsId}/rental/contracts/${ghost}/payment-proposals?limit=10`, {
+      headers: { ...auth, 'Idempotency-Key': `prx-pay-q-${RUN}` }, data: { amount_minor: '1000', currency: 'IDR', method: 'cash' }
+    })
+    expect(postQ.status()).toBe(400)
+    const badGet = await rawGet(`/api/workspaces/${wsId}/rental/contracts/bukan-uuid/payments`, 3000, auth)
+    expect(badGet.status).toBe(404)
+    const badPost = await request.post(`/api/workspaces/${wsId}/rental/contracts/bukan-uuid/payment-proposals`, {
+      headers: { ...auth, 'Idempotency-Key': `prx-pay-q2-${RUN}` }, data: { amount_minor: '1000', currency: 'IDR', method: 'cash' }
+    })
+    expect(badPost.status()).toBe(404)
+    const badAppr = await request.post(`/api/workspaces/${wsId}/rental/contracts/${ghost}/payment-proposals/bukan-uuid/approvals`, {
+      headers: { ...auth, 'Idempotency-Key': `prx-pay-q3-${RUN}` }, data: {}
+    })
+    expect(badAppr.status()).toBe(404)
+    const summary = await request.get(`/api/workspaces/${wsId}/finance/summary`, { headers: auth })
+    expect(summary.status()).toBe(404)
+    const extra = await rawGet(`/api/workspaces/${wsId}/rental/contracts/${ghost}/payments/extra`, 3000, auth)
+    expect(extra.status).toBe(404)
+    const dead = await rawGet(`/api/workspaces/${wsId}/rental/contracts/${ghost}/payments`, 3001, auth)
+    expect(dead.status).toBe(502)
+    expect(dead.body).toContain('layanan tidak tersedia')
+    expect(dead.body).not.toContain('127.0.0.1')
+    const deadBad = await rawGet(`/api/workspaces/${wsId}/rental/contracts/${ghost}/payments?limit=0`, 3001, auth)
+    expect(deadBad.status).toBe(400)
+    expect(deadBad.body).toContain('permintaan tidak valid')
+  })
 })

@@ -1,0 +1,61 @@
+{
+  "generated_by": "owner-flow.spec.ts f2-ui-06",
+  "files": [
+    {
+      "file": "01-custody-360.png",
+      "viewport": "360",
+      "state": "out-live",
+      "provenance": "live",
+      "sha256": "f759b52f16ab84ac0fb063c97c968ff7e2878f416226f04321d527801649d7fa"
+    },
+    {
+      "file": "01-custody-768.png",
+      "viewport": "768",
+      "state": "out-live",
+      "provenance": "live",
+      "sha256": "fd5de39f7bfe0b8fa1178c845062f2f6709183adda3eb4f32007b247bdcfc5e7"
+    },
+    {
+      "file": "01-custody-1440.png",
+      "viewport": "1440",
+      "state": "out-live",
+      "provenance": "live",
+      "sha256": "cc229fff23a52e7f108e0f8b3f8331c62ce5be73b2c8db907bb86eecf7b0c6b0"
+    },
+    {
+      "file": "04-custody-nofact-360.png",
+      "viewport": "360",
+      "state": "nofact-live",
+      "provenance": "live",
+      "sha256": "b095beaf0fa7b6c80310e30ad014185c170625ec831a26a194cfb2c232d7e8f8"
+    },
+    {
+      "file": "05-custody-noperm-360.png",
+      "viewport": "360",
+      "state": "no-permission-live",
+      "provenance": "live",
+      "sha256": "7da1e8030260f621d1507ca16f4cd03dfaee5e0551b6d3a2a2faf308a67a05ce"
+    },
+    {
+      "file": "06-custody-unknown-360.png",
+      "viewport": "360",
+      "state": "unknown-mocked",
+      "provenance": "mocked-route",
+      "sha256": "6f421b2e8c704ceaa9206b91fbf03495e512f1980ac60ef9a1940a4114284fbb"
+    },
+    {
+      "file": "07-custody-loading-360.png",
+      "viewport": "360",
+      "state": "loading-mocked",
+      "provenance": "mocked-route",
+      "sha256": "c1cb1895968540590311b5025556a6205bceb8fb746ce4fcf554ca8eeae43b76"
+    },
+    {
+      "file": "08-custody-error-360.png",
+      "viewport": "360",
+      "state": "error-mocked",
+      "provenance": "mocked-route",
+      "sha256": "9b75fbe21a7afe6a6d3c14ca4a25b45400939d9d80595f318239d7b2d21e5b72"
+    }
+  ]
+}

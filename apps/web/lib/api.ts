@@ -34,6 +34,9 @@ export function resolveLoginTarget(raw: string | null | undefined): string {
   // keduanya divalidasi UUID; bukan pelonggaran pola umum.
   const price = path.match(/^\/workspaces\/([0-9a-f-]{36})\/rental-prices\/([0-9a-f-]{36})$/)
   if (price && UUID_RE.test(price[1]) && UUID_RE.test(price[2])) return path
+  // Serah terima (F2-UI-06): rute sibling dengan pola yang sama.
+  const custody = path.match(/^\/workspaces\/([0-9a-f-]{36})\/rental-custody\/([0-9a-f-]{36})$/)
+  if (custody && UUID_RE.test(custody[1]) && UUID_RE.test(custody[2])) return path
   if (path === '/invites/accept') {
     const params = new URLSearchParams(query)
     const ws = params.get('workspace_id')

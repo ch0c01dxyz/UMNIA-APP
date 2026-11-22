@@ -142,6 +142,21 @@ test.describe.serial('proxy + sesi', () => {
     await ctx.dispose()
   })
 
+  // The beforeAll workspace has no agreed-price facts until later serial cases run.
+  test('UI08 proxy: authenticated GET reads the empty workspace payment summary', async ({ request }) => {
+    const summaryPath = `/api/workspaces/${wsId}/finance/summary`
+    const summary = await request.get(summaryPath, { headers: { Authorization: `Bearer ${ownerToken}` }, maxRedirects: 0 })
+    expect(summary.status()).toBe(200)
+    expect(await summary.json()).toEqual(expect.objectContaining({
+      workspace_id: wsId, observed_at: expect.any(String), currencies: []
+    }))
+    const unauthenticated = await request.get(summaryPath, { maxRedirects: 0 })
+    expect(unauthenticated.status()).toBe(401)
+    for (const response of [summary, unauthenticated]) {
+      expect(response.headers()['cache-control']).toBe('private, no-store')
+    }
+  })
+
   test('proxy: healthz + login diteruskan apa adanya', async ({ request }) => {
     const health = await request.get('/api/healthz')
     expect(health.status()).toBe(200)
@@ -1458,7 +1473,7 @@ test.describe.serial('proxy + sesi', () => {
     expect(h1.reversals[0].payment_id).toBe(apprBody.id)
   })
 
-  test('proxy: query pembayaran 400; UUID buruk 400/404; ringkasan di luar allowlist; upstream mati 502', async ({ request }) => {
+  test('proxy: query pembayaran 400; UUID buruk 400/404; upstream mati 502', async ({ request }) => {
     const auth = { Authorization: `Bearer ${ownerToken}` }
     const ghost = randomUUID()
     for (const q of ['?limit=10', '?foo=1']) {
@@ -1480,8 +1495,6 @@ test.describe.serial('proxy + sesi', () => {
       headers: { ...auth, 'Idempotency-Key': `prx-pay-q3-${RUN}` }, data: {}
     })
     expect(badAppr.status()).toBe(404)
-    const summary = await request.get(`/api/workspaces/${wsId}/finance/summary`, { headers: auth })
-    expect(summary.status()).toBe(404)
     const extra = await rawGet(`/api/workspaces/${wsId}/rental/contracts/${ghost}/payments/extra`, 3000, auth)
     expect(extra.status).toBe(404)
     const dead = await rawGet(`/api/workspaces/${wsId}/rental/contracts/${ghost}/payments`, 3001, auth)
@@ -1492,4 +1505,27 @@ test.describe.serial('proxy + sesi', () => {
     expect(deadBad.status).toBe(400)
     expect(deadBad.body).toContain('permintaan tidak valid')
   })
+})
+
+test('UI08 proxy: only the queryless summary GET reaches the unavailable upstream', async () => {
+  const summaryPath = `/api/workspaces/${randomUUID()}/finance/summary`
+  const liveProxyPort = 3000
+  const deadProxyPort = 3001
+  const controls = [
+    ['GET', `${summaryPath}?`, 400],
+    ['GET', `${summaryPath}?currency=IDR`, 400],
+    ['GET', `${summaryPath}?limit=1`, 400],
+    ['POST', summaryPath, 404],
+    ['GET', '/api/workspaces/not-a-uuid/finance/summary', 404],
+    ['GET', `${summaryPath}/extra`, 404]
+  ] as const
+  for (const port of [liveProxyPort, deadProxyPort]) {
+    for (const [method, path, status] of controls) {
+      const response = await rawMethod(method, path, port)
+      expect(response.status, `${method} ${path} on ${port}`).toBe(status)
+    }
+  }
+  const dead = await rawGet(summaryPath, deadProxyPort)
+  expect(dead.status).toBe(502)
+  expect(JSON.parse(dead.body)).toEqual({ error: 'layanan tidak tersedia' })
 })

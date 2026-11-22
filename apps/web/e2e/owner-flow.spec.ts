@@ -9,7 +9,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { expect, test, type APIRequestContext, type Page } from '@playwright/test'
+import { expect, test, type APIRequestContext, type Page, type Route } from '@playwright/test'
 
 const RUN = `${Date.now().toString(36)}${Math.floor(Math.random() * 1296).toString(36)}`
 const PASSWORD = 'E2eUiTest123'
@@ -6978,6 +6978,430 @@ test.describe.serial('alur pemilik', () => {
     await page.waitForTimeout(1000)
     await expect(page.getByRole('heading', { name: 'Hasil persetujuan pembayaran tidak diketahui' })).toHaveCount(0)
     expect(countAudits(ws, 'rental_payment_posted')).toBe(1)
+  })
+
+  test.describe('Riwayat pembayaran terkendali', () => {
+    const stages = {
+      payment: ['Setujui', 'persetujuan pembayaran'],
+      reversal: ['Setujui pembalikan', 'persetujuan pembalikan'],
+      proposal: ['Usulkan pembalikan', 'usulan pembalikan']
+    } as const
+    type Stage = keyof typeof stages
+    type Rows = Partial<Pick<PaymentsHistoryDTO, 'payments' | 'reversals' | 'pending_payment_proposals' | 'pending_reversal_proposals'>>
+    type Read = Rows | 'failed' | 'malformed'
+    const notices = {
+      payment: 'Pembayaran untuk usulan ini sudah dicatat melalui permintaan lain.',
+      reversal: 'Catatan pembayaran ini sudah dibatalkan melalui permintaan lain.'
+    }
+
+    async function seedActors(page: Page) {
+      const { email, ws, token, fact } = await seedPaymentReady(page, 'r1')
+      const invite = async (role: string): Promise<string> => {
+        const address = `r1-pay-${role}-${RUN}@e2e.umnia.local`
+        await inviteManager(page, ws, address, email)
+        const res = await page.request.get(`/api/workspaces/${ws}/members`, { headers: { Authorization: `Bearer ${token}` } })
+        expect(res.status()).toBe(200)
+        const { members } = await res.json() as { members: { email: string, subject_id: string, role: string, status: string }[] }
+        const member = members.find(m => m.email === address && m.role === 'manager' && m.status === 'active')
+        if (!member) throw new Error(`Missing active R1 ${role} manager`)
+        return member.subject_id
+      }
+      const proposer = await invite('proposer')
+      const alternate = await invite('alternate')
+      return { email, ws, fact, actor: fact.accepted_by, proposer, alternate }
+    }
+    let fixture: Awaited<ReturnType<typeof seedActors>>
+    test.beforeAll(async ({ browser }, info) => {
+      const page = await browser.newPage({ baseURL: info.project.use.baseURL })
+      try { fixture = await seedActors(page) } finally { await page.close() }
+    })
+
+    function makeRecords() {
+      const { fact, actor, proposer } = fixture
+      const identity = { rental_contract_id: fact.rental_contract_id, proposed_by: proposer, proposed_at: fact.starts_at }
+      const fields = { ...identity, rental_agreed_price_id: fact.id, amount_minor: '100000', currency: fact.currency, method: 'transfer', reference: ' R1 ' }
+      const proposal: PaymentProposalDTO = { ...fields, id: randomUUID(), client_request_id: randomUUID(), status: 'pending' }
+      const payment: PaymentDTO = { ...fields, id: randomUUID(), proposal_id: proposal.id, approved_by: actor, approved_at: '2047-01-01T12:00:00Z', client_request_id: randomUUID(), reversed: false, reversal_id: null }
+      const reason = { ...identity, payment_id: payment.id, reason: 'Salah catat nominal', proposed_at: '2047-01-02T00:00:00Z' }
+      const reversalProposal: ReversalProposalDTO = { ...reason, id: randomUUID(), client_request_id: randomUUID(), status: 'pending' }
+      const reversal: ReversalDTO = { ...reason, id: randomUUID(), reversal_proposal_id: reversalProposal.id, approved_by: actor, approved_at: fact.ends_at, client_request_id: randomUUID() }
+      return { proposal, payment, reversalProposal, reversal }
+    }
+
+    function history(rows: Rows): PaymentsHistoryDTO {
+      const { fact } = fixture
+      const paid = (rows.payments ?? []).reduce((sum, p) => p.reversed ? sum : sum + BigInt(p.amount_minor), 0n)
+      return { rental_contract_id: fact.rental_contract_id, rental_agreed_price_id: fact.id, total_minor: fact.total_minor, currency: fact.currency,
+        paid_minor: String(paid), outstanding_minor: String(BigInt(fact.total_minor) - paid),
+        payments: [], reversals: [], pending_payment_proposals: [], pending_reversal_proposals: [], ...rows }
+    }
+
+    async function intercept(page: Page, initial: Rows, suffix: string) {
+      const workspace = `/api/workspaces/${fixture.ws}`
+      const contract = `${workspace}/rental/contracts/${fixture.fact.rental_contract_id}`
+      const writePath = contract + suffix
+      const readPath = `${contract}/payments`
+      const wire: { read: Read, reply: (route: Route) => Promise<void> | void } = {
+        read: initial, reply: route => route.fulfill({ status: 201, json: {} })
+      }
+      const posts: { url: string, key: string, body: string | null }[] = []
+      let loginExpected = true
+      await page.route('**/api/**', route => {
+        const request = route.request()
+        const { origin, pathname: path } = new URL(request.url())
+        if (origin !== new URL(page.url()).origin) return route.abort()
+        if (request.method() === 'GET' && path === readPath) {
+          if (wire.read === 'failed') return route.fulfill({ status: 503, json: { error: 'Riwayat tidak tersedia.' } })
+          return route.fulfill({ json: wire.read === 'malformed' ? {} : history(wire.read) })
+        }
+        if (request.method() === 'GET' && (path === workspace || path.startsWith(`${workspace}/`))) return route.continue()
+        if (loginExpected && request.method() === 'POST' && path === '/api/auth/login') {
+          loginExpected = false
+          return route.continue()
+        }
+        if (request.method() === 'POST') {
+          posts.push({ url: request.url(), key: request.headers()['idempotency-key'] ?? '', body: request.postData() })
+          if (path === writePath) return wire.reply(route)
+        }
+        return route.abort()
+      })
+      return { posts, wire, writePath, readPath }
+    }
+
+    async function openStage(page: Page, stage: Stage, records = makeRecords()) {
+      const { proposal, payment, reversalProposal } = records
+      const initial = stage === 'payment' ? { pending_payment_proposals: [proposal] }
+        : { payments: [payment], pending_reversal_proposals: stage === 'reversal' ? [reversalProposal] : [] }
+      const reversalPath = `/payments/${payment.id}/reversal-proposals`
+      const path = { payment: `/payment-proposals/${proposal.id}/approvals`, proposal: reversalPath, reversal: `${reversalPath}/${reversalProposal.id}/approvals` }
+      const traffic = await intercept(page, initial, path[stage])
+      const target = `/workspaces/${fixture.ws}/rental-payments/${fixture.fact.rental_contract_id}`
+      await page.goto(`/login?next=${encodeURIComponent(target)}`)
+      await page.getByLabel('Email').fill(fixture.email)
+      await page.getByLabel('Kata sandi').fill(PASSWORD)
+      await page.locator('form button[type="submit"]').click()
+      await expect(page).toHaveURL(target)
+      const [action, label] = stages[stage]
+      const button = { name: action, exact: true }
+      await page.getByRole('button', button).click()
+      const confirmation = page.getByRole('alert').filter({ has: page.getByRole('heading', { name: `Konfirmasi ${label}`, exact: true }) })
+      if (stage === 'proposal') await confirmation.getByLabel('Alasan pembalikan').fill(` ${reversalProposal.reason} `)
+      return { page, stage, records, traffic, button, label, confirmation, readPath: traffic.readPath,
+        reload: page.getByRole('button', { name: 'Muat ulang data', exact: true }) }
+    }
+    async function sendUncertain({ page, stage, records, traffic, button, label, confirmation, reload }: Awaited<ReturnType<typeof openStage>>) {
+      const { reversalProposal } = records
+      await confirmation.getByRole('button', button).click()
+      const panel = page.getByRole('alert').filter({ has: page.getByRole('heading', { name: `Hasil ${label} tidak diketahui`, exact: true }) })
+      await expect(panel, `Malformed first ${stage} POST must reach recovery before testing GET`).toBeVisible()
+      const body = stage === 'proposal' ? JSON.stringify({ reason: reversalProposal.reason }) : '{}'
+      expect(traffic.posts).toEqual([{ url: new URL(traffic.writePath, page.url()).href, key: expect.stringMatching(/\S/), body }])
+      return { ...records, ...traffic, page, stage, key: traffic.posts[0].key, panel,
+        retry: panel.getByRole('button', { name: 'Kirim lagi (permintaan sama)', exact: true }), reload }
+    }
+    async function begin(page: Page, stage: Stage, records = makeRecords()) {
+      return sendUncertain(await openStage(page, stage, records))
+    }
+    type Attempt = Awaited<ReturnType<typeof begin>>
+
+    async function afterRead(a: Pick<Attempt, 'page' | 'readPath' | 'reload'>, action: () => Promise<void>): Promise<void> {
+      await Promise.all([a.page.waitForResponse(r => new URL(r.url()).pathname === a.readPath && r.request().method() === 'GET'), action()])
+      await expect(a.reload).toBeEnabled()
+    }
+    async function refresh(a: Attempt, rows: Read): Promise<void> {
+      a.wire.read = rows
+      const before = a.posts.length
+      await afterRead(a, () => a.reload.click())
+      expect(a.posts, 'Refresh must not send a write').toHaveLength(before)
+    }
+    async function replay(a: Attempt): Promise<void> {
+      const before = a.posts.length
+      const [response] = await Promise.all([a.page.waitForResponse(r => new URL(r.url()).pathname === a.writePath && r.request().method() === 'POST'), a.retry.click()])
+      await response.finished()
+      expect(a.posts.slice(before), 'Retry must preserve the stage, key and raw bytes').toEqual([a.posts[0]])
+    }
+    async function locked(a: Attempt): Promise<void> {
+      await expect(a.panel).toBeVisible()
+      await expect(a.retry).toBeEnabled()
+      await expect(a.page.getByRole('button', { name: stages[a.stage][0], exact: true, disabled: false })).toHaveCount(0)
+      await expect(a.page.getByRole('button', { name: /^Mulai .* baru$/ })).toHaveCount(0)
+      await expect(a.page.getByText(/melalui permintaan lain\./)).toHaveCount(0)
+    }
+    async function retain(a: Attempt, label: string, rows: Rows): Promise<void> {
+      await test.step(label, async () => {
+        await refresh(a, rows)
+        await locked(a)
+        await replay(a)
+        await locked(a)
+      })
+    }
+    async function settled(a: Attempt, independent: boolean): Promise<void> {
+      await expect(a.panel).toHaveCount(0)
+      await expect(a.page.getByRole('button', { name: 'Kirim lagi (permintaan sama)' })).toHaveCount(0)
+      if (!independent) {
+        await expect(a.page.getByText(/melalui permintaan lain\./)).toHaveCount(0)
+        return
+      }
+      await expect(a.page.getByText(notices[a.stage === 'payment' ? 'payment' : 'reversal'], { exact: true })).toBeVisible()
+      await expect(a.page.getByText(/\bberhasil\b|(?:permintaan|persetujuan) (?:ini|Anda) (?:sudah |telah )?(?:dikonfirmasi|disetujui|dicatat)/i)).toHaveCount(0)
+    }
+
+    test('pembayaran R1-P1: konflik atau ambiguitas kunci sendiri mengunci persetujuan', async ({ page }) => {
+      const a = await begin(page, 'payment')
+      const own = { ...a.payment, client_request_id: a.key }
+      const conflict = { ...own, id: randomUUID(), amount_minor: '99999' }
+      const other = { ...a.payment, id: randomUUID(), approved_by: fixture.alternate }
+      const histories = { amount: [conflict], conflictFirst: [conflict, other], conflictLast: [other, conflict],
+        exactFirst: [own, conflict], exactLast: [conflict, own], duplicate: [own, { ...own, id: randomUUID() }],
+        wrongActor: [{ ...own, approved_by: fixture.alternate }] }
+      for (const [label, payments] of Object.entries(histories)) await retain(a, label, { payments })
+    })
+
+    test('pembayaran R1-P2: kunci lain harus menyalin usulan utuh meski aktor berbeda', async ({ page }) => {
+      const a = await begin(page, 'payment')
+      const other = { ...a.payment, approved_by: fixture.alternate }
+      const changes: Record<string, Partial<PaymentDTO>> = {
+        unrelated: { proposal_id: randomUUID() }, amount: { amount_minor: '99999' }, fact: { rental_agreed_price_id: randomUUID() },
+        currency: { currency: 'USD' }, method: { method: 'cash' }, reference: { reference: other.reference?.trim() ?? null },
+        nullReference: { reference: null }, proposer: { proposed_by: fixture.actor }, time: { proposed_at: other.approved_at },
+        selfApproval: { approved_by: other.proposed_by }
+      }
+      for (const [label, change] of Object.entries(changes)) await retain(a, label, { payments: [{ ...other, ...change }] })
+      await refresh(a, { payments: [other] })
+      await settled(a, true)
+    })
+
+    function linked(payment: PaymentDTO, reversal: ReversalDTO): Rows {
+      return { payments: [{ ...payment, reversed: true, reversal_id: reversal.id }], reversals: [reversal] }
+    }
+    test('pembayaran R1-R1: konflik alasan berkunci sama menang atas pembalikan pesaing', async ({ page }) => {
+      const a = await begin(page, 'reversal')
+      const own = { ...a.reversal, client_request_id: a.key }
+      const conflict = { ...own, id: randomUUID(), reason: 'Alasan berbeda' }
+      const other = { ...a.reversal, reversal_proposal_id: randomUUID(), approved_by: fixture.alternate, reason: 'Pembayaran ganda' }
+      await retain(a, 'same key, changed reason, valid backlink', linked(a.payment, conflict))
+      for (const reversals of [[conflict, other], [other, conflict]]) {
+        await retain(a, 'fully linked competitor cannot override same-key conflict', { ...linked(a.payment, other), reversals })
+      }
+      await retain(a, 'exact-looking row beside conflicting same-key row', { ...linked(a.payment, own), reversals: [own, conflict] })
+      await retain(a, 'same key requires the original approver', linked(a.payment, { ...own, approved_by: fixture.alternate }))
+    })
+
+    test('pembayaran R1-R2: kedua arah tautan harus membuktikan pembayaran yang tepat', async ({ page }) => {
+      const a = await begin(page, 'reversal')
+      for (const [origin, key] of [['own', a.key], ['independent', a.reversal.client_request_id]]) {
+        const reversal = { ...a.reversal, client_request_id: key }
+        const payment = { ...a.payment, reversed: true, reversal_id: reversal.id }
+        const unrelated = { ...payment, id: randomUUID(), proposal_id: randomUUID() }
+        const histories: Record<string, Rows> = {
+          orphan: { reversals: [reversal] }, wrongPayment: { payments: [unrelated], reversals: [reversal] },
+          flagOnly: { payments: [payment] }, notReversed: { payments: [{ ...payment, reversed: false }], reversals: [reversal] },
+          nullBacklink: { payments: [{ ...payment, reversal_id: null }], reversals: [reversal] },
+          wrongBacklink: { payments: [{ ...payment, reversal_id: randomUUID() }], reversals: [reversal] },
+          wrongForwardLink: { payments: [payment], reversals: [{ ...reversal, payment_id: unrelated.id }] },
+          unrelatedPair: linked(unrelated, { ...reversal, payment_id: unrelated.id, reversal_proposal_id: randomUUID() })
+        }
+        for (const [label, rows] of Object.entries(histories)) await retain(a, `${origin}: ${label}`, rows)
+      }
+    })
+
+    test('pembayaran R1-R3: usulan pembalikan sama berkunci lain harus utuh', async ({ page }) => {
+      const a = await begin(page, 'reversal')
+      const other = { ...a.reversal, approved_by: fixture.alternate }
+      const changes = { reason: { reason: 'Alasan berbeda' }, proposer: { proposed_by: fixture.actor },
+        time: { proposed_at: other.approved_at }, selfApproval: { approved_by: other.proposed_by } }
+      for (const [label, change] of Object.entries(changes)) await retain(a, label, linked(a.payment, { ...other, ...change }))
+      await refresh(a, linked(a.payment, other))
+      await settled(a, true)
+    })
+
+    for (const [id, stage, independent] of [
+      ['P3', 'payment', false], ['R6', 'reversal', false], ['P4', 'payment', true], ['R4', 'reversal', true]
+    ] as const) {
+      test(`pembayaran R1-${id}: aktor sama, ${independent ? 'permintaan lain' : 'bukti sendiri'} pada riwayat dibalik`, async ({ page }) => {
+        const a = await begin(page, stage)
+        const key = independent ? randomUUID() : a.key
+        const payment = stage === 'payment' ? { ...a.payment, client_request_id: key } : a.payment
+        const reversal = stage === 'reversal' ? { ...a.reversal, client_request_id: key } : a.reversal
+        await refresh(a, linked(payment, reversal))
+        await expect(page.getByText('Dibatalkan', { exact: true })).toBeVisible()
+        await settled(a, independent)
+        if (!independent) await expect(page.getByRole('heading', { level: 2, name: 'Pembayaran', exact: true })).toBeFocused()
+      })
+    }
+
+    test('pembayaran R1-R5: pembalikan pesaing tetap independen sesudah POST lama ditolak', async ({ page }) => {
+      const a = await begin(page, 'reversal')
+      const held: Route[] = []
+      a.wire.reply = route => { held.push(route) }
+      await a.retry.click()
+      await expect.poll(() => held.length).toBe(1)
+      const other = { ...a.reversal, reversal_proposal_id: randomUUID(), reason: 'Pembayaran ganda',
+        proposed_at: a.payment.approved_at, proposed_by: fixture.actor, approved_by: fixture.alternate }
+      try {
+        await refresh(a, { ...linked(a.payment, other), pending_reversal_proposals: [a.reversalProposal] })
+        await settled(a, true)
+        await expect(page.getByRole('button', { name: 'Setujui pembalikan', exact: true })).toBeDisabled()
+      } finally {
+        const [response] = await Promise.all([page.waitForResponse(r => r.request() === held[0].request()),
+          held[0].fulfill({ status: 409, json: { error: 'kunci idempotency sudah dipakai untuk permintaan yang berbeda' } })])
+        await response.finished()
+      }
+      // Let the browser render the late rejection before checking for a reopened panel.
+      await page.waitForFunction(() => new Promise<boolean>(done => requestAnimationFrame(() => requestAnimationFrame(() => done(true)))), undefined, { timeout: 5000 })
+      await settled(a, true)
+      await expect(page.getByRole('heading', { name: 'Kunci idempotency sudah dipakai' })).toHaveCount(0)
+      await expect(page.getByRole('button', { name: 'Setujui pembalikan', exact: true })).toBeDisabled()
+      expect(a.posts).toEqual([a.posts[0], a.posts[0]])
+    })
+
+    for (const [id, stage] of [['T1', 'payment'], ['T2', 'reversal'], ['T3', 'proposal']] as const) {
+      test(`pembayaran R1-${id}: 409 sesudah hasil ${stages[stage][1]} tidak pasti`, async ({ page }) => {
+        const a = await begin(page, stage)
+        const error = stage === 'payment' ? 'proposal sudah disetujui' : 'pembayaran sudah dibatalkan'
+        a.wire.reply = route => route.fulfill({ status: 409, json: { error } })
+        const reads: Read[] = ['failed', {}]
+        if (stage === 'proposal') {
+          // Even the same string in the *approval* keyspace cannot prove this proposal.
+          reads.push('malformed', linked(a.payment, { ...a.reversal, client_request_id: a.key, proposed_by: fixture.actor, approved_by: fixture.alternate }))
+        }
+        for (const read of reads) {
+          a.wire.read = read
+          const before = a.posts.length
+          await afterRead(a, () => replay(a))
+          await locked(a)
+          expect(a.posts).toHaveLength(before + 1)
+        }
+        const dto = { payment: a.payment, reversal: a.reversal, proposal: { ...a.reversalProposal, proposed_by: fixture.actor } }[stage]
+        a.wire.reply = route => route.fulfill({ status: 200, json: { ...dto, client_request_id: a.key } })
+        a.wire.read = {}
+        await afterRead(a, () => replay(a))
+        await settled(a, false)
+        expect(a.posts).toHaveLength(2 + reads.length)
+      })
+    }
+
+    test('pembayaran R1-Q1: usulan pesaing satu mikrodetik sebelum pembayaran bukan bukti', async ({ page }) => {
+      const records = makeRecords()
+      const payment = { ...records.payment, approved_at: '2047-01-01T12:00:00.000002Z' }
+      const a = await begin(page, 'reversal', { ...records, payment })
+      const other = { ...a.reversal, reversal_proposal_id: randomUUID(), proposed_at: '2047-01-01T12:00:00.000001Z',
+        proposed_by: fixture.actor, approved_by: fixture.alternate, reason: 'Pembayaran ganda' }
+      await retain(a, 'correct keyspace and links, impossible proposal time', linked(payment, other))
+      await expect(page.getByText('Dibatalkan', { exact: true })).toBeHidden()
+    })
+
+    test('pembayaran R1-Q1b: tautan balik keliru tidak boleh menampilkan status Dibatalkan', async ({ page }) => {
+      const a = await begin(page, 'reversal')
+      await retain(a, 'wrong backlink on the only displayed payment', {
+        payments: [{ ...a.payment, reversed: true, reversal_id: randomUUID() }], reversals: [a.reversal]
+      })
+      await expect(page.getByText('Dibatalkan', { exact: true })).toBeHidden()
+    })
+
+    async function duringHeldRead(a: Attempt, snapshot: Rows, action: () => Promise<void>): Promise<void> {
+      let release!: () => void
+      const gate = new Promise<void>(resolve => { release = resolve })
+      const held: Route[] = []
+      await a.page.route(url => url.pathname === a.readPath, async route => {
+        held.push(route)
+        await gate
+        await route.fulfill({ json: history(snapshot) })
+      }, { times: 1 })
+      try {
+        await a.reload.click()
+        await expect.poll(() => held.length).toBe(1)
+        await action()
+      } finally {
+        release()
+        const response = await held[0]?.request().response()
+        await response?.finished()
+      }
+      await expect(a.reload).toBeEnabled()
+    }
+
+    test('pembayaran R1-Q2: GET sebelum replay tidak menghidupkan persetujuan baru', async ({ page }) => {
+      const a = await begin(page, 'payment')
+      const posted = { ...a.payment, client_request_id: a.key }
+      a.wire.read = { payments: [posted] }
+      a.wire.reply = route => route.fulfill({ status: 200, json: posted })
+      await duringHeldRead(a, { pending_payment_proposals: [a.proposal] }, () => replay(a))
+      await settled(a, false)
+      await expect(page.getByRole('button', { name: 'Setujui', exact: true, disabled: false }),
+        'The old GET must not offer a fresh approval of the posted proposal').toHaveCount(0)
+      // A queued read and explicit invalidation are both safe; the next GET must show the posting.
+      await refresh(a, { payments: [posted] })
+      await expect(page.getByText(`Pembayaran posted aktif: ${posted.amount_minor} unit tarif · ${posted.currency}`, { exact: true })).toBeVisible()
+      expect(a.posts).toEqual([a.posts[0], a.posts[0]])
+    })
+
+    for (const [id, stage] of [['Q3', 'payment'], ['Q3b', 'proposal'], ['Q3c', 'reversal']] as const) {
+      test(`pembayaran R1-${id}: fakta gagal memblokir kiriman pertama ${stages[stage][1]}, bukan replay`, async ({ page }) => {
+        const opened = await openStage(page, stage)
+        await expect(opened.confirmation.getByRole('button', opened.button)).toBeEnabled()
+        const failure = 'Harga uji tidak tersedia.'
+        const factPath = opened.readPath.replace(/\/payments$/, '/agreed-price')
+        const failNextFact = () => page.route(url => url.pathname === factPath, route =>
+          route.fulfill({ status: 503, json: { error: failure } }), { times: 1 })
+        await failNextFact()
+        await afterRead(opened, () => opened.reload.click())
+        await expect(page.getByText(failure, { exact: true })).toBeVisible()
+        const enabled = opened.confirmation.getByRole('button', { ...opened.button, disabled: false })
+        if (await enabled.count()) await enabled.click()
+        await afterRead(opened, () => opened.reload.click())
+        expect(opened.traffic.posts, 'A good history GET cannot authorize the first write without the price fact').toHaveLength(0)
+
+        if (!await opened.confirmation.isVisible()) await page.getByRole('button', opened.button).click()
+        if (stage === 'proposal') await opened.confirmation.getByLabel('Alasan pembalikan').fill(opened.records.reversalProposal.reason)
+        const a = await sendUncertain(opened)
+        await failNextFact()
+        await refresh(a, a.wire.read)
+        await expect(page.getByText(failure, { exact: true })).toBeVisible()
+        await locked(a)
+        await replay(a)
+        await locked(a)
+      })
+    }
+
+    test('pembayaran R1-Q4: hasil usulan A tidak mengalihkan fokus atau mengklaim hasil usulan B', async ({ page }) => {
+      const a = await begin(page, 'payment')
+      const amountB = '25000'
+      const referenceB = 'Kwitansi B'
+      const actionB = { name: 'Usulkan pembayaran', exact: true }
+      await page.getByLabel('Nominal (unit tersimpan)').fill(amountB)
+      await page.getByLabel('Referensi (opsional)').fill(referenceB)
+      await page.getByRole('button', actionB).click()
+      const panelB = page.getByRole('alert').filter({ has: page.getByRole('heading', { name: 'Konfirmasi usulan pembayaran', exact: true }) })
+      const cancelB = panelB.getByRole('button', { name: 'Batalkan', exact: true })
+      const postedA = { ...a.payment, approved_by: fixture.alternate }
+      a.wire.read = { payments: [postedA] }
+      await duringHeldRead(a, a.wire.read, async () => {
+        await cancelB.focus()
+        await expect(cancelB).toBeFocused()
+      })
+      await expect(a.panel).toBeHidden()
+      await expect(page.getByText(/melalui permintaan lain/i)).toBeVisible()
+      await expect.soft(panelB.locator(':focus'), 'Resolving A must leave focus inside the active confirmation for B').toHaveCount(1)
+
+      const pathB = a.readPath.replace(/\/payments$/, '/payment-proposals')
+      await page.route(url => url.pathname === pathB, route => {
+        const proposalB = { ...a.proposal, id: randomUUID(), client_request_id: route.request().headers()['idempotency-key'],
+          proposed_by: fixture.actor, amount_minor: amountB, method: 'cash', reference: referenceB }
+        a.wire.read = { payments: [postedA], pending_payment_proposals: [proposalB] }
+        return route.fulfill({ status: 201, json: proposalB })
+      }, { times: 1 })
+      await panelB.getByRole('button', actionB).click()
+      const pendingB = page.getByRole('listitem').filter({ hasText: referenceB })
+      await expect(pendingB).toContainText(`Usulan pembayaran: ${amountB}`)
+      await expect(panelB).toBeHidden()
+      await expect(pendingB).not.toContainText(/permintaan lain/i)
+      // A notice may expire or remain visibly identified with A, but not as a bare "usulan ini".
+      const generic = page.getByText(notices.payment, { exact: true }).filter({ visible: true })
+      const contextA = page.locator('main *').filter({ hasText: new RegExp(`${postedA.amount_minor}|${postedA.proposal_id}|${postedA.id}|\\bR1\\b`, 'i'), hasNotText: referenceB })
+      await expect.poll(async () => (await generic.count()) - (await contextA.locator(generic).count()),
+        { message: 'Unqualified independent-payment feedback survived B’s own confirmed write' }).toBe(0)
+      expect(a.posts).toHaveLength(1)
+    })
   })
 
   test('pembayaran: tulis pertama diblokir selama bacaan ditahan; panel dibuka sebelum bacaan wajib gagal', async ({ page }) => {

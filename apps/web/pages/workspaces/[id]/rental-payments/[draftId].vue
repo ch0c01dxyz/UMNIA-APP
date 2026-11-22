@@ -92,11 +92,8 @@ const MONEY_RE = /^(0|[1-9][0-9]*)$/
 const CURRENCY_RE = /^[A-Z]{3}$/
 const KEY_RE = /^[A-Za-z0-9_.:-]{1,128}$/
 
-// Waktu server: RFC3339 UTC persis seperti dikembalikan (termasuk detik
-// dan mikrodetik bila ada), diubah ke mikrodetik epoch untuk perbandingan
-// — tanpa membandingkan string (jebakan kesetaraan format) dan tanpa
-// membulatkan batas submenit.
-const SERVER_INSTANT_RE = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?(Z|[+-]\d{2}:\d{2})$/
+// PostgreSQL supplies microseconds. Accept equivalent offsets and zero padding, not silent sub-microsecond truncation.
+const SERVER_INSTANT_RE = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,6})0{0,3})?(Z|[+-]\d{2}:\d{2})$/
 function parseServerInstant(s: string): bigint | null {
   const m = SERVER_INSTANT_RE.exec(s)
   if (!m) return null
@@ -113,11 +110,12 @@ function parseServerInstant(s: string): bigint | null {
   if (dt.getUTCFullYear() !== y || dt.getUTCMonth() !== mo - 1 || dt.getUTCDate() !== d ||
     dt.getUTCHours() !== h || dt.getUTCMinutes() !== mi || dt.getUTCSeconds() !== sec) return null
   let micros = BigInt(dt.getTime()) * 1000n
-  if (m[7]) micros += BigInt((m[7] + '000000').slice(0, 6))
+  if (m[7]) micros += BigInt(m[7].padEnd(6, '0'))
   if (m[8] !== 'Z') {
     const sign = m[8][0] === '+' ? -1n : 1n
     const offH = BigInt(m[8].slice(1, 3))
     const offM = BigInt(m[8].slice(4, 6))
+    if (offH > 23n || offM > 59n) return null
     micros += sign * (offH * 3600n + offM * 60n) * 1000000n
   }
   return micros
@@ -169,10 +167,14 @@ function normalizeReason(v: string): string | null {
   return t
 }
 
+function sameId(left: string, right: string): boolean {
+  return left.toLowerCase() === right.toLowerCase()
+}
+
 function isValidFactRow(row: unknown, ws: string, draftId: string): row is FactRow {
   if (!row || typeof row !== 'object') return false
   const f = row as FactRow
-  if (typeof f.id !== 'string' || f.id === '') return false
+  if (typeof f.id !== 'string' || !UUID_RE.test(f.id)) return false
   if (f.workspace_id !== ws) return false
   if (typeof f.rental_contract_id !== 'string' || f.rental_contract_id.toLowerCase() !== draftId.toLowerCase()) return false
   if (typeof f.price_version_id !== 'string' || !UUID_RE.test(f.price_version_id)) return false
@@ -187,7 +189,7 @@ function isValidFactRow(row: unknown, ws: string, draftId: string): row is FactR
   const to = typeof f.ends_at === 'string' ? parseServerInstant(f.ends_at) : null
   if (from === null || to === null || !(to > from)) return false
   if (typeof f.accepted_at !== 'string' || parseServerInstant(f.accepted_at) === null) return false
-  if (typeof f.accepted_by !== 'string' || f.accepted_by === '') return false
+  if (typeof f.accepted_by !== 'string' || !UUID_RE.test(f.accepted_by)) return false
   try {
     if (BigInt(f.total_minor) !== BigInt(f.amount_minor) * BigInt(f.units)) return false
   } catch {
@@ -206,11 +208,19 @@ function isValidPaymentProposalRow(row: unknown, draftId: string): row is Paymen
   if (typeof p.currency !== 'string' || !CURRENCY_RE.test(p.currency)) return false
   if (p.method !== 'cash' && p.method !== 'transfer') return false
   if (!isValidReference(p.reference)) return false
-  if (typeof p.proposed_by !== 'string' || p.proposed_by === '') return false
+  if (typeof p.proposed_by !== 'string' || !UUID_RE.test(p.proposed_by)) return false
   if (typeof p.proposed_at !== 'string' || parseServerInstant(p.proposed_at) === null) return false
   if (typeof p.client_request_id !== 'string' || !KEY_RE.test(p.client_request_id)) return false
   if (p.status !== 'pending') return false
   return true
+}
+
+function hasValidApproval(row: PaymentRow | ReversalRow): boolean {
+  if (typeof row.proposed_by !== 'string' || !UUID_RE.test(row.proposed_by)) return false
+  if (typeof row.approved_by !== 'string' || !UUID_RE.test(row.approved_by) || sameId(row.approved_by, row.proposed_by)) return false
+  const proposedAt = typeof row.proposed_at === 'string' ? parseServerInstant(row.proposed_at) : null
+  const approvedAt = typeof row.approved_at === 'string' ? parseServerInstant(row.approved_at) : null
+  return proposedAt !== null && approvedAt !== null && approvedAt >= proposedAt
 }
 
 function isValidPaymentRow(row: unknown, draftId: string): row is PaymentRow {
@@ -224,14 +234,11 @@ function isValidPaymentRow(row: unknown, draftId: string): row is PaymentRow {
   if (typeof p.currency !== 'string' || !CURRENCY_RE.test(p.currency)) return false
   if (p.method !== 'cash' && p.method !== 'transfer') return false
   if (!isValidReference(p.reference)) return false
-  if (typeof p.proposed_by !== 'string' || p.proposed_by === '') return false
-  if (typeof p.proposed_at !== 'string' || parseServerInstant(p.proposed_at) === null) return false
-  if (typeof p.approved_by !== 'string' || p.approved_by === '') return false
-  if (typeof p.approved_at !== 'string' || parseServerInstant(p.approved_at) === null) return false
+  if (!hasValidApproval(p)) return false
   if (typeof p.client_request_id !== 'string' || !KEY_RE.test(p.client_request_id)) return false
   if (typeof p.reversed !== 'boolean') return false
   if (p.reversal_id !== null && (typeof p.reversal_id !== 'string' || !UUID_RE.test(p.reversal_id))) return false
-  return true
+  return p.reversed === (p.reversal_id !== null)
 }
 
 function isValidReversalProposalRow(row: unknown, draftId: string): row is ReversalProposalRow {
@@ -241,7 +248,7 @@ function isValidReversalProposalRow(row: unknown, draftId: string): row is Rever
   if (typeof r.payment_id !== 'string' || !UUID_RE.test(r.payment_id)) return false
   if (typeof r.rental_contract_id !== 'string' || r.rental_contract_id.toLowerCase() !== draftId.toLowerCase()) return false
   if (!isValidReason(r.reason)) return false
-  if (typeof r.proposed_by !== 'string' || r.proposed_by === '') return false
+  if (typeof r.proposed_by !== 'string' || !UUID_RE.test(r.proposed_by)) return false
   if (typeof r.proposed_at !== 'string' || parseServerInstant(r.proposed_at) === null) return false
   if (typeof r.client_request_id !== 'string' || !KEY_RE.test(r.client_request_id)) return false
   if (r.status !== 'pending') return false
@@ -256,29 +263,62 @@ function isValidReversalRow(row: unknown, draftId: string): row is ReversalRow {
   if (typeof r.rental_contract_id !== 'string' || r.rental_contract_id.toLowerCase() !== draftId.toLowerCase()) return false
   if (typeof r.reversal_proposal_id !== 'string' || !UUID_RE.test(r.reversal_proposal_id)) return false
   if (!isValidReason(r.reason)) return false
-  if (typeof r.proposed_by !== 'string' || r.proposed_by === '') return false
-  if (typeof r.proposed_at !== 'string' || parseServerInstant(r.proposed_at) === null) return false
-  if (typeof r.approved_by !== 'string' || r.approved_by === '') return false
-  if (typeof r.approved_at !== 'string' || parseServerInstant(r.approved_at) === null) return false
+  if (!hasValidApproval(r)) return false
   if (typeof r.client_request_id !== 'string' || !KEY_RE.test(r.client_request_id)) return false
   return true
 }
 
-function isValidHistoryRow(row: unknown, draftId: string, factId: string | null): row is HistoryRow {
+function hasUniqueIds(ids: string[]): boolean {
+  return new Set(ids.map(id => id.toLowerCase())).size === ids.length
+}
+
+function hasUniqueStageRows(rows: readonly { id: string, client_request_id: string }[]): boolean {
+  return hasUniqueIds(rows.map(row => row.id)) && new Set(rows.map(row => row.client_request_id)).size === rows.length
+}
+
+function followsPayment(proposal: ReversalProposalRow | ReversalRow, payment: PaymentRow | undefined): boolean {
+  if (!payment || !sameId(payment.id, proposal.payment_id)) return false
+  const approvedAt = parseServerInstant(payment.approved_at)
+  const proposedAt = parseServerInstant(proposal.proposed_at)
+  return approvedAt !== null && proposedAt !== null && proposedAt >= approvedAt
+}
+
+function isLinkedReversal(reversal: ReversalRow, payment: PaymentRow | undefined): boolean {
+  return !!payment?.reversed && payment.reversal_id !== null &&
+    sameId(payment.reversal_id, reversal.id) && followsPayment(reversal, payment)
+}
+
+function hasValidReversalLinks(snapshot: HistoryRow): boolean {
+  // With unique payment/reversal IDs, equal counts plus reciprocal links verify every flag in this GET.
+  if (snapshot.payments.filter(payment => payment.reversed).length !== snapshot.reversals.length) return false
+  const payments = new Map(snapshot.payments.map(payment => [payment.id.toLowerCase(), payment]))
+  return snapshot.reversals.every(row => isLinkedReversal(row, payments.get(row.payment_id.toLowerCase()))) &&
+    snapshot.pending_reversal_proposals.every(row => followsPayment(row, payments.get(row.payment_id.toLowerCase())))
+}
+
+function isValidHistoryRow(row: unknown, draftId: string, expectedFact: FactRow | null): row is HistoryRow {
   if (!row || typeof row !== 'object') return false
   const h = row as HistoryRow
   if (typeof h.rental_contract_id !== 'string' || h.rental_contract_id.toLowerCase() !== draftId.toLowerCase()) return false
   if (typeof h.rental_agreed_price_id !== 'string' || !UUID_RE.test(h.rental_agreed_price_id)) return false
-  if (factId !== null && h.rental_agreed_price_id.toLowerCase() !== factId.toLowerCase()) return false
+  if (expectedFact && (!sameId(h.rental_agreed_price_id, expectedFact.id) ||
+    h.currency !== expectedFact.currency || h.total_minor !== expectedFact.total_minor)) return false
   if (typeof h.currency !== 'string' || !CURRENCY_RE.test(h.currency)) return false
   if (!isCanonicalMoney(h.total_minor) || !isCanonicalMoney(h.paid_minor) || !isCanonicalMoney(h.outstanding_minor)) return false
   if (!Array.isArray(h.payments) || !Array.isArray(h.reversals) ||
     !Array.isArray(h.pending_payment_proposals) || !Array.isArray(h.pending_reversal_proposals)) return false
-  if (!h.payments.every(r => isValidPaymentRow(r, draftId))) return false
+  const matchesFact = (payment: PaymentRow | PaymentProposalRow) =>
+    sameId(payment.rental_agreed_price_id, h.rental_agreed_price_id) && payment.currency === h.currency
+  if (!h.payments.every(r => isValidPaymentRow(r, draftId) && matchesFact(r))) return false
   if (!h.reversals.every(r => isValidReversalRow(r, draftId))) return false
-  if (!h.pending_payment_proposals.every(r => isValidPaymentProposalRow(r, draftId))) return false
+  if (!h.pending_payment_proposals.every(r => isValidPaymentProposalRow(r, draftId) && matchesFact(r))) return false
   if (!h.pending_reversal_proposals.every(r => isValidReversalProposalRow(r, draftId))) return false
-  return true
+  // Keys are unique per stage, not across stages. A posted proposal cannot also be pending in this snapshot.
+  return [h.payments, h.reversals, h.pending_payment_proposals, h.pending_reversal_proposals].every(hasUniqueStageRows) &&
+    hasUniqueIds([...h.payments.map(p => p.proposal_id), ...h.pending_payment_proposals.map(p => p.id)]) &&
+    hasUniqueIds([...h.reversals.map(r => r.reversal_proposal_id), ...h.pending_reversal_proposals.map(r => r.id)]) &&
+    hasUniqueIds(h.reversals.map(r => r.payment_id)) &&
+    hasUniqueIds(h.payments.flatMap(p => p.reversal_id === null ? [] : [p.reversal_id]))
 }
 
 function isValidDraftForFact(row: unknown, ws: string, draftId: string, f: FactRow): row is DraftRow {
@@ -286,7 +326,7 @@ function isValidDraftForFact(row: unknown, ws: string, draftId: string, f: FactR
   const r = row as DraftRow
   if (typeof r.id !== 'string' || r.id.toLowerCase() !== draftId.toLowerCase()) return false
   if (r.workspace_id !== ws) return false
-  if (typeof r.customer_id !== 'string' || r.customer_id === '') return false
+  if (typeof r.customer_id !== 'string' || !sameId(r.customer_id, f.customer_id)) return false
   if (typeof r.catalog_item_id !== 'string' || r.catalog_item_id.toLowerCase() !== f.catalog_item_id.toLowerCase()) return false
   if (r.status !== 'draft') return false
   const from = typeof r.starts_at === 'string' ? parseServerInstant(r.starts_at) : null
@@ -336,6 +376,8 @@ interface ApprAttempt {
   actorId: string
   factId: string
   proposalId: string
+  proposedBy: string
+  proposedAt: string
   amount: string
   currency: string
   method: string
@@ -370,6 +412,8 @@ interface RevApprAttempt {
   factId: string
   paymentId: string
   proposalId: string
+  proposedBy: string
+  proposedAt: string
   reason: string
   customerLabel: string
   itemLabel: string
@@ -377,7 +421,6 @@ interface RevApprAttempt {
   toIso: string
 }
 
-// Settlement GET-only: baris cocok dengan snapshot + kunci attempt.
 function isValidProposalForAttempt(row: unknown, a: PropAttempt): row is PaymentProposalRow {
   if (!isValidPaymentProposalRow(row, a.draftId)) return false
   const p = row as PaymentProposalRow
@@ -388,15 +431,16 @@ function isValidProposalForAttempt(row: unknown, a: PropAttempt): row is Payment
     p.proposed_by === a.actorId
 }
 
+function matchesPaymentFields(row: PaymentProposalRow | PaymentRow, attempt: ApprAttempt): boolean {
+  return sameId(row.rental_contract_id, attempt.draftId) && sameId(row.rental_agreed_price_id, attempt.factId) &&
+    row.amount_minor === attempt.amount && row.currency === attempt.currency &&
+    row.method === attempt.method && row.reference === attempt.reference &&
+    sameId(row.proposed_by, attempt.proposedBy) && parseServerInstant(row.proposed_at) === parseServerInstant(attempt.proposedAt)
+}
+
 function isValidPaymentForApproveAttempt(row: unknown, a: ApprAttempt): row is PaymentRow {
-  if (!isValidPaymentRow(row, a.draftId)) return false
-  const p = row as PaymentRow
-  return p.client_request_id === a.key &&
-    p.proposal_id.toLowerCase() === a.proposalId.toLowerCase() &&
-    p.rental_agreed_price_id.toLowerCase() === a.factId.toLowerCase() &&
-    p.amount_minor === a.amount && p.currency === a.currency &&
-    p.method === a.method && p.reference === a.reference &&
-    p.approved_by === a.actorId
+  return isValidPaymentRow(row, a.draftId) && row.client_request_id === a.key &&
+    sameId(row.approved_by, a.actorId) && sameId(row.proposal_id, a.proposalId) && matchesPaymentFields(row, a)
 }
 
 function isValidReversalProposalForAttempt(row: unknown, a: RevPropAttempt): row is ReversalProposalRow {
@@ -407,13 +451,36 @@ function isValidReversalProposalForAttempt(row: unknown, a: RevPropAttempt): row
     r.reason === a.reason && r.proposed_by === a.actorId
 }
 
+function matchesReversalFields(row: ReversalProposalRow | ReversalRow, attempt: RevApprAttempt): boolean {
+  return sameId(row.rental_contract_id, attempt.draftId) && sameId(row.payment_id, attempt.paymentId) &&
+    row.reason === attempt.reason && sameId(row.proposed_by, attempt.proposedBy) &&
+    parseServerInstant(row.proposed_at) === parseServerInstant(attempt.proposedAt)
+}
+
 function isValidReversalForApproveAttempt(row: unknown, a: RevApprAttempt): row is ReversalRow {
-  if (!isValidReversalRow(row, a.draftId)) return false
-  const r = row as ReversalRow
-  return r.client_request_id === a.key &&
-    r.reversal_proposal_id.toLowerCase() === a.proposalId.toLowerCase() &&
-    r.payment_id.toLowerCase() === a.paymentId.toLowerCase() &&
-    r.reason === a.reason && r.approved_by === a.actorId
+  return isValidReversalRow(row, a.draftId) && row.client_request_id === a.key &&
+    sameId(row.approved_by, a.actorId) && sameId(row.reversal_proposal_id, a.proposalId) && matchesReversalFields(row, a)
+}
+
+type ApprovalEvidence = 'own' | 'independent' | 'inconsistent' | 'absent'
+
+function classifyPaymentApproval(snapshot: HistoryRow, a: ApprAttempt): ApprovalEvidence {
+  const keyed = snapshot.payments.find(payment => payment.client_request_id === a.key)
+  if (keyed) return isValidPaymentForApproveAttempt(keyed, a) ? 'own' : 'inconsistent'
+  const other = snapshot.payments.find(payment => sameId(payment.proposal_id, a.proposalId))
+  if (!other) return 'absent'
+  return matchesPaymentFields(other, a) ? 'independent' : 'inconsistent'
+}
+
+function classifyReversalApproval(snapshot: HistoryRow, a: RevApprAttempt): ApprovalEvidence {
+  const reversal = snapshot.reversals.find(row => row.client_request_id === a.key) ??
+    snapshot.reversals.find(row => sameId(row.reversal_proposal_id, a.proposalId)) ??
+    snapshot.reversals.find(row => sameId(row.payment_id, a.paymentId))
+  if (!reversal) return 'absent'
+  if (!isLinkedReversal(reversal, snapshot.payments.find(payment => sameId(payment.id, a.paymentId)))) return 'inconsistent'
+  if (reversal.client_request_id === a.key) return isValidReversalForApproveAttempt(reversal, a) ? 'own' : 'inconsistent'
+  if (sameId(reversal.reversal_proposal_id, a.proposalId) && !matchesReversalFields(reversal, a)) return 'inconsistent'
+  return 'independent'
 }
 
 const route = useRoute()
@@ -423,6 +490,16 @@ const wsId = computed(() => String(route.params.id ?? ''))
 const draftId = computed(() => String(route.params.draftId ?? ''))
 const routeKey = computed(() => `${wsId.value}/${draftId.value}`)
 const subjectId = computed(() => session?.subjectId.value ?? '')
+
+type AttemptScope = Pick<PropAttempt, 'workspaceId' | 'draftId' | 'actorId' | 'factId'>
+
+function isCurrentAttempt(a: AttemptScope): boolean {
+  return !!session?.token.value && a.workspaceId === wsId.value && a.draftId === draftId.value && a.actorId === subjectId.value
+}
+
+function isAttemptHistory(snapshot: HistoryRow, a: AttemptScope): boolean {
+  return isCurrentAttempt(a) && sameId(snapshot.rental_contract_id, a.draftId) && sameId(snapshot.rental_agreed_price_id, a.factId)
+}
 
 const checking = ref(true)
 const loading = ref(false)
@@ -486,6 +563,7 @@ const apprConflict = ref<'key' | null>(null)
 const apprPostDenied = ref<string | null>(null)
 const apprReplayError = ref<string | null>(null)
 const apprSettleError = ref<string | null>(null)
+const paymentPostedElsewhere = ref<Pick<ApprAttempt, 'proposalId' | 'amount' | 'currency'> | null>(null)
 const apprBusy = ref(false)
 
 const revPropAttempt = ref<RevPropAttempt | null>(null)
@@ -502,37 +580,58 @@ const revApprConflict = ref<'key' | null>(null)
 const revApprPostDenied = ref<string | null>(null)
 const revApprReplayError = ref<string | null>(null)
 const revApprSettleError = ref<string | null>(null)
+const paymentReversedElsewhere = ref<string | null>(null)
 const revApprBusy = ref(false)
 
 const refreshing = ref(false)
 const paymentsHeading = ref<HTMLElement | null>(null)
-const formAlert = ref<HTMLElement | null>(null)
+const paymentsSection = ref<HTMLElement | null>(null)
 
 const contextCustomerId = computed(() => draftRow.value?.customer_id ?? fact.value?.customer_id ?? null)
 const contextItemId = computed(() => draftRow.value?.catalog_item_id ?? fact.value?.catalog_item_id ?? null)
 const contextFromIso = computed(() => draftRow.value?.starts_at ?? fact.value?.starts_at ?? null)
 const contextToIso = computed(() => draftRow.value?.ends_at ?? fact.value?.ends_at ?? null)
 
-const contextOk = computed(() => !draftRow.value || draftValid.value)
 const showCustomerMore = computed(() => !!contextCustomerId.value && !customerById.value.get(contextCustomerId.value) && !customerExhausted.value)
 const showCatalogMore = computed(() => !!contextItemId.value && !catalogById.value.get(contextItemId.value) && !catalogExhausted.value)
 
-const canPropose = computed(() => !!fact.value && !!history.value && contextOk.value && !refreshing.value)
+// Keep immutable posting evidence separate: inconsistent reversal status blocks display and new writes, not proof of posting.
+const historyLinksVerified = computed(() => {
+  const snapshot = history.value
+  if (!snapshot || !hasValidReversalLinks(snapshot)) return false
+  const attempt = revApprAttempt.value
+  return !attempt || !isAttemptHistory(snapshot, attempt) || classifyReversalApproval(snapshot, attempt) !== 'inconsistent'
+})
+
+const writeReadsReady = computed(() => {
+  const price = fact.value
+  const snapshot = history.value
+  if (!session?.token.value || !UUID_RE.test(subjectId.value) || loading.value || noPermission.value || readDenied.value) return false
+  if (refreshing.value || factLoading.value || historyLoading.value || !price || !snapshot || !historyLinksVerified.value) return false
+  return sameId(price.workspace_id, wsId.value) && sameId(price.rental_contract_id, draftId.value) &&
+    sameId(price.id, snapshot.rental_agreed_price_id) && sameId(snapshot.rental_contract_id, draftId.value) &&
+    price.currency === snapshot.currency && price.total_minor === snapshot.total_minor &&
+    (!draftRow.value || isValidDraftForFact(draftRow.value, wsId.value, draftId.value, price))
+})
+const propTargetLive = computed(() => writeReadsReady.value && !!propAttempt.value && !!history.value &&
+  isAttemptHistory(history.value, propAttempt.value) && propAttempt.value.currency === history.value.currency)
 const apprTargetLive = computed(() => {
   const a = apprAttempt.value
-  if (!a || !history.value) return false
-  return history.value.pending_payment_proposals.some(p => p.id.toLowerCase() === a.proposalId.toLowerCase())
+  if (!writeReadsReady.value || !a || !history.value || !isAttemptHistory(history.value, a)) return false
+  if (sameId(a.proposedBy, a.actorId)) return false
+  return history.value.pending_payment_proposals.some(p => sameId(p.id, a.proposalId) && matchesPaymentFields(p, a))
 })
 const revPropTargetLive = computed(() => {
   const a = revPropAttempt.value
-  if (!a || !history.value) return false
+  if (!writeReadsReady.value || !a || !history.value || !isAttemptHistory(history.value, a)) return false
   const pay = history.value.payments.find(p => p.id.toLowerCase() === a.paymentId.toLowerCase())
-  return !!pay && !pay.reversed
+  return !!pay && !pay.reversed && pay.amount_minor === a.paymentAmount && pay.currency === a.currency
 })
 const revApprTargetLive = computed(() => {
   const a = revApprAttempt.value
-  if (!a || !history.value) return false
-  if (!history.value.pending_reversal_proposals.some(r => r.id.toLowerCase() === a.proposalId.toLowerCase())) return false
+  if (!writeReadsReady.value || !a || !history.value || !isAttemptHistory(history.value, a)) return false
+  if (sameId(a.proposedBy, a.actorId)) return false
+  if (!history.value.pending_reversal_proposals.some(r => sameId(r.id, a.proposalId) && matchesReversalFields(r, a))) return false
   const pay = history.value.payments.find(p => p.id.toLowerCase() === a.paymentId.toLowerCase())
   return !!pay && !pay.reversed
 })
@@ -564,9 +663,7 @@ function methodLabel(method: string): string {
 
 let listGen = 0
 let factGen = 0
-let factLoadGen = 0
 let historyGen = 0
-let historyLoadGen = 0
 let draftGen = 0
 let draftLoadGen = 0
 let customerGen = 0
@@ -582,8 +679,6 @@ let revPropGen = 0
 let revPropLoadGen = 0
 let revApprGen = 0
 let revApprLoadGen = 0
-let factInFlight = false
-let historyInFlight = false
 let draftInFlight = false
 let customerInFlight = false
 let catalogInFlight = false
@@ -591,6 +686,7 @@ let propInFlight = false
 let apprInFlight = false
 let revPropInFlight = false
 let revApprInFlight = false
+let lastFocusedStage: string | undefined
 
 function stale(gen: number) {
   return gen !== listGen
@@ -613,11 +709,10 @@ function staleRevAppr(gen: number) {
 }
 
 function bumpAllGens() {
+  lastFocusedStage = undefined
   listGen++
   factGen++
-  factLoadGen++
   historyGen++
-  historyLoadGen++
   draftGen++
   draftLoadGen++
   customerGen++
@@ -651,6 +746,7 @@ function clearApprStage() {
   apprPostDenied.value = null
   apprReplayError.value = null
   apprSettleError.value = null
+  paymentPostedElsewhere.value = null
 }
 
 function clearRevPropStage() {
@@ -669,6 +765,7 @@ function clearRevApprStage() {
   revApprPostDenied.value = null
   revApprReplayError.value = null
   revApprSettleError.value = null
+  paymentReversedElsewhere.value = null
 }
 
 // Transisi baca ditolak (GET 403 sesudah halaman termuat): beri umpan
@@ -680,8 +777,6 @@ function clearRevApprStage() {
 // (fakta/riwayat/draf/label pelanggan/katalog).
 function denyRead(message: string) {
   bumpAllGens()
-  factInFlight = false
-  historyInFlight = false
   draftInFlight = false
   customerInFlight = false
   catalogInFlight = false
@@ -734,8 +829,6 @@ function denyRead(message: string) {
 
 function resetState() {
   bumpAllGens()
-  factInFlight = false
-  historyInFlight = false
   draftInFlight = false
   customerInFlight = false
   catalogInFlight = false
@@ -801,9 +894,9 @@ onMounted(async () => {
   await load()
 })
 
-watch(routeKey, async () => {
+watch([routeKey, subjectId], async () => {
   resetState()
-  await load()
+  if (session?.token.value) await load()
 })
 
 onUnmounted(() => {
@@ -862,15 +955,13 @@ async function load() {
 // (draf hilang) dan galat lain adalah kegagalan baca, bukan "belum ada".
 async function fetchFact() {
   const s = session
-  if (!s || factInFlight) return
+  if (!s?.token.value) return
   const gen = ++factGen
-  const myLoad = ++factLoadGen
-  factInFlight = true
   factLoading.value = true
   try {
     const res = await apiFetch<FactRow>(s, `/api/workspaces/${wsId.value}/rental/contracts/${draftId.value}/agreed-price`)
-    if (gen !== factGen) return
-    if (isValidFactRow(res.data, wsId.value, draftId.value)) {
+    if (gen !== factGen || !s.token.value) return
+    if (res.status === 200 && isValidFactRow(res.data, wsId.value, draftId.value)) {
       fact.value = res.data
       factMissing.value = false
       factError.value = null
@@ -880,7 +971,7 @@ async function fetchFact() {
       factError.value = FACT_INVALID
     }
   } catch (err) {
-    if (gen !== factGen) return
+    if (gen !== factGen || !s.token.value) return
     if (err instanceof ApiError && err.status === 401) {
       redirectToLogin(s, route.fullPath)
       return
@@ -901,42 +992,37 @@ async function fetchFact() {
       factError.value = 'Terjadi kesalahan. Coba lagi.'
     }
   } finally {
-    if (myLoad === factLoadGen) {
-      factInFlight = false
-      factLoading.value = false
-    }
+    if (gen === factGen) factLoading.value = false
   }
 }
 
 // Satu bacaan riwayat + total. Tanpa-fakta HANYA pesan 409 spesifik;
 // draf hilang HANYA pesan 404 spesifik; galat lain adalah kegagalan
 // baca, bukan "belum ada". Total dibaca dari server apa adanya.
-async function fetchHistory() {
+async function fetchHistory(): Promise<HistoryRow | null> {
   const s = session
-  if (!s || historyInFlight) return
+  if (!s?.token.value) return null
   const gen = ++historyGen
-  const myLoad = ++historyLoadGen
-  historyInFlight = true
   historyLoading.value = true
   try {
     const res = await apiFetch<HistoryRow>(s, `/api/workspaces/${wsId.value}/rental/contracts/${draftId.value}/payments`)
-    if (gen !== historyGen) return
-    if (isValidHistoryRow(res.data, draftId.value, fact.value ? fact.value.id : null)) {
+    if (gen !== historyGen || !s.token.value) return null
+    if (res.status === 200 && isValidHistoryRow(res.data, draftId.value, fact.value)) {
       history.value = res.data
       historyError.value = null
-    } else {
-      history.value = null
-      historyError.value = HIST_INVALID
+      return res.data
     }
+    history.value = null
+    historyError.value = HIST_INVALID
   } catch (err) {
-    if (gen !== historyGen) return
+    if (gen !== historyGen || !s.token.value) return null
     if (err instanceof ApiError && err.status === 401) {
       redirectToLogin(s, route.fullPath)
-      return
+      return null
     }
     if (err instanceof ApiError && err.status === 403) {
       denyRead(err.message)
-      return
+      return null
     }
     history.value = null
     if (err instanceof ApiError && err.status === 409 && err.message === HIST_NO_FACT) {
@@ -948,11 +1034,9 @@ async function fetchHistory() {
       historyError.value = 'Terjadi kesalahan. Coba lagi.'
     }
   } finally {
-    if (myLoad === historyLoadGen) {
-      historyInFlight = false
-      historyLoading.value = false
-    }
+    if (gen === historyGen) historyLoading.value = false
   }
+  return null
 }
 
 // Satu halaman pelanggan (100 baris). Tanpa rantai otomatis: pemanggil
@@ -1118,10 +1202,51 @@ function resetDraftLookup() {
   draftStarted.value = false
 }
 
-async function refreshReads(failureMessage: string) {
+async function settlePaymentProposal(snapshot: HistoryRow): Promise<void> {
+  const a = propAttempt.value
+  if (!a || propConflict.value || !isAttemptHistory(snapshot, a)) return
+  const row = snapshot.pending_payment_proposals.find(proposal => proposal.client_request_id === a.key)
+  if (!row) return
+  if (isValidProposalForAttempt(row, a)) return confirmProp(++propGen, 'history')
+  propSettleError.value = 'Usulan pembayaran yang dibaca memakai kunci yang sama tetapi tidak cocok dengan permintaan ini; usulan pembayaran tetap tidak diketahui.'
+}
+
+async function settlePaymentApproval(snapshot: HistoryRow): Promise<void> {
+  const a = apprAttempt.value
+  if (!a || apprConflict.value || !isAttemptHistory(snapshot, a)) return
+  const evidence = classifyPaymentApproval(snapshot, a)
+  if (evidence === 'own' || evidence === 'independent') return finishPaymentApproval(++apprGen, evidence, 'history')
+  if (evidence === 'inconsistent') apprSettleError.value = 'Catatan pembayaran tidak cocok dengan permintaan ini; hasil persetujuan belum dapat dipastikan.'
+}
+
+async function settleReversalProposal(snapshot: HistoryRow): Promise<void> {
+  const a = revPropAttempt.value
+  if (!a || revPropConflict.value || !isAttemptHistory(snapshot, a)) return
+  const row = snapshot.pending_reversal_proposals.find(proposal => proposal.client_request_id === a.key)
+  if (!row) return
+  if (isValidReversalProposalForAttempt(row, a)) return confirmRevProp(++revPropGen, 'history')
+  revPropSettleError.value = 'Usulan pembalikan yang dibaca memakai kunci yang sama tetapi tidak cocok dengan permintaan ini; usulan pembalikan tetap tidak diketahui.'
+}
+
+async function settleReversalApproval(snapshot: HistoryRow): Promise<void> {
+  const a = revApprAttempt.value
+  if (!a || revApprConflict.value || !isAttemptHistory(snapshot, a)) return
+  const evidence = classifyReversalApproval(snapshot, a)
+  if (evidence === 'own' || evidence === 'independent') return finishReversalApproval(++revApprGen, evidence, 'history')
+  if (evidence === 'inconsistent') revApprSettleError.value = 'Catatan pembalikan tidak cocok dengan permintaan ini; hasil persetujuan belum dapat dipastikan.'
+}
+
+async function refreshReads(failureMessage: string, afterWrite = false): Promise<void> {
   const s = session
-  if (!s || refreshing.value) return
+  if (!s?.token.value || readDenied.value || (!afterWrite && (loading.value || refreshing.value))) return
   const gen = ++refreshGen
+  if (afterWrite) {
+    // The in-flight GET can predate this POST. Fence it now, not after the new price read.
+    historyGen++
+    history.value = null
+    historyError.value = null
+    historyLoading.value = true
+  }
   refreshing.value = true
   propSettleError.value = null
   apprSettleError.value = null
@@ -1129,76 +1254,21 @@ async function refreshReads(failureMessage: string) {
   revApprSettleError.value = null
   try {
     await fetchFact()
-    if (readDenied.value) return
-    await fetchHistory()
-    if (readDenied.value) return
-    if (gen !== refreshGen) return
-    // Tahap usulan pembayaran: hanya pending yang cocok yang
-    // mengonfirmasi. Hilang dari pending BUKAN bukti tidak ada —
-    // attempt dipertahankan untuk kirim-ulang kunci-sama.
-    if (propAttempt.value && history.value) {
-      const row = history.value.pending_payment_proposals.find(p => isValidProposalForAttempt(p, propAttempt.value!))
-      if (row) {
-        await confirmProp(propGen)
-        propGen++
-      } else if (history.value.pending_payment_proposals.some(p => p.client_request_id === propAttempt.value!.key)) {
-        // Kunci sama tetapi field tidak cocok: tidak mengonfirmasi apa pun.
-        propSettleError.value = 'Usulan pembayaran yang dibaca memakai kunci yang sama tetapi tidak cocok dengan permintaan ini; usulan pembayaran tetap tidak diketahui.'
-      }
-    }
-    if (propAttempt.value && historyError.value) {
-      propSettleError.value = 'Riwayat pembayaran tidak dapat dibaca saat ini; usulan pembayaran tetap tidak diketahui.'
-    }
-    // Tahap persetujuan pembayaran: payments[] yang cocok mengonfirmasi
-    // — posting yang belakangan dibalik tetap mengonfirmasi persetujuan
-    // awal. Posting pihak lain (proposal sama, kunci berbeda) adalah
-    // riwayat independen: attempt dibersihkan tanpa klaim sukses.
-    if (apprAttempt.value && history.value) {
-      const row = history.value.payments.find(p => isValidPaymentForApproveAttempt(p, apprAttempt.value!))
-      if (row) {
-        await confirmAppr(apprGen)
-        apprGen++
-      } else if (history.value.payments.some(p => p.proposal_id.toLowerCase() === apprAttempt.value!.proposalId.toLowerCase())) {
-        clearApprStage()
-        apprGen++
-      } else if (history.value.payments.some(p => p.client_request_id === apprAttempt.value!.key)) {
-        apprSettleError.value = 'Pembayaran yang dibaca memakai kunci yang sama tetapi tidak cocok dengan permintaan ini; persetujuan pembayaran tetap tidak diketahui.'
-      }
-    }
-    if (apprAttempt.value && historyError.value) {
-      apprSettleError.value = 'Riwayat pembayaran tidak dapat dibaca saat ini; persetujuan pembayaran tetap tidak diketahui.'
-    }
-    // Tahap usulan pembalikan: hanya pending yang cocok yang
-    // mengonfirmasi; hilang dari pending dipertahankan untuk replay.
-    if (revPropAttempt.value && history.value) {
-      const row = history.value.pending_reversal_proposals.find(r => isValidReversalProposalForAttempt(r, revPropAttempt.value!))
-      if (row) {
-        await confirmRevProp(revPropGen)
-        revPropGen++
-      } else if (history.value.pending_reversal_proposals.some(r => r.client_request_id === revPropAttempt.value!.key)) {
-        revPropSettleError.value = 'Usulan pembalikan yang dibaca memakai kunci yang sama tetapi tidak cocok dengan permintaan ini; usulan pembalikan tetap tidak diketahui.'
-      }
-    }
-    if (revPropAttempt.value && historyError.value) {
-      revPropSettleError.value = 'Riwayat pembayaran tidak dapat dibaca saat ini; usulan pembalikan tetap tidak diketahui.'
-    }
-    // Tahap persetujuan pembalikan: reversals[] yang cocok
-    // mengonfirmasi. Pembalikan pihak lain (proposal sama, kunci
-    // berbeda) adalah riwayat independen: attempt dibersihkan.
-    if (revApprAttempt.value && history.value) {
-      const row = history.value.reversals.find(r => isValidReversalForApproveAttempt(r, revApprAttempt.value!))
-      if (row) {
-        await confirmRevAppr(revApprGen)
-        revApprGen++
-      } else if (history.value.reversals.some(r => r.reversal_proposal_id.toLowerCase() === revApprAttempt.value!.proposalId.toLowerCase())) {
-        clearRevApprStage()
-        revApprGen++
-      } else if (history.value.reversals.some(r => r.client_request_id === revApprAttempt.value!.key)) {
-        revApprSettleError.value = 'Pembalikan yang dibaca memakai kunci yang sama tetapi tidak cocok dengan permintaan ini; persetujuan pembalikan tetap tidak diketahui.'
-      }
-    }
-    if (revApprAttempt.value && historyError.value) {
-      revApprSettleError.value = 'Riwayat pembayaran tidak dapat dibaca saat ini; persetujuan pembalikan tetap tidak diketahui.'
+    if (gen !== refreshGen || readDenied.value || !s.token.value) return
+    const snapshot = await fetchHistory()
+    if (gen !== refreshGen || readDenied.value || !s.token.value) return
+    if (snapshot) {
+      // Fence a settled stage before yielding to a delayed POST response or moving focus.
+      await Promise.all([
+        settlePaymentProposal(snapshot), settlePaymentApproval(snapshot),
+        settleReversalProposal(snapshot), settleReversalApproval(snapshot)
+      ])
+      if (gen !== refreshGen) return
+    } else if (historyError.value) {
+      if (propAttempt.value) propSettleError.value = 'Riwayat pembayaran tidak dapat dibaca saat ini; usulan pembayaran tetap tidak diketahui.'
+      if (apprAttempt.value) apprSettleError.value = 'Riwayat pembayaran tidak dapat dibaca saat ini; persetujuan pembayaran tetap tidak diketahui.'
+      if (revPropAttempt.value) revPropSettleError.value = 'Riwayat pembayaran tidak dapat dibaca saat ini; usulan pembalikan tetap tidak diketahui.'
+      if (revApprAttempt.value) revApprSettleError.value = 'Riwayat pembayaran tidak dapat dibaca saat ini; persetujuan pembalikan tetap tidak diketahui.'
     }
     if (!propAttempt.value && !apprAttempt.value && !revPropAttempt.value && !revApprAttempt.value && fact.value && draftRow.value) {
       draftValid.value = isValidDraftForFact(draftRow.value, wsId.value, draftId.value, fact.value)
@@ -1212,30 +1282,58 @@ async function refreshReads(failureMessage: string) {
   }
 }
 
-function focusFormAlert(gen: number, staleFn: (g: number) => boolean) {
-  nextTick().then(() => {
-    if (!staleFn(gen)) formAlert.value?.focus()
+const paymentStages = {
+  proposal: { attempt: propAttempt, stale: staleProp },
+  approval: { attempt: apprAttempt, stale: staleAppr },
+  'reversal-proposal': { attempt: revPropAttempt, stale: staleRevProp },
+  'reversal-approval': { attempt: revApprAttempt, stale: staleRevAppr }
+}
+type PaymentStage = keyof typeof paymentStages
+type CompletionSource = 'post' | 'history'
+
+function stageOfControl(control: EventTarget | null): string | undefined {
+  return control instanceof Element ? control.closest<HTMLElement>('[data-payment-stage]')?.dataset.paymentStage : undefined
+}
+
+function rememberStageFocus(event: FocusEvent): void {
+  // Disabling a focused submit button may move focus to the body before its response arrives.
+  lastFocusedStage = stageOfControl(event.target)
+}
+
+function focusStage(stage: PaymentStage, gen: number, target: 'alert' | 'heading' = 'alert'): void {
+  const focused = document.activeElement
+  const owner = focused === document.body ? lastFocusedStage : stageOfControl(focused)
+  if (owner && owner !== stage) return
+  if (focused && focused !== document.body && !paymentsSection.value?.contains(focused)) return
+  if (!owner && Object.entries(paymentStages).some(([name, other]) => name !== stage && other.attempt.value)) return
+  // Only restore focus if this interaction still owns it after Vue replaces its panel.
+  void nextTick(() => {
+    if (paymentStages[stage].stale(gen) || !session?.token.value) return
+    if (document.activeElement !== focused && document.activeElement !== document.body) return
+    if (document.activeElement === document.body && lastFocusedStage && lastFocusedStage !== stage) return
+    if (target === 'heading') paymentsHeading.value?.focus()
+    else paymentsSection.value?.querySelector<HTMLElement>(`[data-payment-stage="${stage}"] h3[tabindex="-1"]`)?.focus()
   })
 }
 
 function setPropUnknown(gen: number) {
   propUnknown.value = true
-  focusFormAlert(gen, staleProp)
+  focusStage('proposal', gen)
 }
 
 function setApprUnknown(gen: number) {
   apprUnknown.value = true
-  focusFormAlert(gen, staleAppr)
+  focusStage('approval', gen)
 }
 
 function setRevPropUnknown(gen: number) {
   revPropUnknown.value = true
-  focusFormAlert(gen, staleRevProp)
+  focusStage('reversal-proposal', gen)
 }
 
 function setRevApprUnknown(gen: number) {
   revApprUnknown.value = true
-  focusFormAlert(gen, staleRevAppr)
+  focusStage('reversal-approval', gen)
 }
 
 // Kunci tercemar (409 mismatch): kunci sudah terikat pada permintaan lain.
@@ -1247,63 +1345,65 @@ function setPropKeyMismatch(gen: number) {
   propConflict.value = 'key'
   propUnknown.value = false
   propPostDenied.value = null
-  focusFormAlert(gen, staleProp)
+  focusStage('proposal', gen)
 }
 
 function setApprKeyMismatch(gen: number) {
   apprConflict.value = 'key'
   apprUnknown.value = false
   apprPostDenied.value = null
-  focusFormAlert(gen, staleAppr)
+  focusStage('approval', gen)
 }
 
 function setRevPropKeyMismatch(gen: number) {
   revPropConflict.value = 'key'
   revPropUnknown.value = false
   revPropPostDenied.value = null
-  focusFormAlert(gen, staleRevProp)
+  focusStage('reversal-proposal', gen)
 }
 
 function setRevApprKeyMismatch(gen: number) {
   revApprConflict.value = 'key'
   revApprUnknown.value = false
   revApprPostDenied.value = null
-  focusFormAlert(gen, staleRevAppr)
+  focusStage('reversal-approval', gen)
 }
 
-async function confirmProp(gen: number) {
+async function completeStage(stage: PaymentStage, gen: number, source: CompletionSource): Promise<void> {
+  focusStage(stage, gen, 'heading')
+  if (source === 'history') return
+  clearApprovalNotices()
+  await refreshReads('Data gagal dimuat ulang. Coba muat ulang data.', true)
+}
+
+function confirmProp(gen: number, source: CompletionSource): Promise<void> {
   clearPropStage()
   amountInput.value = ''
   referenceInput.value = ''
-  await nextTick()
-  if (staleProp(gen)) return
-  paymentsHeading.value?.focus()
-  await refreshReads('Data gagal dimuat ulang. Coba muat ulang data.')
+  return completeStage('proposal', gen, source)
 }
 
-async function confirmAppr(gen: number) {
+function finishPaymentApproval(gen: number, outcome: 'own' | 'independent', source: CompletionSource): Promise<void> {
+  const attempt = apprAttempt.value
   clearApprStage()
-  await nextTick()
-  if (staleAppr(gen)) return
-  paymentsHeading.value?.focus()
-  await refreshReads('Data gagal dimuat ulang. Coba muat ulang data.')
+  if (outcome === 'independent' && attempt) {
+    const { proposalId, amount, currency } = attempt
+    paymentPostedElsewhere.value = { proposalId, amount, currency }
+  }
+  return completeStage('approval', gen, source)
 }
 
-async function confirmRevProp(gen: number) {
+function confirmRevProp(gen: number, source: CompletionSource): Promise<void> {
   clearRevPropStage()
   reversalReasonInput.value = ''
-  await nextTick()
-  if (staleRevProp(gen)) return
-  paymentsHeading.value?.focus()
-  await refreshReads('Data gagal dimuat ulang. Coba muat ulang data.')
+  return completeStage('reversal-proposal', gen, source)
 }
 
-async function confirmRevAppr(gen: number) {
+function finishReversalApproval(gen: number, outcome: 'own' | 'independent', source: CompletionSource): Promise<void> {
+  const attempt = revApprAttempt.value
   clearRevApprStage()
-  await nextTick()
-  if (staleRevAppr(gen)) return
-  paymentsHeading.value?.focus()
-  await refreshReads('Data gagal dimuat ulang. Coba muat ulang data.')
+  if (outcome === 'independent' && attempt) paymentReversedElsewhere.value = attempt.paymentId
+  return completeStage('reversal-approval', gen, source)
 }
 
 function attemptContext(): { customerId: string, customerLabel: string, itemId: string, itemLabel: string, fromIso: string, toIso: string } | null {
@@ -1316,8 +1416,13 @@ function attemptContext(): { customerId: string, customerLabel: string, itemId: 
   return { customerId: cid, customerLabel: customerLabel(cid), itemId: iid, itemLabel: catalogLabel(iid), fromIso, toIso }
 }
 
+function clearApprovalNotices(): void {
+  paymentPostedElsewhere.value = null
+  paymentReversedElsewhere.value = null
+}
+
 function openPropConfirmation() {
-  if (!canPropose.value || propAttempt.value) return
+  if (!writeReadsReady.value || propAttempt.value) return
   const ctx = attemptContext()
   if (!ctx || !fact.value || !history.value) return
   const amount = amountInput.value.trim()
@@ -1349,12 +1454,13 @@ function openPropConfirmation() {
   propPostDenied.value = null
   propReplayError.value = null
   propSettleError.value = null
-  focusFormAlert(propGen, staleProp)
+  clearApprovalNotices()
+  focusStage('proposal', propGen)
 }
 
 function openApprConfirmation(p: PaymentProposalRow) {
-  if (apprAttempt.value || !history.value || !fact.value) return
-  if (p.proposed_by === subjectId.value) return
+  if (apprAttempt.value || !writeReadsReady.value) return
+  if (sameId(p.proposed_by, subjectId.value)) return
   const ctx = attemptContext()
   if (!ctx) return
   apprAttempt.value = {
@@ -1362,8 +1468,10 @@ function openApprConfirmation(p: PaymentProposalRow) {
     workspaceId: wsId.value,
     draftId: draftId.value,
     actorId: session?.subjectId.value ?? '',
-    factId: fact.value.id,
+    factId: p.rental_agreed_price_id,
     proposalId: p.id,
+    proposedBy: p.proposed_by,
+    proposedAt: p.proposed_at,
     amount: p.amount_minor,
     currency: p.currency,
     method: p.method,
@@ -1376,11 +1484,12 @@ function openApprConfirmation(p: PaymentProposalRow) {
   apprPostDenied.value = null
   apprReplayError.value = null
   apprSettleError.value = null
-  focusFormAlert(apprGen, staleAppr)
+  clearApprovalNotices()
+  focusStage('approval', apprGen)
 }
 
 function openRevPropConfirmation(pay: PaymentRow) {
-  if (revPropAttempt.value || !history.value || !fact.value) return
+  if (revPropAttempt.value || !writeReadsReady.value || !fact.value) return
   if (pay.reversed) return
   const ctx = attemptContext()
   if (!ctx) return
@@ -1404,12 +1513,13 @@ function openRevPropConfirmation(pay: PaymentRow) {
   revPropPostDenied.value = null
   revPropReplayError.value = null
   revPropSettleError.value = null
-  focusFormAlert(revPropGen, staleRevProp)
+  clearApprovalNotices()
+  focusStage('reversal-proposal', revPropGen)
 }
 
 function openRevApprConfirmation(rp: ReversalProposalRow) {
-  if (revApprAttempt.value || !history.value || !fact.value) return
-  if (rp.proposed_by === subjectId.value) return
+  if (revApprAttempt.value || !writeReadsReady.value || !fact.value) return
+  if (sameId(rp.proposed_by, subjectId.value)) return
   if (isPaymentReversed(rp.payment_id)) return
   const ctx = attemptContext()
   if (!ctx) return
@@ -1421,6 +1531,8 @@ function openRevApprConfirmation(rp: ReversalProposalRow) {
     factId: fact.value.id,
     paymentId: rp.payment_id,
     proposalId: rp.id,
+    proposedBy: rp.proposed_by,
+    proposedAt: rp.proposed_at,
     reason: rp.reason,
     customerLabel: ctx.customerLabel,
     itemLabel: ctx.itemLabel,
@@ -1430,7 +1542,8 @@ function openRevApprConfirmation(rp: ReversalProposalRow) {
   revApprPostDenied.value = null
   revApprReplayError.value = null
   revApprSettleError.value = null
-  focusFormAlert(revApprGen, staleRevAppr)
+  clearApprovalNotices()
+  focusStage('reversal-approval', revApprGen)
 }
 
 // Batalkan konfirmasi yang BELUM dikirim: buang snapshot yang belum
@@ -1494,19 +1607,10 @@ async function submitProp(resend = false) {
   const s = session
   if (!s || propInFlight) return
   if ((propUnknown.value || propConflict.value !== null) && !resend) return
-  if (resend && propConflict.value !== null) return
+  if (resend && (!propUnknown.value || propConflict.value !== null)) return
   const a = propAttempt.value
-  if (!a) return
-  if (!resend) {
-    // Kiriman pertama: bacaan wajib selesai dengan keadaan saat ini
-    // (fakta ada, riwayat terbaca, konteks cocok). Bacaan
-    // tertunda/gagal bukan tanpa-fakta. Kirim-ulang adalah pemulihan
-    // permintaan yang sudah dikirim, bukan kiriman baru, jadi tidak
-    // diblokir oleh bacaan sesudahnya yang gagal/berubah.
-    if (factLoading.value || historyLoading.value || refreshing.value) return
-    if (!fact.value || !history.value) return
-    if (!contextOk.value) return
-  }
+  if (!a || !isCurrentAttempt(a)) return
+  if (!resend && !propTargetLive.value) return
   const gen = propGen
   const myPost = ++propLoadGen
   propReplayError.value = null
@@ -1520,15 +1624,15 @@ async function submitProp(resend = false) {
       body: { amount_minor: a.amount, currency: a.currency, method: a.method, reference: a.reference },
       idempotencyKey: a.key
     })
-    if (staleProp(gen)) return
+    if (staleProp(gen) || !isCurrentAttempt(a)) return
     // 201, atau replay 200 dengan usulan yang cocok, mengonfirmasi.
     if ((status === 201 || status === 200) && isValidProposalForAttempt(data, a)) {
-      await confirmProp(gen)
+      await confirmProp(gen, 'post')
       return
     }
     setPropUnknown(gen)
   } catch (err) {
-    if (staleProp(gen)) return
+    if (staleProp(gen) || !isCurrentAttempt(a)) return
     if (err instanceof ApiError && err.status === 401) {
       redirectToLogin(s, route.fullPath)
       return
@@ -1543,8 +1647,7 @@ async function submitProp(resend = false) {
         // Snapshot dipertahankan + panel tetap terbuka; kirim-ulang
         // kunci-sama tetap tersedia sesudah penyebabnya diperbaiki.
         propPostDenied.value = err.message
-        await nextTick()
-        if (!staleProp(gen)) formAlert.value?.focus()
+        focusStage('proposal', gen)
         return
       }
       // Penolakan kirim-ulang yang tegas: TIDAK membuktikan tulis awal
@@ -1552,8 +1655,7 @@ async function submitProp(resend = false) {
       // snapshot dan ketidakpastian dipertahankan.
       propReplayError.value = err.message
       propUnknown.value = true
-      await nextTick()
-      if (!staleProp(gen)) formAlert.value?.focus()
+      focusStage('proposal', gen)
       return
     }
     // 500/502/jaringan: hasil tetap tak diketahui, snapshot dipertahankan.
@@ -1574,15 +1676,10 @@ async function submitAppr(resend = false) {
   const s = session
   if (!s || apprInFlight) return
   if ((apprUnknown.value || apprConflict.value !== null) && !resend) return
-  if (resend && apprConflict.value !== null) return
+  if (resend && (!apprUnknown.value || apprConflict.value !== null)) return
   const a = apprAttempt.value
-  if (!a) return
-  if (!resend) {
-    // Kiriman pertama: usulan wajib masih pending di riwayat terbaru.
-    if (historyLoading.value || refreshing.value) return
-    if (!history.value) return
-    if (!apprTargetLive.value) return
-  }
+  if (!a || !isCurrentAttempt(a)) return
+  if (!resend && !apprTargetLive.value) return
   const gen = apprGen
   const myPost = ++apprLoadGen
   apprReplayError.value = null
@@ -1596,16 +1693,16 @@ async function submitAppr(resend = false) {
       body: {},
       idempotencyKey: a.key
     })
-    if (staleAppr(gen)) return
+    if (staleAppr(gen) || !isCurrentAttempt(a)) return
     // 201, atau replay 200 dengan pembayaran yang cocok, mengonfirmasi
     // — termasuk pembayaran yang belakangan sudah dibalik.
     if ((status === 201 || status === 200) && isValidPaymentForApproveAttempt(data, a)) {
-      await confirmAppr(gen)
+      await finishPaymentApproval(gen, 'own', 'post')
       return
     }
     setApprUnknown(gen)
   } catch (err) {
-    if (staleAppr(gen)) return
+    if (staleAppr(gen) || !isCurrentAttempt(a)) return
     if (err instanceof ApiError && err.status === 401) {
       redirectToLogin(s, route.fullPath)
       return
@@ -1614,25 +1711,15 @@ async function submitAppr(resend = false) {
       setApprKeyMismatch(gen)
       return
     }
-    if (err instanceof ApiError && err.status === 409 && err.message === ALREADY_APPROVED) {
-      // Usulan sudah disetujui pihak lain: posting itu riwayat
-      // independen. Attempt dibersihkan; riwayat dibaca ulang.
-      clearApprStage()
-      apprGen++
-      await refreshReads('Data gagal dimuat ulang. Coba muat ulang data.')
-      return
-    }
     if (err instanceof ApiError && (err.status === 400 || err.status === 403 || err.status === 404 || err.status === 409 || err.status === 422)) {
-      if (!resend) {
+      if (resend) {
+        apprReplayError.value = err.message
+        apprUnknown.value = true
+      } else {
         apprPostDenied.value = err.message
-        await nextTick()
-        if (!staleAppr(gen)) formAlert.value?.focus()
-        return
       }
-      apprReplayError.value = err.message
-      apprUnknown.value = true
-      await nextTick()
-      if (!staleAppr(gen)) formAlert.value?.focus()
+      focusStage('approval', gen)
+      if (err.status === 409 && err.message === ALREADY_APPROVED) await refreshReads('Data gagal dimuat ulang. Coba muat ulang data.')
       return
     }
     setApprUnknown(gen)
@@ -1652,23 +1739,17 @@ async function submitRevProp(resend = false) {
   const s = session
   if (!s || revPropInFlight) return
   if ((revPropUnknown.value || revPropConflict.value !== null) && !resend) return
-  if (resend && revPropConflict.value !== null) return
-  const a = revPropAttempt.value
-  if (!a) return
-  if (!resend) {
-    // Kiriman pertama: pembayaran target wajib masih tercatat dan belum
-    // dibalik di riwayat terbaru. Alasan dibekukan di sini (diisi di
-    // dalam panel konfirmasi), sesudah dinormalisasi seperti server.
-    if (historyLoading.value || refreshing.value) return
-    if (!history.value) return
-    if (!revPropTargetLive.value) return
-    const reason = normalizeReason(reversalReasonInput.value)
-    if (reason === null) {
-      revPropFormError.value = 'Alasan pembalikan wajib diisi 1–500 karakter.'
-      return
-    }
-    a.reason = reason
+  if (resend && (!revPropUnknown.value || revPropConflict.value !== null)) return
+  const attempt = revPropAttempt.value
+  if (!attempt || !isCurrentAttempt(attempt)) return
+  if (!resend && !revPropTargetLive.value) return
+  const reason = attempt.reason || (!resend ? normalizeReason(reversalReasonInput.value) : null)
+  if (!reason) {
+    revPropFormError.value = 'Alasan pembalikan wajib diisi 1–500 karakter.'
+    return
   }
+  const a = attempt.reason ? attempt : { ...attempt, reason }
+  if (!attempt.reason) revPropAttempt.value = a
   const gen = revPropGen
   const myPost = ++revPropLoadGen
   revPropReplayError.value = null
@@ -1682,14 +1763,14 @@ async function submitRevProp(resend = false) {
       body: { reason: a.reason },
       idempotencyKey: a.key
     })
-    if (staleRevProp(gen)) return
+    if (staleRevProp(gen) || !isCurrentAttempt(a)) return
     if ((status === 201 || status === 200) && isValidReversalProposalForAttempt(data, a)) {
-      await confirmRevProp(gen)
+      await confirmRevProp(gen, 'post')
       return
     }
     setRevPropUnknown(gen)
   } catch (err) {
-    if (staleRevProp(gen)) return
+    if (staleRevProp(gen) || !isCurrentAttempt(a)) return
     if (err instanceof ApiError && err.status === 401) {
       redirectToLogin(s, route.fullPath)
       return
@@ -1698,25 +1779,15 @@ async function submitRevProp(resend = false) {
       setRevPropKeyMismatch(gen)
       return
     }
-    if (err instanceof ApiError && err.status === 409 && err.message === ALREADY_REVERSED) {
-      // Pembayaran sudah dibalik pihak lain: attempt dibersihkan;
-      // riwayat dibaca ulang.
-      clearRevPropStage()
-      revPropGen++
-      await refreshReads('Data gagal dimuat ulang. Coba muat ulang data.')
-      return
-    }
     if (err instanceof ApiError && (err.status === 400 || err.status === 403 || err.status === 404 || err.status === 409 || err.status === 422)) {
-      if (!resend) {
+      if (resend) {
+        revPropReplayError.value = err.message
+        revPropUnknown.value = true
+      } else {
         revPropPostDenied.value = err.message
-        await nextTick()
-        if (!staleRevProp(gen)) formAlert.value?.focus()
-        return
       }
-      revPropReplayError.value = err.message
-      revPropUnknown.value = true
-      await nextTick()
-      if (!staleRevProp(gen)) formAlert.value?.focus()
+      focusStage('reversal-proposal', gen)
+      if (err.status === 409 && err.message === ALREADY_REVERSED) await refreshReads('Data gagal dimuat ulang. Coba muat ulang data.')
       return
     }
     setRevPropUnknown(gen)
@@ -1736,16 +1807,10 @@ async function submitRevAppr(resend = false) {
   const s = session
   if (!s || revApprInFlight) return
   if ((revApprUnknown.value || revApprConflict.value !== null) && !resend) return
-  if (resend && revApprConflict.value !== null) return
+  if (resend && (!revApprUnknown.value || revApprConflict.value !== null)) return
   const a = revApprAttempt.value
-  if (!a) return
-  if (!resend) {
-    // Kiriman pertama: usulan pembalikan wajib masih pending dan
-    // pembayaran target belum dibalik di riwayat terbaru.
-    if (historyLoading.value || refreshing.value) return
-    if (!history.value) return
-    if (!revApprTargetLive.value) return
-  }
+  if (!a || !isCurrentAttempt(a)) return
+  if (!resend && !revApprTargetLive.value) return
   const gen = revApprGen
   const myPost = ++revApprLoadGen
   revApprReplayError.value = null
@@ -1759,14 +1824,14 @@ async function submitRevAppr(resend = false) {
       body: {},
       idempotencyKey: a.key
     })
-    if (staleRevAppr(gen)) return
+    if (staleRevAppr(gen) || !isCurrentAttempt(a)) return
     if ((status === 201 || status === 200) && isValidReversalForApproveAttempt(data, a)) {
-      await confirmRevAppr(gen)
+      await finishReversalApproval(gen, 'own', 'post')
       return
     }
     setRevApprUnknown(gen)
   } catch (err) {
-    if (staleRevAppr(gen)) return
+    if (staleRevAppr(gen) || !isCurrentAttempt(a)) return
     if (err instanceof ApiError && err.status === 401) {
       redirectToLogin(s, route.fullPath)
       return
@@ -1775,25 +1840,15 @@ async function submitRevAppr(resend = false) {
       setRevApprKeyMismatch(gen)
       return
     }
-    if (err instanceof ApiError && err.status === 409 && err.message === ALREADY_REVERSED) {
-      // Pembayaran sudah dibalik pihak lain: attempt dibersihkan;
-      // riwayat dibaca ulang.
-      clearRevApprStage()
-      revApprGen++
-      await refreshReads('Data gagal dimuat ulang. Coba muat ulang data.')
-      return
-    }
     if (err instanceof ApiError && (err.status === 400 || err.status === 403 || err.status === 404 || err.status === 409 || err.status === 422)) {
-      if (!resend) {
+      if (resend) {
+        revApprReplayError.value = err.message
+        revApprUnknown.value = true
+      } else {
         revApprPostDenied.value = err.message
-        await nextTick()
-        if (!staleRevAppr(gen)) formAlert.value?.focus()
-        return
       }
-      revApprReplayError.value = err.message
-      revApprUnknown.value = true
-      await nextTick()
-      if (!staleRevAppr(gen)) formAlert.value?.focus()
+      focusStage('reversal-approval', gen)
+      if (err.status === 409 && err.message === ALREADY_REVERSED) await refreshReads('Data gagal dimuat ulang. Coba muat ulang data.')
       return
     }
     setRevApprUnknown(gen)
@@ -1915,13 +1970,23 @@ async function resendRevAppr() {
           </div>
         </section>
 
-        <section class="card" aria-labelledby="payments-heading">
+        <section ref="paymentsSection" class="card" aria-labelledby="payments-heading" @focusin="rememberStageFocus">
           <h2 id="payments-heading" ref="paymentsHeading" tabindex="-1">Pembayaran</h2>
+          <div role="status" aria-atomic="true">
+            <p v-if="paymentPostedElsewhere">
+              Usulan {{ paymentPostedElsewhere.amount }} unit tarif · {{ paymentPostedElsewhere.currency }} (ID: {{ paymentPostedElsewhere.proposalId }}).
+              <span>Pembayaran untuk usulan ini sudah dicatat melalui permintaan lain.</span>
+            </p>
+            <p v-if="paymentReversedElsewhere">
+              Pembayaran (ID: {{ paymentReversedElsewhere }}).
+              <span>Catatan pembayaran ini sudah dibatalkan melalui permintaan lain.</span>
+            </p>
+          </div>
           <p>
             <button type="button" class="btn btn-secondary" :disabled="refreshing || loading" @click="refreshReads('Data gagal dimuat ulang. Coba muat ulang data.')">Muat ulang data</button>
           </p>
           <p v-if="historyLoading" role="status">Memuat riwayat pembayaran…</p>
-          <div v-else-if="history">
+          <div v-else-if="history && historyLinksVerified">
             <p>Jumlah harga disepakati (plafon acuan internal): {{ history.total_minor }} unit tarif · {{ history.currency }}</p>
             <p>Pembayaran posted aktif: {{ history.paid_minor }} unit tarif · {{ history.currency }}</p>
             <p>Sisa plafon acuan: {{ history.outstanding_minor }} unit tarif · {{ history.currency }}</p>
@@ -1936,9 +2001,9 @@ async function resendRevAppr() {
               <ul>
                 <li v-for="p in history.pending_payment_proposals" :key="p.id">
                   <p>Usulan pembayaran: {{ p.amount_minor }} unit tarif · {{ p.currency }} — {{ methodLabel(p.method) }}<span v-if="p.reference"> · {{ p.reference }}</span><br>Diusulkan: {{ p.proposed_at }} (UTC)</p>
-                  <p v-if="p.proposed_by === subjectId">Persetujuan membutuhkan aktor kedua.</p>
-                  <p v-if="!apprAttempt">
-                    <button type="button" class="btn" :disabled="apprBusy || p.proposed_by === subjectId" @click="openApprConfirmation(p)">Setujui</button>
+                  <p v-if="sameId(p.proposed_by, subjectId)">Persetujuan membutuhkan aktor kedua.</p>
+                  <p v-if="!apprAttempt" data-payment-stage="approval">
+                    <button type="button" class="btn" :disabled="!writeReadsReady || apprBusy || sameId(p.proposed_by, subjectId)" @click="openApprConfirmation(p)">Setujui</button>
                   </p>
                 </li>
               </ul>
@@ -1950,8 +2015,8 @@ async function resendRevAppr() {
                 <li v-for="pay in history.payments" :key="pay.id">
                   <p>{{ pay.amount_minor }} unit tarif · {{ pay.currency }} — {{ methodLabel(pay.method) }}<span v-if="pay.reference"> · {{ pay.reference }}</span><br>Disetujui: {{ pay.approved_at }} (UTC)</p>
                   <p v-if="pay.reversed"><strong>Dibatalkan</strong></p>
-                  <p v-if="!pay.reversed && !revPropAttempt">
-                    <button type="button" class="btn" :disabled="revPropBusy" @click="openRevPropConfirmation(pay)">Usulkan pembalikan</button>
+                  <p v-if="!pay.reversed && !revPropAttempt" data-payment-stage="reversal-proposal">
+                    <button type="button" class="btn" :disabled="!writeReadsReady || revPropBusy" @click="openRevPropConfirmation(pay)">Usulkan pembalikan</button>
                   </p>
                 </li>
               </ul>
@@ -1962,10 +2027,10 @@ async function resendRevAppr() {
               <ul>
                 <li v-for="rp in history.pending_reversal_proposals" :key="rp.id">
                   <p>Usulan pembalikan: {{ rp.reason }}<br>Diusulkan: {{ rp.proposed_at }} (UTC)</p>
-                  <p v-if="rp.proposed_by === subjectId">Persetujuan membutuhkan aktor kedua.</p>
+                  <p v-if="sameId(rp.proposed_by, subjectId)">Persetujuan membutuhkan aktor kedua.</p>
                   <p v-else-if="isPaymentReversed(rp.payment_id)">Persetujuan tidak lagi tersedia untuk pembayaran ini.</p>
-                  <p v-if="!revApprAttempt">
-                    <button type="button" class="btn" :disabled="revApprBusy || rp.proposed_by === subjectId || isPaymentReversed(rp.payment_id)" @click="openRevApprConfirmation(rp)">Setujui pembalikan</button>
+                  <p v-if="!revApprAttempt" data-payment-stage="reversal-approval">
+                    <button type="button" class="btn" :disabled="!writeReadsReady || revApprBusy || sameId(rp.proposed_by, subjectId) || isPaymentReversed(rp.payment_id)" @click="openRevApprConfirmation(rp)">Setujui pembalikan</button>
                   </p>
                 </li>
               </ul>
@@ -1982,13 +2047,13 @@ async function resendRevAppr() {
 
             <p v-if="!history.pending_payment_proposals.length && !history.payments.length && !history.pending_reversal_proposals.length && !history.reversals.length" class="hint">Belum ada pembayaran untuk draf ini.</p>
           </div>
-          <p v-else-if="factMissing">Riwayat pembayaran belum tersedia sebelum harga dicatat untuk draf ini.</p>
-          <div v-else-if="historyError" class="alert" role="alert">
-            <p>{{ historyError }}</p>
+          <p v-else-if="factMissing && !history && !historyError">Riwayat pembayaran belum tersedia sebelum harga dicatat untuk draf ini.</p>
+          <div v-else-if="historyError || history" class="alert" role="alert">
+            <p>{{ historyError || 'Status pembalikan belum dapat dipastikan dari riwayat ini. Muat ulang data sebelum melanjutkan.' }}</p>
             <p><button type="button" class="btn btn-secondary" @click="refreshReads('Data gagal dimuat ulang. Coba muat ulang data.')">Coba lagi</button></p>
           </div>
 
-          <template v-if="history && fact">
+          <div v-if="(historyLinksVerified || historyLoading) && fact" data-payment-stage="proposal">
             <p>
               <label for="pay-amount">Nominal (unit tersimpan)</label>
               <input id="pay-amount" v-model="amountInput" inputmode="numeric" :disabled="propBusy || !!propAttempt">
@@ -2005,12 +2070,12 @@ async function resendRevAppr() {
               <input id="pay-reference" v-model="referenceInput" :disabled="propBusy || !!propAttempt">
             </p>
             <p v-if="propFormError" class="field-error">{{ propFormError }}</p>
-            <p v-if="canPropose && !propAttempt">
+            <p v-if="writeReadsReady && !propAttempt">
               <button type="button" class="btn" :disabled="propBusy" @click="openPropConfirmation">Usulkan pembayaran</button>
             </p>
-          </template>
-            <div v-if="propAttempt && !propUnknown && propConflict === null" class="alert" role="alert">
-              <h3 ref="formAlert" tabindex="-1">Konfirmasi usulan pembayaran</h3>
+          </div>
+            <div v-if="propAttempt && !propUnknown && propConflict === null" class="alert" role="alert" data-payment-stage="proposal">
+              <h3 tabindex="-1">Konfirmasi usulan pembayaran</h3>
               <p>
                 {{ propAttempt.customerLabel }} — {{ propAttempt.itemLabel }}. Periode yang dicatat:
                 mulai {{ propAttempt.fromIso }}; berakhir {{ propAttempt.toIso }} (UTC).
@@ -2023,14 +2088,14 @@ async function resendRevAppr() {
               <p v-if="propPostDenied" class="field-error">{{ propPostDenied }}</p>
               <p v-if="isFinanceDenied(propPostDenied)">{{ FINANCE_GUIDANCE }}</p>
               <p>
-                <button type="button" class="btn" :disabled="propBusy || refreshing || !history || !fact" @click="submitProp(false)">
+                <button type="button" class="btn" :disabled="propBusy || !propTargetLive" @click="submitProp(false)">
                   {{ propBusy ? 'Mengusulkan…' : 'Usulkan pembayaran' }}
                 </button>
                 <button type="button" class="btn btn-secondary" :disabled="propBusy" @click="cancelPropConfirmation">Batalkan</button>
               </p>
             </div>
-            <div v-if="propUnknown" class="alert" role="alert">
-              <h3 ref="formAlert" tabindex="-1">Hasil usulan pembayaran tidak diketahui</h3>
+            <div v-if="propUnknown" class="alert" role="alert" data-payment-stage="proposal">
+              <h3 tabindex="-1">Hasil usulan pembayaran tidak diketahui</h3>
               <p>
                 Permintaan mungkin sudah tersimpan atau belum. Daftar yang tampil mungkin hanya
                 sebagian; data yang belum terlihat tetap mungkin sudah tersimpan. Pemulihan ini
@@ -2052,8 +2117,8 @@ async function resendRevAppr() {
                 Muat ulang data atau kirim lagi dengan permintaan yang sama.
               </p>
             </div>
-            <div v-if="propConflict === 'key'" class="alert" role="alert">
-              <h3 ref="formAlert" tabindex="-1">Kunci idempotency sudah dipakai</h3>
+            <div v-if="propConflict === 'key'" class="alert" role="alert" data-payment-stage="proposal">
+              <h3 tabindex="-1">Kunci idempotency sudah dipakai</h3>
               <p>
                 {{ KEY_MISMATCH }}. Kunci pengiriman ini sudah terikat pada permintaan lain, jadi permintaan ini
                 tidak dapat dikirim ulang dengan kunci yang sama.
@@ -2070,8 +2135,8 @@ async function resendRevAppr() {
               </p>
             </div>
 
-            <div v-if="apprAttempt && !apprUnknown && apprConflict === null" class="alert" role="alert">
-              <h3 ref="formAlert" tabindex="-1">Konfirmasi persetujuan pembayaran</h3>
+            <div v-if="apprAttempt && !apprUnknown && apprConflict === null" class="alert" role="alert" data-payment-stage="approval">
+              <h3 tabindex="-1">Konfirmasi persetujuan pembayaran</h3>
               <p>
                 {{ apprAttempt.customerLabel }} — {{ apprAttempt.itemLabel }}. Periode yang dicatat:
                 mulai {{ apprAttempt.fromIso }}; berakhir {{ apprAttempt.toIso }} (UTC).
@@ -2084,14 +2149,14 @@ async function resendRevAppr() {
               <p v-if="apprPostDenied" class="field-error">{{ apprPostDenied }}</p>
               <p v-if="isFinanceDenied(apprPostDenied)">{{ FINANCE_GUIDANCE }}</p>
               <p>
-                <button type="button" class="btn" :disabled="apprBusy || refreshing || !history || !apprTargetLive" @click="submitAppr(false)">
+                <button type="button" class="btn" :disabled="apprBusy || !apprTargetLive" @click="submitAppr(false)">
                   {{ apprBusy ? 'Menyetujui…' : 'Setujui' }}
                 </button>
                 <button type="button" class="btn btn-secondary" :disabled="apprBusy" @click="cancelApprConfirmation">Batalkan</button>
               </p>
             </div>
-            <div v-if="apprUnknown" class="alert" role="alert">
-              <h3 ref="formAlert" tabindex="-1">Hasil persetujuan pembayaran tidak diketahui</h3>
+            <div v-if="apprUnknown" class="alert" role="alert" data-payment-stage="approval">
+              <h3 tabindex="-1">Hasil persetujuan pembayaran tidak diketahui</h3>
               <p>
                 Permintaan mungkin sudah tersimpan atau belum. Daftar yang tampil mungkin hanya
                 sebagian; data yang belum terlihat tetap mungkin sudah tersimpan. Pemulihan ini
@@ -2113,8 +2178,8 @@ async function resendRevAppr() {
                 Muat ulang data atau kirim lagi dengan permintaan yang sama.
               </p>
             </div>
-            <div v-if="apprConflict === 'key'" class="alert" role="alert">
-              <h3 ref="formAlert" tabindex="-1">Kunci idempotency sudah dipakai</h3>
+            <div v-if="apprConflict === 'key'" class="alert" role="alert" data-payment-stage="approval">
+              <h3 tabindex="-1">Kunci idempotency sudah dipakai</h3>
               <p>
                 {{ KEY_MISMATCH }}. Kunci pengiriman ini sudah terikat pada permintaan lain, jadi permintaan ini
                 tidak dapat dikirim ulang dengan kunci yang sama.
@@ -2131,8 +2196,8 @@ async function resendRevAppr() {
               </p>
             </div>
 
-            <div v-if="revPropAttempt && !revPropUnknown && revPropConflict === null" class="alert" role="alert">
-              <h3 ref="formAlert" tabindex="-1">Konfirmasi usulan pembalikan</h3>
+            <div v-if="revPropAttempt && !revPropUnknown && revPropConflict === null" class="alert" role="alert" data-payment-stage="reversal-proposal">
+              <h3 tabindex="-1">Konfirmasi usulan pembalikan</h3>
               <p>
                 {{ revPropAttempt.customerLabel }} — {{ revPropAttempt.itemLabel }}. Periode yang dicatat:
                 mulai {{ revPropAttempt.fromIso }}; berakhir {{ revPropAttempt.toIso }} (UTC).
@@ -2144,20 +2209,20 @@ async function resendRevAppr() {
               </p>
               <p>
                 <label for="pay-reason">Alasan pembalikan</label>
-                <input id="pay-reason" v-model="reversalReasonInput" :disabled="revPropBusy">
+                <input id="pay-reason" v-model="reversalReasonInput" :disabled="revPropBusy || !!revPropAttempt.reason">
               </p>
               <p v-if="revPropFormError" class="field-error">{{ revPropFormError }}</p>
               <p v-if="revPropPostDenied" class="field-error">{{ revPropPostDenied }}</p>
               <p v-if="isFinanceDenied(revPropPostDenied)">{{ FINANCE_GUIDANCE }}</p>
               <p>
-                <button type="button" class="btn" :disabled="revPropBusy || refreshing || !history || !revPropTargetLive" @click="submitRevProp(false)">
+                <button type="button" class="btn" :disabled="revPropBusy || !revPropTargetLive" @click="submitRevProp(false)">
                   {{ revPropBusy ? 'Mengusulkan…' : 'Usulkan pembalikan' }}
                 </button>
                 <button type="button" class="btn btn-secondary" :disabled="revPropBusy" @click="cancelRevPropConfirmation">Batalkan</button>
               </p>
             </div>
-            <div v-if="revPropUnknown" class="alert" role="alert">
-              <h3 ref="formAlert" tabindex="-1">Hasil usulan pembalikan tidak diketahui</h3>
+            <div v-if="revPropUnknown" class="alert" role="alert" data-payment-stage="reversal-proposal">
+              <h3 tabindex="-1">Hasil usulan pembalikan tidak diketahui</h3>
               <p>
                 Permintaan mungkin sudah tersimpan atau belum. Daftar yang tampil mungkin hanya
                 sebagian; data yang belum terlihat tetap mungkin sudah tersimpan. Pemulihan ini
@@ -2180,8 +2245,8 @@ async function resendRevAppr() {
                 Muat ulang data atau kirim lagi dengan permintaan yang sama.
               </p>
             </div>
-            <div v-if="revPropConflict === 'key'" class="alert" role="alert">
-              <h3 ref="formAlert" tabindex="-1">Kunci idempotency sudah dipakai</h3>
+            <div v-if="revPropConflict === 'key'" class="alert" role="alert" data-payment-stage="reversal-proposal">
+              <h3 tabindex="-1">Kunci idempotency sudah dipakai</h3>
               <p>
                 {{ KEY_MISMATCH }}. Kunci pengiriman ini sudah terikat pada permintaan lain, jadi permintaan ini
                 tidak dapat dikirim ulang dengan kunci yang sama.
@@ -2199,8 +2264,8 @@ async function resendRevAppr() {
               </p>
             </div>
 
-            <div v-if="revApprAttempt && !revApprUnknown && revApprConflict === null" class="alert" role="alert">
-              <h3 ref="formAlert" tabindex="-1">Konfirmasi persetujuan pembalikan</h3>
+            <div v-if="revApprAttempt && !revApprUnknown && revApprConflict === null" class="alert" role="alert" data-payment-stage="reversal-approval">
+              <h3 tabindex="-1">Konfirmasi persetujuan pembalikan</h3>
               <p>
                 {{ revApprAttempt.customerLabel }} — {{ revApprAttempt.itemLabel }}. Periode yang dicatat:
                 mulai {{ revApprAttempt.fromIso }}; berakhir {{ revApprAttempt.toIso }} (UTC).
@@ -2213,14 +2278,14 @@ async function resendRevAppr() {
               <p v-if="revApprPostDenied" class="field-error">{{ revApprPostDenied }}</p>
               <p v-if="isFinanceDenied(revApprPostDenied)">{{ FINANCE_GUIDANCE }}</p>
               <p>
-                <button type="button" class="btn" :disabled="revApprBusy || refreshing || !history || !revApprTargetLive" @click="submitRevAppr(false)">
+                <button type="button" class="btn" :disabled="revApprBusy || !revApprTargetLive" @click="submitRevAppr(false)">
                   {{ revApprBusy ? 'Menyetujui…' : 'Setujui pembalikan' }}
                 </button>
                 <button type="button" class="btn btn-secondary" :disabled="revApprBusy" @click="cancelRevApprConfirmation">Batalkan</button>
               </p>
             </div>
-            <div v-if="revApprUnknown" class="alert" role="alert">
-              <h3 ref="formAlert" tabindex="-1">Hasil persetujuan pembalikan tidak diketahui</h3>
+            <div v-if="revApprUnknown" class="alert" role="alert" data-payment-stage="reversal-approval">
+              <h3 tabindex="-1">Hasil persetujuan pembalikan tidak diketahui</h3>
               <p>
                 Permintaan mungkin sudah tersimpan atau belum. Daftar yang tampil mungkin hanya
                 sebagian; data yang belum terlihat tetap mungkin sudah tersimpan. Pemulihan ini
@@ -2242,8 +2307,8 @@ async function resendRevAppr() {
                 Muat ulang data atau kirim lagi dengan permintaan yang sama.
               </p>
             </div>
-            <div v-if="revApprConflict === 'key'" class="alert" role="alert">
-              <h3 ref="formAlert" tabindex="-1">Kunci idempotency sudah dipakai</h3>
+            <div v-if="revApprConflict === 'key'" class="alert" role="alert" data-payment-stage="reversal-approval">
+              <h3 tabindex="-1">Kunci idempotency sudah dipakai</h3>
               <p>
                 {{ KEY_MISMATCH }}. Kunci pengiriman ini sudah terikat pada permintaan lain, jadi permintaan ini
                 tidak dapat dikirim ulang dengan kunci yang sama.

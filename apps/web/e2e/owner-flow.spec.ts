@@ -9,7 +9,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { expect, test, type APIRequestContext, type Page } from '@playwright/test'
+import { expect, test, type APIRequestContext, type Page, type Route } from '@playwright/test'
 
 const RUN = `${Date.now().toString(36)}${Math.floor(Math.random() * 1296).toString(36)}`
 const PASSWORD = 'E2eUiTest123'
@@ -22,6 +22,7 @@ const SHOTS_UI03 = path.join(path.dirname(fileURLToPath(import.meta.url)), '..',
 const SHOTS_UI04 = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'design', 'screenshots', 'f2-ui-04')
 const SHOTS_UI05 = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'design', 'screenshots', 'f2-ui-05')
 const SHOTS_UI06 = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'design', 'screenshots', 'f2-ui-06')
+const SHOTS_UI07 = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'design', 'screenshots', 'f2-ui-07')
 
 const ownerEmail = `pemilik-${RUN}@e2e.umnia.local`
 const staffEmail = `staf-${RUN}@e2e.umnia.local`
@@ -510,6 +511,109 @@ async function seedCustodyReady(page: Page, tag: string): Promise<{ email: strin
   const waitMs = new Date(w.draftFrom).getTime() - Date.now() + 500
   if (waitMs > 0) await new Promise(r => setTimeout(r, waitMs))
   return { ...s, draft, fact }
+}
+
+// F2-UI-07: baris pembayaran/pembalikan + panggilan API nyata untuk tes pembayaran.
+interface PaymentProposalDTO { id: string, rental_contract_id: string, rental_agreed_price_id: string, amount_minor: string, currency: string, method: string, reference: string | null, proposed_by: string, proposed_at: string, client_request_id: string, status: string }
+interface PaymentDTO { id: string, proposal_id: string, rental_contract_id: string, rental_agreed_price_id: string, amount_minor: string, currency: string, method: string, reference: string | null, proposed_by: string, proposed_at: string, approved_by: string, approved_at: string, client_request_id: string, reversed: boolean, reversal_id: string | null }
+interface ReversalProposalDTO { id: string, payment_id: string, rental_contract_id: string, reason: string, proposed_by: string, proposed_at: string, client_request_id: string, status: string }
+interface ReversalDTO { id: string, payment_id: string, reversal_proposal_id: string, rental_contract_id: string, reason: string, proposed_by: string, proposed_at: string, approved_by: string, approved_at: string, client_request_id: string }
+interface PaymentsHistoryDTO { rental_contract_id: string, rental_agreed_price_id: string, currency: string, total_minor: string, paid_minor: string, outstanding_minor: string, payments: PaymentDTO[], reversals: ReversalDTO[], pending_payment_proposals: PaymentProposalDTO[], pending_reversal_proposals: ReversalProposalDTO[] }
+
+function grantFinance(ws: string) {
+  if (!OPERATOR_URL) {
+    throw new Error('E2E_OPERATOR_DATABASE_URL belum diset — provisioning operator belum dijalankan; tes gagal, bukan dilewati')
+  }
+  if (!existsSync(GRANT_CLI)) {
+    throw new Error(`CLI grant-entitlement tidak ditemukan di ${GRANT_CLI} — bangun dulu: go build -o grant-entitlement ./cmd/grant-entitlement (di services/business-api)`)
+  }
+  const out = execFileSync(GRANT_CLI, ['--workspace', ws, '--module', 'finance.basic', '--version', '0.1.0', '--reason', 'tes E2E owner-flow'], {
+    encoding: 'utf-8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: { ...process.env, UMNIA_OPERATOR_DATABASE_URL: OPERATOR_URL },
+  })
+  if (!out.startsWith('granted ') && !out.startsWith('already_granted')) {
+    throw new Error(`grant finance CLI: hasil tak terduga (${out.slice(0, 80)})`)
+  }
+}
+
+async function getPayments(page: Page, ws: string, draftId: string, email: string = ownerEmail): Promise<{ status: number, body: any }> {
+  const res = await page.request.get(`/api/workspaces/${ws}/rental/contracts/${draftId}/payments`, {
+    headers: { Authorization: `Bearer ${await apiToken(page.request, email)}` }
+  })
+  return { status: res.status(), body: await res.json() }
+}
+
+async function proposePayment(page: Page, ws: string, draftId: string, email: string, key: string, body: { amount_minor: string, currency: string, method: string, reference?: string | null }): Promise<{ status: number, body: any }> {
+  const res = await page.request.post(`/api/workspaces/${ws}/rental/contracts/${draftId}/payment-proposals`, {
+    headers: { Authorization: `Bearer ${await apiToken(page.request, email)}`, 'Idempotency-Key': key },
+    data: body
+  })
+  return { status: res.status(), body: await res.json() }
+}
+
+async function approvePayment(page: Page, ws: string, draftId: string, proposalId: string, email: string, key: string): Promise<{ status: number, body: any }> {
+  const res = await page.request.post(`/api/workspaces/${ws}/rental/contracts/${draftId}/payment-proposals/${proposalId}/approvals`, {
+    headers: { Authorization: `Bearer ${await apiToken(page.request, email)}`, 'Idempotency-Key': key },
+    data: {}
+  })
+  return { status: res.status(), body: await res.json() }
+}
+
+async function proposeReversal(page: Page, ws: string, draftId: string, paymentId: string, email: string, key: string, reason: string): Promise<{ status: number, body: any }> {
+  const res = await page.request.post(`/api/workspaces/${ws}/rental/contracts/${draftId}/payments/${paymentId}/reversal-proposals`, {
+    headers: { Authorization: `Bearer ${await apiToken(page.request, email)}`, 'Idempotency-Key': key },
+    data: { reason }
+  })
+  return { status: res.status(), body: await res.json() }
+}
+
+async function approveReversal(page: Page, ws: string, draftId: string, paymentId: string, proposalId: string, email: string, key: string): Promise<{ status: number, body: any }> {
+  const res = await page.request.post(`/api/workspaces/${ws}/rental/contracts/${draftId}/payments/${paymentId}/reversal-proposals/${proposalId}/approvals`, {
+    headers: { Authorization: `Bearer ${await apiToken(page.request, email)}`, 'Idempotency-Key': key },
+    data: {}
+  })
+  return { status: res.status(), body: await res.json() }
+}
+
+// F2-UI-07: workspace + pemilik mandiri per tes pembayaran (tanpa ws bersama)
+// supaya tiap tes pembayaran bisa jalan sendiri lewat --grep. Tarif 150000,
+// draf 2047 2 unit, total 300000 — contoh kerja yang sama dengan tes harga.
+async function paymentSetup(page: Page, tag: string): Promise<{ email: string, ws: string, token: string, customer: { id: string, display_name: string }, item: { id: string, sku: string, name: string, status: string }, draft: DraftRow, fact: FactRow }> {
+  const s = await priceSetup(page, `py-${tag}`)
+  await seedPriceOne(page.request, s.ws, s.token, s.item.id, '2047-01-01T00:00:00Z', '2047-02-01T00:00:00Z', '150000')
+  const draft = await seedDraftOne(page.request, s.ws, s.token, s.customer.id, s.item.id, '2047-01-01T00:00:00Z', '2047-01-03T00:00:00Z')
+  const quote = await getQuote(page, s.ws, draft.id, s.email)
+  expect(quote.status).toBe(200)
+  const accepted = await acceptPrice(page, s.ws, draft.id, s.email, randomUUID(), (quote.body as QuoteRow).price_version_id, '300000')
+  expect(accepted.status).toBe(201)
+  return { ...s, draft, fact: accepted.body as FactRow }
+}
+
+// Draf + fakta siap dibayar: finance di-grant lewat CLI sungguhan lalu
+// diaktifkan lewat API (alur aktivasi UI sendiri sudah tercakup tes modul).
+async function seedPaymentReady(page: Page, tag: string): Promise<{ email: string, ws: string, token: string, customer: { id: string, display_name: string }, item: { id: string, sku: string, name: string, status: string }, draft: DraftRow, fact: FactRow }> {
+  const s = await paymentSetup(page, tag)
+  grantFinance(s.ws)
+  const act = await page.request.post(`/api/workspaces/${s.ws}/modules/finance.basic/activate`, {
+    headers: { Authorization: `Bearer ${s.token}` },
+    data: { version: '0.1.0' }
+  })
+  expect(act.status()).toBe(200)
+  return s
+}
+
+// Undang manajer kedua lalu gabung lewat UI (alur terima-undangan yang
+// sama seperti tes izin custody) supaya approval dua aktor bisa lewat UI.
+// Pemanggil harus dalam keadaan belum masuk (atau masuk sebagai `by`).
+async function inviteManager(page: Page, ws: string, email: string, by: string): Promise<void> {
+  const code = await uiInvite(page, ws, email, 'manager', by)
+  await uiRegister(page, email)
+  await uiLogin(page, email)
+  await gotoAuthed(page, `/invites/accept?workspace_id=${ws}`, email)
+  await page.getByLabel('Kode undangan').fill(code)
+  await page.locator('form button[type="submit"]').click()
+  await expect(page).toHaveURL(new RegExp(`/workspaces/${ws}/members`))
 }
 
 test.describe.serial('alur pemilik', () => {
@@ -6443,5 +6547,1050 @@ test.describe.serial('alur pemilik', () => {
     const files = manifest.map((m) => ({ ...m, sha256: sha(m.file) }))
     writeFileSync(path.join(SHOTS_UI06, 'manifest.json'), JSON.stringify({ generated_by: 'owner-flow.spec.ts f2-ui-06', files }, null, 2) + '\n')
     expect(files.length).toBe(8)
+  })
+
+  test('pembayaran: tautan Pembayaran membuka halaman; usulkan 201 → aktor kedua setujui 201 → total berubah + audit', async ({ page }) => {
+    const { email, ws, token, customer, item, draft } = await seedPaymentReady(page, 'happy')
+    const mgr2 = `man2-py-happy-${RUN}@e2e.umnia.local`
+    await inviteManager(page, ws, mgr2, email)
+    await uiLogin(page, email)
+    await gotoAuthed(page, `/workspaces/${ws}/rentals`, email)
+    await page.getByRole('link', { name: 'Pembayaran' }).first().click()
+    await expect(page).toHaveURL(new RegExp(`/workspaces/${ws}/rental-payments/${draft.id}`))
+    await expect(page.locator('h1')).toHaveText('Pembayaran')
+    await expect(page.getByText('Jumlah harga disepakati (plafon acuan internal): 300000 unit tarif · IDR')).toBeVisible()
+    await expect(page.getByText('Pembayaran posted aktif: 0 unit tarif · IDR')).toBeVisible()
+    await expect(page.getByText('Sisa plafon acuan: 300000 unit tarif · IDR')).toBeVisible()
+    await page.getByLabel('Nominal (unit tersimpan)').fill('100000')
+    await page.getByLabel('Metode').selectOption('transfer')
+    await page.getByRole('button', { name: 'Usulkan pembayaran' }).click()
+    await expect(page.getByRole('heading', { name: 'Konfirmasi usulan pembayaran' })).toBeVisible()
+    await page.getByRole('button', { name: 'Usulkan pembayaran' }).click()
+    await expect(page.getByText('Usulan pembayaran: 100000 unit tarif · IDR')).toBeVisible()
+    // Usulan sendiri tidak bisa disetujui sendiri: tombol nonaktif + penjelasan.
+    await expect(page.getByRole('button', { name: 'Setujui' })).toBeDisabled()
+    await expect(page.getByText('Persetujuan membutuhkan aktor kedua.')).toBeVisible()
+    const hist1 = await getPayments(page, ws, draft.id, email)
+    expect(hist1.status).toBe(200)
+    expect((hist1.body as PaymentsHistoryDTO).pending_payment_proposals.length).toBe(1)
+    expect((hist1.body as PaymentsHistoryDTO).paid_minor).toBe('0')
+    // Aktor kedua menyetujui lewat UI.
+    await uiLogout(page)
+    await uiLogin(page, mgr2)
+    await gotoAuthed(page, `/workspaces/${ws}/rental-payments/${draft.id}`, mgr2)
+    await expect(page.getByText('Usulan pembayaran: 100000 unit tarif · IDR')).toBeVisible()
+    await page.getByRole('button', { name: 'Setujui' }).click()
+    await expect(page.getByRole('heading', { name: 'Konfirmasi persetujuan pembayaran' })).toBeVisible()
+    await page.getByRole('button', { name: 'Setujui' }).click()
+    await expect(page.getByText('Pembayaran posted aktif: 100000 unit tarif · IDR')).toBeVisible()
+    await expect(page.getByText('Sisa plafon acuan: 200000 unit tarif · IDR')).toBeVisible()
+    const hist2 = await getPayments(page, ws, draft.id, email)
+    expect(hist2.status).toBe(200)
+    const h2 = hist2.body as PaymentsHistoryDTO
+    expect(h2.payments.length).toBe(1)
+    expect(h2.payments[0].amount_minor).toBe('100000')
+    expect(h2.payments[0].method).toBe('transfer')
+    expect(h2.payments[0].reversed).toBe(false)
+    expect(h2.pending_payment_proposals.length).toBe(0)
+    expect(h2.paid_minor).toBe('100000')
+    expect(h2.outstanding_minor).toBe('200000')
+    expect(countAudits(ws, 'rental_payment_proposed')).toBe(1)
+    expect(countAudits(ws, 'rental_payment_posted')).toBe(1)
+  })
+
+  test('pembayaran: pembalikan penuh — usulkan 201 → aktor kedua setujui 201 → reversed + paid kembali + audit', async ({ page }) => {
+    const { email, ws, token, customer, item, draft } = await seedPaymentReady(page, 'balik')
+    const mgr2 = `man2-py-balik-${RUN}@e2e.umnia.local`
+    await inviteManager(page, ws, mgr2, email)
+    const prop = await proposePayment(page, ws, draft.id, email, randomUUID(), { amount_minor: '100000', currency: 'IDR', method: 'cash', reference: null })
+    expect(prop.status).toBe(201)
+    const propId = (prop.body as PaymentProposalDTO).id
+    const appr = await approvePayment(page, ws, draft.id, propId, mgr2, randomUUID())
+    expect(appr.status).toBe(201)
+    const payId = (appr.body as PaymentDTO).id
+    await uiLogin(page, email)
+    await gotoAuthed(page, `/workspaces/${ws}/rental-payments/${draft.id}`, email)
+    await expect(page.getByText('Pembayaran posted aktif: 100000 unit tarif · IDR')).toBeVisible()
+    await page.getByRole('button', { name: 'Usulkan pembalikan' }).click()
+    await expect(page.getByRole('heading', { name: 'Konfirmasi usulan pembalikan' })).toBeVisible()
+    await page.getByLabel('Alasan pembalikan').fill('Salah catat nominal')
+    await page.getByRole('button', { name: 'Usulkan pembalikan' }).click()
+    await expect(page.getByText('Usulan pembalikan: Salah catat nominal')).toBeVisible()
+    await uiLogout(page)
+    await uiLogin(page, mgr2)
+    await gotoAuthed(page, `/workspaces/${ws}/rental-payments/${draft.id}`, mgr2)
+    await page.getByRole('button', { name: 'Setujui pembalikan' }).click()
+    await expect(page.getByRole('heading', { name: 'Konfirmasi persetujuan pembalikan' })).toBeVisible()
+    await page.getByRole('button', { name: 'Setujui pembalikan' }).click()
+    await expect(page.getByText('Dibatalkan')).toBeVisible()
+    await expect(page.getByText('Pembayaran posted aktif: 0 unit tarif · IDR')).toBeVisible()
+    await expect(page.getByText('Sisa plafon acuan: 300000 unit tarif · IDR')).toBeVisible()
+    const hist = await getPayments(page, ws, draft.id, email)
+    expect(hist.status).toBe(200)
+    const h = hist.body as PaymentsHistoryDTO
+    expect(h.payments.length).toBe(1)
+    expect(h.payments[0].reversed).toBe(true)
+    expect(h.payments[0].reversal_id).toBeTruthy()
+    expect(h.reversals.length).toBe(1)
+    expect(h.reversals[0].reason).toBe('Salah catat nominal')
+    expect(h.reversals[0].payment_id).toBe(payId)
+    expect(h.paid_minor).toBe('0')
+    expect(countAudits(ws, 'rental_payment_reversal_proposed')).toBe(1)
+    expect(countAudits(ws, 'rental_payment_reversal_posted')).toBe(1)
+  })
+
+  test('pembayaran: replay keempat tahap; kunci dipakai ulang 409; tanpa audit ganda', async ({ page }) => {
+    const { email, ws, token, customer, item, draft } = await seedPaymentReady(page, 'replay')
+    const mgr2 = `man2-py-replay-${RUN}@e2e.umnia.local`
+    await inviteManager(page, ws, mgr2, email)
+    const pk = randomUUID()
+    const p1 = await proposePayment(page, ws, draft.id, email, pk, { amount_minor: '100000', currency: 'IDR', method: 'cash', reference: 'INV-1' })
+    expect(p1.status).toBe(201)
+    const propId = (p1.body as PaymentProposalDTO).id
+    const pReplay = await proposePayment(page, ws, draft.id, email, pk, { amount_minor: '100000', currency: 'IDR', method: 'cash', reference: 'INV-1' })
+    expect(pReplay.status).toBe(200)
+    expect((pReplay.body as PaymentProposalDTO).id).toBe(propId)
+    const pMisuse = await proposePayment(page, ws, draft.id, email, pk, { amount_minor: '50000', currency: 'IDR', method: 'cash', reference: 'INV-1' })
+    expect(pMisuse.status).toBe(409)
+    expect(pMisuse.body.error).toBe('kunci idempotency sudah dipakai untuk permintaan yang berbeda')
+    const ak = randomUUID()
+    const a1 = await approvePayment(page, ws, draft.id, propId, mgr2, ak)
+    expect(a1.status).toBe(201)
+    const payId = (a1.body as PaymentDTO).id
+    expect((a1.body as PaymentDTO).client_request_id).toBe(ak)
+    const aReplay = await approvePayment(page, ws, draft.id, propId, mgr2, ak)
+    expect(aReplay.status).toBe(200)
+    expect((aReplay.body as PaymentDTO).id).toBe(payId)
+    const p2 = await proposePayment(page, ws, draft.id, email, randomUUID(), { amount_minor: '50000', currency: 'IDR', method: 'cash', reference: null })
+    expect(p2.status).toBe(201)
+    const aMisuse = await approvePayment(page, ws, draft.id, (p2.body as PaymentProposalDTO).id, mgr2, ak)
+    expect(aMisuse.status).toBe(409)
+    expect(aMisuse.body.error).toBe('kunci idempotency sudah dipakai untuk permintaan yang berbeda')
+    const rk = randomUUID()
+    const r1 = await proposeReversal(page, ws, draft.id, payId, email, rk, 'Salah catat')
+    expect(r1.status).toBe(201)
+    const revPropId = (r1.body as ReversalProposalDTO).id
+    const rReplay = await proposeReversal(page, ws, draft.id, payId, email, rk, 'Salah catat')
+    expect(rReplay.status).toBe(200)
+    expect((rReplay.body as ReversalProposalDTO).id).toBe(revPropId)
+    const rMisuse = await proposeReversal(page, ws, draft.id, payId, email, rk, 'Alasan lain')
+    expect(rMisuse.status).toBe(409)
+    expect(rMisuse.body.error).toBe('kunci idempotency sudah dipakai untuk permintaan yang berbeda')
+    const rak = randomUUID()
+    const ra1 = await approveReversal(page, ws, draft.id, payId, revPropId, mgr2, rak)
+    expect(ra1.status).toBe(201)
+    const revId = (ra1.body as ReversalDTO).id
+    expect((ra1.body as ReversalDTO).client_request_id).toBe(rak)
+    const raReplay = await approveReversal(page, ws, draft.id, payId, revPropId, mgr2, rak)
+    expect(raReplay.status).toBe(200)
+    expect((raReplay.body as ReversalDTO).id).toBe(revId)
+    expect(countAudits(ws, 'rental_payment_proposed')).toBe(2)
+    expect(countAudits(ws, 'rental_payment_posted')).toBe(1)
+    expect(countAudits(ws, 'rental_payment_reversal_proposed')).toBe(1)
+    expect(countAudits(ws, 'rental_payment_reversal_posted')).toBe(1)
+    await uiLogin(page, email)
+    await gotoAuthed(page, `/workspaces/${ws}/rental-payments/${draft.id}`, email)
+    await expect(page.getByText('Dibatalkan')).toBeVisible()
+  })
+
+  test('pembayaran: self-approval 403 kedua alur; kasir tulis 403; nominal melebihi sisa 409', async ({ page }) => {
+    const { email, ws, token, customer, item, draft } = await seedPaymentReady(page, 'tolak')
+    const prop = await proposePayment(page, ws, draft.id, email, randomUUID(), { amount_minor: '100000', currency: 'IDR', method: 'cash', reference: null })
+    expect(prop.status).toBe(201)
+    const propId = (prop.body as PaymentProposalDTO).id
+    const selfAppr = await approvePayment(page, ws, draft.id, propId, email, randomUUID())
+    expect(selfAppr.status).toBe(403)
+    expect(selfAppr.body.error).toBe('penyetuju harus berbeda dari pengusul')
+    await uiLogin(page, email)
+    await gotoAuthed(page, `/workspaces/${ws}/rental-payments/${draft.id}`, email)
+    await expect(page.getByRole('button', { name: 'Setujui' })).toBeDisabled()
+    await expect(page.getByText('Persetujuan membutuhkan aktor kedua.')).toBeVisible()
+    // Kasir: baca 200, tulis 403 (data dipertahankan, sesi tidak dibersihkan).
+    const cashierEmail = `kasir-py-tolak-${RUN}@e2e.umnia.local`
+    const code = await uiInvite(page, ws, cashierEmail, 'cashier', email)
+    await uiRegister(page, cashierEmail)
+    await uiLogin(page, cashierEmail)
+    await gotoAuthed(page, `/invites/accept?workspace_id=${ws}`, cashierEmail)
+    await page.getByLabel('Kode undangan').fill(code)
+    await page.locator('form button[type="submit"]').click()
+    await expect(page).toHaveURL(new RegExp(`/workspaces/${ws}/members`))
+    const cashierGet = await getPayments(page, ws, draft.id, cashierEmail)
+    expect(cashierGet.status).toBe(200)
+    const cashierProp = await proposePayment(page, ws, draft.id, cashierEmail, randomUUID(), { amount_minor: '1000', currency: 'IDR', method: 'cash', reference: null })
+    expect(cashierProp.status).toBe(403)
+    await gotoAuthed(page, `/workspaces/${ws}/rental-payments/${draft.id}`, cashierEmail)
+    await page.getByLabel('Nominal (unit tersimpan)').fill('1000')
+    await page.getByRole('button', { name: 'Usulkan pembayaran' }).click()
+    await page.getByRole('button', { name: 'Usulkan pembayaran' }).click()
+    await expect(page.getByText('tidak punya izin mengelola data usaha')).toBeVisible()
+    await expect(page).toHaveURL(new RegExp(`/workspaces/${ws}/rental-payments/${draft.id}`))
+    // Over-cap: usulkan 400000 (boleh), setujui → 409.
+    await uiLogout(page)
+    const mgr2 = `man2-py-tolak-${RUN}@e2e.umnia.local`
+    await inviteManager(page, ws, mgr2, email)
+    const big = await proposePayment(page, ws, draft.id, email, randomUUID(), { amount_minor: '400000', currency: 'IDR', method: 'cash', reference: null })
+    expect(big.status).toBe(201)
+    const bigAppr = await approvePayment(page, ws, draft.id, (big.body as PaymentProposalDTO).id, mgr2, randomUUID())
+    expect(bigAppr.status).toBe(409)
+    expect(bigAppr.body.error).toBe('pembayaran melebihi sisa')
+    // Self-approval pembalikan → 403.
+    const pay2 = await proposePayment(page, ws, draft.id, email, randomUUID(), { amount_minor: '50000', currency: 'IDR', method: 'cash', reference: null })
+    expect(pay2.status).toBe(201)
+    const pay2Appr = await approvePayment(page, ws, draft.id, (pay2.body as PaymentProposalDTO).id, mgr2, randomUUID())
+    expect(pay2Appr.status).toBe(201)
+    const pay2Id = (pay2Appr.body as PaymentDTO).id
+    const rev = await proposeReversal(page, ws, draft.id, pay2Id, email, randomUUID(), 'Koreksi')
+    expect(rev.status).toBe(201)
+    const selfRev = await approveReversal(page, ws, draft.id, pay2Id, (rev.body as ReversalProposalDTO).id, email, randomUUID())
+    expect(selfRev.status).toBe(403)
+    expect(selfRev.body.error).toBe('penyetuju harus berbeda dari pengusul')
+    expect(countAudits(ws, 'rental_payment_posted')).toBe(1)
+  })
+
+  test('pembayaran: riwayat tetap terbaca sesudah revoke/deactivate; tulis baru 403', async ({ page }) => {
+    const { email, ws, token, customer, item, draft } = await seedPaymentReady(page, 'nonaktif')
+    const prop = await proposePayment(page, ws, draft.id, email, randomUUID(), { amount_minor: '100000', currency: 'IDR', method: 'cash', reference: null })
+    expect(prop.status).toBe(201)
+    const out = execFileSync(GRANT_CLI, ['--workspace', ws, '--module', 'finance.basic', '--version', '0.1.0', '--operation', 'revoke', '--reason', 'tes E2E revoke'], {
+      encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env, UMNIA_OPERATOR_DATABASE_URL: OPERATOR_URL },
+    })
+    expect(out.startsWith('revoked ')).toBe(true)
+    const hist = await getPayments(page, ws, draft.id, email)
+    expect(hist.status).toBe(200)
+    expect((hist.body as PaymentsHistoryDTO).pending_payment_proposals.length).toBe(1)
+    const blocked = await proposePayment(page, ws, draft.id, email, randomUUID(), { amount_minor: '1000', currency: 'IDR', method: 'cash', reference: null })
+    expect(blocked.status).toBe(403)
+    expect(blocked.body.error).toBe('finance belum menjadi hak workspace ini')
+    psql(`UPDATE module_installations SET status='inactive', deactivated_at=now() WHERE workspace_id='${ws}' AND module_id='finance.basic'`)
+    const hist2 = await getPayments(page, ws, draft.id, email)
+    expect(hist2.status).toBe(200)
+    const blocked2 = await proposePayment(page, ws, draft.id, email, randomUUID(), { amount_minor: '1000', currency: 'IDR', method: 'cash', reference: null })
+    expect(blocked2.status).toBe(403)
+    expect(blocked2.body.error).toBe('finance belum aktif di workspace ini')
+    await uiLogin(page, email)
+    await gotoAuthed(page, `/workspaces/${ws}/rental-payments/${draft.id}`, email)
+    await expect(page.getByText('Usulan pembayaran: 100000 unit tarif · IDR')).toBeVisible()
+    await page.getByLabel('Nominal (unit tersimpan)').fill('1000')
+    await page.getByRole('button', { name: 'Usulkan pembayaran' }).click()
+    await page.getByRole('button', { name: 'Usulkan pembayaran' }).click()
+    await expect(page.getByText('finance belum aktif di workspace ini')).toBeVisible()
+    await expect(page.getByText('Minta operator memberikan entitlement finance.basic dan owner mengaktifkan modul Finance Basic.')).toBeVisible()
+  })
+
+  test('pembayaran: approval pembalikan pesaing sesudah target sudah dibalik', async ({ page }) => {
+    const { email, ws, token, customer, item, draft } = await seedPaymentReady(page, 'pesaing')
+    const mgr2 = `man2-py-pesaing-${RUN}@e2e.umnia.local`
+    await inviteManager(page, ws, mgr2, email)
+    const prop = await proposePayment(page, ws, draft.id, email, randomUUID(), { amount_minor: '100000', currency: 'IDR', method: 'cash', reference: null })
+    expect(prop.status).toBe(201)
+    const appr = await approvePayment(page, ws, draft.id, (prop.body as PaymentProposalDTO).id, mgr2, randomUUID())
+    expect(appr.status).toBe(201)
+    const payId = (appr.body as PaymentDTO).id
+    const r1 = await proposeReversal(page, ws, draft.id, payId, email, randomUUID(), 'Alasan pertama')
+    expect(r1.status).toBe(201)
+    const r2 = await proposeReversal(page, ws, draft.id, payId, mgr2, randomUUID(), 'Alasan kedua')
+    expect(r2.status).toBe(201)
+    const ra1 = await approveReversal(page, ws, draft.id, payId, (r1.body as ReversalProposalDTO).id, mgr2, randomUUID())
+    expect(ra1.status).toBe(201)
+    const ra2 = await approveReversal(page, ws, draft.id, payId, (r2.body as ReversalProposalDTO).id, email, randomUUID())
+    expect(ra2.status).toBe(409)
+    expect(ra2.body.error).toBe('pembayaran sudah dibatalkan')
+    await uiLogin(page, email)
+    await gotoAuthed(page, `/workspaces/${ws}/rental-payments/${draft.id}`, email)
+    await expect(page.getByText('Dibatalkan')).toBeVisible()
+    await expect(page.getByText('Usulan pembalikan: Alasan kedua')).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Setujui pembalikan' })).toBeDisabled()
+    expect(countAudits(ws, 'rental_payment_reversal_posted')).toBe(1)
+  })
+
+  test('pembayaran: respons hilang keempat tahap lalu kirim-ulang kunci sama 200/201; tanpa POST baru', async ({ page }) => {
+    const { email, ws, token, customer, item, draft } = await seedPaymentReady(page, 'hilang')
+    const mgr2 = `man2-py-hilang-${RUN}@e2e.umnia.local`
+    await inviteManager(page, ws, mgr2, email)
+    // Satu pencegat mencatat SEMUA POST (URL + kunci + body) dan hanya
+    // membatalkan POST pertama tiap tahap (abortSuffix dikonsumsi sekali).
+    const posts: Array<{ url: string, key: string, body: string }> = []
+    let abortSuffix: string | null = null
+    await page.route((url) => url.pathname.startsWith('/api/'), async (route) => {
+      const req = route.request()
+      const u = new URL(req.url())
+      if (req.method() === 'POST') {
+        posts.push({ url: u.pathname, key: req.headers()['idempotency-key'] ?? '', body: req.postData() ?? '' })
+        if (abortSuffix && u.pathname.endsWith(abortSuffix)) {
+          abortSuffix = null
+          await route.abort()
+          return
+        }
+      }
+      await route.continue()
+    })
+    await uiLogin(page, email)
+    await gotoAuthed(page, `/workspaces/${ws}/rental-payments/${draft.id}`, email)
+    // Tahap 1: usulkan pembayaran.
+    abortSuffix = '/payment-proposals'
+    await page.getByLabel('Nominal (unit tersimpan)').fill('100000')
+    await page.getByLabel('Metode').selectOption('transfer')
+    await page.getByRole('button', { name: 'Usulkan pembayaran' }).click()
+    await page.getByRole('button', { name: 'Usulkan pembayaran' }).click()
+    await expect(page.getByRole('heading', { name: 'Hasil usulan pembayaran tidak diketahui' })).toBeVisible()
+    await page.getByRole('button', { name: 'Kirim lagi (permintaan sama)' }).click()
+    await expect(page.getByText('Usulan pembayaran: 100000 unit tarif · IDR')).toBeVisible()
+    // Tahap 2: setujui pembayaran (aktor kedua).
+    await uiLogout(page)
+    await uiLogin(page, mgr2)
+    await gotoAuthed(page, `/workspaces/${ws}/rental-payments/${draft.id}`, mgr2)
+    abortSuffix = '/approvals'
+    await page.getByRole('button', { name: 'Setujui' }).click()
+    await page.getByRole('button', { name: 'Setujui' }).click()
+    await expect(page.getByRole('heading', { name: 'Hasil persetujuan pembayaran tidak diketahui' })).toBeVisible()
+    await page.getByRole('button', { name: 'Kirim lagi (permintaan sama)' }).click()
+    await expect(page.getByText('Pembayaran posted aktif: 100000 unit tarif · IDR')).toBeVisible()
+    // Tahap 3: usulkan pembalikan (pengusul pertama).
+    await uiLogout(page)
+    await uiLogin(page, email)
+    await gotoAuthed(page, `/workspaces/${ws}/rental-payments/${draft.id}`, email)
+    abortSuffix = '/reversal-proposals'
+    await page.getByRole('button', { name: 'Usulkan pembalikan' }).click()
+    await page.getByLabel('Alasan pembalikan').fill('Salah catat')
+    await page.getByRole('button', { name: 'Usulkan pembalikan' }).click()
+    await expect(page.getByRole('heading', { name: 'Hasil usulan pembalikan tidak diketahui' })).toBeVisible()
+    await page.getByRole('button', { name: 'Kirim lagi (permintaan sama)' }).click()
+    await expect(page.getByText('Usulan pembalikan: Salah catat')).toBeVisible()
+    // Tahap 4: setujui pembalikan (aktor kedua).
+    await uiLogout(page)
+    await uiLogin(page, mgr2)
+    await gotoAuthed(page, `/workspaces/${ws}/rental-payments/${draft.id}`, mgr2)
+    abortSuffix = '/approvals'
+    await page.getByRole('button', { name: 'Setujui pembalikan' }).click()
+    await page.getByRole('button', { name: 'Setujui pembalikan' }).click()
+    await expect(page.getByRole('heading', { name: 'Hasil persetujuan pembalikan tidak diketahui' })).toBeVisible()
+    await page.getByRole('button', { name: 'Kirim lagi (permintaan sama)' }).click()
+    await expect(page.getByText('Dibatalkan')).toBeVisible()
+    await page.unrouteAll({ behavior: 'wait' })
+    // Bukti POST: tiap tahap tepat 2 POST (batal + kirim-ulang) dengan
+    // kunci dan body yang SAMA — tanpa kunci baru, tanpa POST ketiga.
+    const stagePosts = (suffix: string) => posts.filter(p => p.url.endsWith(suffix))
+    for (const suffix of ['/payment-proposals', '/reversal-proposals']) {
+      const rows = stagePosts(suffix)
+      expect(rows.length, suffix).toBe(2)
+      expect(rows[0].key).not.toBe('')
+      expect(rows[1].key).toBe(rows[0].key)
+      expect(rows[1].body).toBe(rows[0].body)
+    }
+    const approvals = posts.filter(p => p.url.endsWith('/approvals'))
+    expect(approvals.length).toBe(4)
+    expect(approvals[0].key).not.toBe('')
+    expect(approvals[1].key).toBe(approvals[0].key)
+    expect(approvals[1].body).toBe(approvals[0].body)
+    expect(approvals[2].key).not.toBe('')
+    expect(approvals[3].key).toBe(approvals[2].key)
+    expect(approvals[3].body).toBe(approvals[2].body)
+    expect(approvals[0].key).not.toBe(approvals[2].key)
+    expect(countAudits(ws, 'rental_payment_proposed')).toBe(1)
+    expect(countAudits(ws, 'rental_payment_posted')).toBe(1)
+    expect(countAudits(ws, 'rental_payment_reversal_proposed')).toBe(1)
+    expect(countAudits(ws, 'rental_payment_reversal_posted')).toBe(1)
+  })
+
+  test('pembayaran: sukses malformed tetap tidak diketahui; usulan hilang dari pending → replay kunci sama', async ({ page }) => {
+    const { email, ws, token, customer, item, draft } = await seedPaymentReady(page, 'malformed')
+    const mgr2 = `man2-py-malformed-${RUN}@e2e.umnia.local`
+    await inviteManager(page, ws, mgr2, email)
+    await uiLogin(page, email)
+    await gotoAuthed(page, `/workspaces/${ws}/rental-payments/${draft.id}`, email)
+    // Respons 201 malformed (DTO kosong) → tetap tidak diketahui.
+    await page.route((url) => url.pathname.startsWith('/api/'), async (route) => {
+      const u = new URL(route.request().url())
+      if (route.request().method() === 'POST' && u.pathname.endsWith('/payment-proposals')) {
+        await route.fulfill({ status: 201, contentType: 'application/json', body: '{}' })
+      } else await route.continue()
+    })
+    await page.getByLabel('Nominal (unit tersimpan)').fill('100000')
+    await page.getByRole('button', { name: 'Usulkan pembayaran' }).click()
+    await page.getByRole('button', { name: 'Usulkan pembayaran' }).click()
+    await expect(page.getByRole('heading', { name: 'Hasil usulan pembayaran tidak diketahui' })).toBeVisible()
+    await page.unrouteAll({ behavior: 'wait' })
+    // Fulfill palsu tidak tercatat: kirim ulang kunci sama berhasil 201.
+    await page.getByRole('button', { name: 'Kirim lagi (permintaan sama)' }).click()
+    await expect(page.getByText('Usulan pembayaran: 100000 unit tarif · IDR')).toBeVisible()
+    // Usulan kedua hilang dari pending karena disetujui aktor kedua lewat
+    // API; muat ulang mempertahankan upaya, replay kunci sama mengonfirmasi.
+    // Simulasi "tercatat tetapi respons hilang": permintaan diteruskan ke
+    // server (route.fetch) lalu klien hanya menerima DTO cacat — abort
+    // tidak cocok di sini karena permintaan tidak pernah sampai ke server.
+    await page.route((url) => url.pathname.startsWith('/api/'), async (route) => {
+      const u = new URL(route.request().url())
+      if (route.request().method() === 'POST' && u.pathname.endsWith('/payment-proposals')) {
+        await route.fetch()
+        await route.fulfill({ status: 201, contentType: 'application/json', body: '{}' })
+      } else await route.continue()
+    })
+    await page.getByLabel('Nominal (unit tersimpan)').fill('50000')
+    await page.getByRole('button', { name: 'Usulkan pembayaran' }).click()
+    await page.getByRole('button', { name: 'Usulkan pembayaran' }).click()
+    await expect(page.getByRole('heading', { name: 'Hasil usulan pembayaran tidak diketahui' })).toBeVisible()
+    await page.unrouteAll({ behavior: 'wait' })
+    const hist = await getPayments(page, ws, draft.id, email)
+    expect(hist.status).toBe(200)
+    const pending = (hist.body as PaymentsHistoryDTO).pending_payment_proposals
+    const second = pending.find(p => p.amount_minor === '50000')
+    if (!second) throw new Error('usulan kedua tidak tercatat sesudah respons hilang')
+    const appr = await approvePayment(page, ws, draft.id, second.id, mgr2, randomUUID())
+    expect(appr.status).toBe(201)
+    await page.getByRole('button', { name: 'Muat ulang data' }).click()
+    await expect(page.getByRole('heading', { name: 'Hasil usulan pembayaran tidak diketahui' })).toBeVisible()
+    await page.getByRole('button', { name: 'Kirim lagi (permintaan sama)' }).click()
+    await expect(page.getByText('Pembayaran posted aktif: 50000 unit tarif · IDR')).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'Hasil usulan pembayaran tidak diketahui' })).toHaveCount(0)
+    expect(countAudits(ws, 'rental_payment_proposed')).toBe(2)
+    expect(countAudits(ws, 'rental_payment_posted')).toBe(1)
+  })
+
+  test('pembayaran: GET menyelesaikan approval memagari POST lama; tanpa panel pemulihan', async ({ page }) => {
+    const { email, ws, token, customer, item, draft } = await seedPaymentReady(page, 'settle')
+    const mgr2 = `man2-py-settle-${RUN}@e2e.umnia.local`
+    await inviteManager(page, ws, mgr2, email)
+    const prop = await proposePayment(page, ws, draft.id, email, randomUUID(), { amount_minor: '100000', currency: 'IDR', method: 'cash', reference: null })
+    expect(prop.status).toBe(201)
+    const propId = (prop.body as PaymentProposalDTO).id
+    await uiLogin(page, mgr2)
+    await gotoAuthed(page, `/workspaces/${ws}/rental-payments/${draft.id}`, mgr2)
+    let releasePost!: () => void
+    const postHeld = new Promise<void>((resolve) => { releasePost = resolve })
+    await page.route((url) => url.pathname.startsWith('/api/'), async (route) => {
+      const u = new URL(route.request().url())
+      if (route.request().method() === 'POST' && u.pathname.endsWith('/approvals')) {
+        await postHeld
+      }
+      await route.continue()
+    })
+    await page.getByRole('button', { name: 'Setujui' }).click()
+    await page.getByRole('button', { name: 'Setujui' }).click()
+    // POST tertahan; setujui lewat API dengan kunci berbeda.
+    const appr = await approvePayment(page, ws, draft.id, propId, mgr2, randomUUID())
+    expect(appr.status).toBe(201)
+    await page.getByRole('button', { name: 'Muat ulang data' }).click()
+    await expect(page.getByText('Pembayaran posted aktif: 100000 unit tarif · IDR')).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'Hasil persetujuan pembayaran tidak diketahui' })).toHaveCount(0)
+    releasePost()
+    await page.unrouteAll({ behavior: 'wait' })
+    await page.waitForTimeout(1000)
+    await expect(page.getByRole('heading', { name: 'Hasil persetujuan pembayaran tidak diketahui' })).toHaveCount(0)
+    expect(countAudits(ws, 'rental_payment_posted')).toBe(1)
+  })
+
+  test.describe('Riwayat pembayaran terkendali', () => {
+    const stages = {
+      payment: ['Setujui', 'persetujuan pembayaran'],
+      reversal: ['Setujui pembalikan', 'persetujuan pembalikan'],
+      proposal: ['Usulkan pembalikan', 'usulan pembalikan']
+    } as const
+    type Stage = keyof typeof stages
+    type Rows = Partial<Pick<PaymentsHistoryDTO, 'payments' | 'reversals' | 'pending_payment_proposals' | 'pending_reversal_proposals'>>
+    type Read = Rows | 'failed' | 'malformed'
+    const notices = {
+      payment: 'Pembayaran untuk usulan ini sudah dicatat melalui permintaan lain.',
+      reversal: 'Catatan pembayaran ini sudah dibatalkan melalui permintaan lain.'
+    }
+
+    async function seedActors(page: Page) {
+      const { email, ws, token, fact } = await seedPaymentReady(page, 'r1')
+      const invite = async (role: string): Promise<string> => {
+        const address = `r1-pay-${role}-${RUN}@e2e.umnia.local`
+        await inviteManager(page, ws, address, email)
+        const res = await page.request.get(`/api/workspaces/${ws}/members`, { headers: { Authorization: `Bearer ${token}` } })
+        expect(res.status()).toBe(200)
+        const { members } = await res.json() as { members: { email: string, subject_id: string, role: string, status: string }[] }
+        const member = members.find(m => m.email === address && m.role === 'manager' && m.status === 'active')
+        if (!member) throw new Error(`Missing active R1 ${role} manager`)
+        return member.subject_id
+      }
+      const proposer = await invite('proposer')
+      const alternate = await invite('alternate')
+      return { email, ws, fact, actor: fact.accepted_by, proposer, alternate }
+    }
+    let fixture: Awaited<ReturnType<typeof seedActors>>
+    test.beforeAll(async ({ browser }, info) => {
+      const page = await browser.newPage({ baseURL: info.project.use.baseURL })
+      try { fixture = await seedActors(page) } finally { await page.close() }
+    })
+
+    function makeRecords() {
+      const { fact, actor, proposer } = fixture
+      const identity = { rental_contract_id: fact.rental_contract_id, proposed_by: proposer, proposed_at: fact.starts_at }
+      const fields = { ...identity, rental_agreed_price_id: fact.id, amount_minor: '100000', currency: fact.currency, method: 'transfer', reference: ' R1 ' }
+      const proposal: PaymentProposalDTO = { ...fields, id: randomUUID(), client_request_id: randomUUID(), status: 'pending' }
+      const payment: PaymentDTO = { ...fields, id: randomUUID(), proposal_id: proposal.id, approved_by: actor, approved_at: '2047-01-01T12:00:00Z', client_request_id: randomUUID(), reversed: false, reversal_id: null }
+      const reason = { ...identity, payment_id: payment.id, reason: 'Salah catat nominal', proposed_at: '2047-01-02T00:00:00Z' }
+      const reversalProposal: ReversalProposalDTO = { ...reason, id: randomUUID(), client_request_id: randomUUID(), status: 'pending' }
+      const reversal: ReversalDTO = { ...reason, id: randomUUID(), reversal_proposal_id: reversalProposal.id, approved_by: actor, approved_at: fact.ends_at, client_request_id: randomUUID() }
+      return { proposal, payment, reversalProposal, reversal }
+    }
+
+    function history(rows: Rows): PaymentsHistoryDTO {
+      const { fact } = fixture
+      const paid = (rows.payments ?? []).reduce((sum, p) => p.reversed ? sum : sum + BigInt(p.amount_minor), 0n)
+      return { rental_contract_id: fact.rental_contract_id, rental_agreed_price_id: fact.id, total_minor: fact.total_minor, currency: fact.currency,
+        paid_minor: String(paid), outstanding_minor: String(BigInt(fact.total_minor) - paid),
+        payments: [], reversals: [], pending_payment_proposals: [], pending_reversal_proposals: [], ...rows }
+    }
+
+    async function intercept(page: Page, initial: Rows, suffix: string) {
+      const workspace = `/api/workspaces/${fixture.ws}`
+      const contract = `${workspace}/rental/contracts/${fixture.fact.rental_contract_id}`
+      const writePath = contract + suffix
+      const readPath = `${contract}/payments`
+      const wire: { read: Read, reply: (route: Route) => Promise<void> | void } = {
+        read: initial, reply: route => route.fulfill({ status: 201, json: {} })
+      }
+      const posts: { url: string, key: string, body: string | null }[] = []
+      let loginExpected = true
+      await page.route('**/api/**', route => {
+        const request = route.request()
+        const { origin, pathname: path } = new URL(request.url())
+        if (origin !== new URL(page.url()).origin) return route.abort()
+        if (request.method() === 'GET' && path === readPath) {
+          if (wire.read === 'failed') return route.fulfill({ status: 503, json: { error: 'Riwayat tidak tersedia.' } })
+          return route.fulfill({ json: wire.read === 'malformed' ? {} : history(wire.read) })
+        }
+        if (request.method() === 'GET' && (path === workspace || path.startsWith(`${workspace}/`))) return route.continue()
+        if (loginExpected && request.method() === 'POST' && path === '/api/auth/login') {
+          loginExpected = false
+          return route.continue()
+        }
+        if (request.method() === 'POST') {
+          posts.push({ url: request.url(), key: request.headers()['idempotency-key'] ?? '', body: request.postData() })
+          if (path === writePath) return wire.reply(route)
+        }
+        return route.abort()
+      })
+      return { posts, wire, writePath, readPath }
+    }
+
+    async function openStage(page: Page, stage: Stage, records = makeRecords()) {
+      const { proposal, payment, reversalProposal } = records
+      const initial = stage === 'payment' ? { pending_payment_proposals: [proposal] }
+        : { payments: [payment], pending_reversal_proposals: stage === 'reversal' ? [reversalProposal] : [] }
+      const reversalPath = `/payments/${payment.id}/reversal-proposals`
+      const path = { payment: `/payment-proposals/${proposal.id}/approvals`, proposal: reversalPath, reversal: `${reversalPath}/${reversalProposal.id}/approvals` }
+      const traffic = await intercept(page, initial, path[stage])
+      const target = `/workspaces/${fixture.ws}/rental-payments/${fixture.fact.rental_contract_id}`
+      await page.goto(`/login?next=${encodeURIComponent(target)}`)
+      await page.getByLabel('Email').fill(fixture.email)
+      await page.getByLabel('Kata sandi').fill(PASSWORD)
+      await page.locator('form button[type="submit"]').click()
+      await expect(page).toHaveURL(target)
+      const [action, label] = stages[stage]
+      const button = { name: action, exact: true }
+      await page.getByRole('button', button).click()
+      const confirmation = page.getByRole('alert').filter({ has: page.getByRole('heading', { name: `Konfirmasi ${label}`, exact: true }) })
+      if (stage === 'proposal') await confirmation.getByLabel('Alasan pembalikan').fill(` ${reversalProposal.reason} `)
+      return { page, stage, records, traffic, button, label, confirmation, readPath: traffic.readPath,
+        reload: page.getByRole('button', { name: 'Muat ulang data', exact: true }) }
+    }
+    async function sendUncertain({ page, stage, records, traffic, button, label, confirmation, reload }: Awaited<ReturnType<typeof openStage>>) {
+      const { reversalProposal } = records
+      await confirmation.getByRole('button', button).click()
+      const panel = page.getByRole('alert').filter({ has: page.getByRole('heading', { name: `Hasil ${label} tidak diketahui`, exact: true }) })
+      await expect(panel, `Malformed first ${stage} POST must reach recovery before testing GET`).toBeVisible()
+      const body = stage === 'proposal' ? JSON.stringify({ reason: reversalProposal.reason }) : '{}'
+      expect(traffic.posts).toEqual([{ url: new URL(traffic.writePath, page.url()).href, key: expect.stringMatching(/\S/), body }])
+      return { ...records, ...traffic, page, stage, key: traffic.posts[0].key, panel,
+        retry: panel.getByRole('button', { name: 'Kirim lagi (permintaan sama)', exact: true }), reload }
+    }
+    async function begin(page: Page, stage: Stage, records = makeRecords()) {
+      return sendUncertain(await openStage(page, stage, records))
+    }
+    type Attempt = Awaited<ReturnType<typeof begin>>
+
+    async function afterRead(a: Pick<Attempt, 'page' | 'readPath' | 'reload'>, action: () => Promise<void>): Promise<void> {
+      await Promise.all([a.page.waitForResponse(r => new URL(r.url()).pathname === a.readPath && r.request().method() === 'GET'), action()])
+      await expect(a.reload).toBeEnabled()
+    }
+    async function refresh(a: Attempt, rows: Read): Promise<void> {
+      a.wire.read = rows
+      const before = a.posts.length
+      await afterRead(a, () => a.reload.click())
+      expect(a.posts, 'Refresh must not send a write').toHaveLength(before)
+    }
+    async function replay(a: Attempt): Promise<void> {
+      const before = a.posts.length
+      const [response] = await Promise.all([a.page.waitForResponse(r => new URL(r.url()).pathname === a.writePath && r.request().method() === 'POST'), a.retry.click()])
+      await response.finished()
+      expect(a.posts.slice(before), 'Retry must preserve the stage, key and raw bytes').toEqual([a.posts[0]])
+    }
+    async function locked(a: Attempt): Promise<void> {
+      await expect(a.panel).toBeVisible()
+      await expect(a.retry).toBeEnabled()
+      await expect(a.page.getByRole('button', { name: stages[a.stage][0], exact: true, disabled: false })).toHaveCount(0)
+      await expect(a.page.getByRole('button', { name: /^Mulai .* baru$/ })).toHaveCount(0)
+      await expect(a.page.getByText(/melalui permintaan lain\./)).toHaveCount(0)
+    }
+    async function retain(a: Attempt, label: string, rows: Rows): Promise<void> {
+      await test.step(label, async () => {
+        await refresh(a, rows)
+        await locked(a)
+        await replay(a)
+        await locked(a)
+      })
+    }
+    async function settled(a: Attempt, independent: boolean): Promise<void> {
+      await expect(a.panel).toHaveCount(0)
+      await expect(a.page.getByRole('button', { name: 'Kirim lagi (permintaan sama)' })).toHaveCount(0)
+      if (!independent) {
+        await expect(a.page.getByText(/melalui permintaan lain\./)).toHaveCount(0)
+        return
+      }
+      await expect(a.page.getByText(notices[a.stage === 'payment' ? 'payment' : 'reversal'], { exact: true })).toBeVisible()
+      await expect(a.page.getByText(/\bberhasil\b|(?:permintaan|persetujuan) (?:ini|Anda) (?:sudah |telah )?(?:dikonfirmasi|disetujui|dicatat)/i)).toHaveCount(0)
+    }
+
+    test('pembayaran R1-P1: konflik atau ambiguitas kunci sendiri mengunci persetujuan', async ({ page }) => {
+      const a = await begin(page, 'payment')
+      const own = { ...a.payment, client_request_id: a.key }
+      const conflict = { ...own, id: randomUUID(), amount_minor: '99999' }
+      const other = { ...a.payment, id: randomUUID(), approved_by: fixture.alternate }
+      const histories = { amount: [conflict], conflictFirst: [conflict, other], conflictLast: [other, conflict],
+        exactFirst: [own, conflict], exactLast: [conflict, own], duplicate: [own, { ...own, id: randomUUID() }],
+        wrongActor: [{ ...own, approved_by: fixture.alternate }] }
+      for (const [label, payments] of Object.entries(histories)) await retain(a, label, { payments })
+    })
+
+    test('pembayaran R1-P2: kunci lain harus menyalin usulan utuh meski aktor berbeda', async ({ page }) => {
+      const a = await begin(page, 'payment')
+      const other = { ...a.payment, approved_by: fixture.alternate }
+      const changes: Record<string, Partial<PaymentDTO>> = {
+        unrelated: { proposal_id: randomUUID() }, amount: { amount_minor: '99999' }, fact: { rental_agreed_price_id: randomUUID() },
+        currency: { currency: 'USD' }, method: { method: 'cash' }, reference: { reference: other.reference?.trim() ?? null },
+        nullReference: { reference: null }, proposer: { proposed_by: fixture.actor }, time: { proposed_at: other.approved_at },
+        selfApproval: { approved_by: other.proposed_by }
+      }
+      for (const [label, change] of Object.entries(changes)) await retain(a, label, { payments: [{ ...other, ...change }] })
+      await refresh(a, { payments: [other] })
+      await settled(a, true)
+    })
+
+    function linked(payment: PaymentDTO, reversal: ReversalDTO): Rows {
+      return { payments: [{ ...payment, reversed: true, reversal_id: reversal.id }], reversals: [reversal] }
+    }
+    test('pembayaran R1-R1: konflik alasan berkunci sama menang atas pembalikan pesaing', async ({ page }) => {
+      const a = await begin(page, 'reversal')
+      const own = { ...a.reversal, client_request_id: a.key }
+      const conflict = { ...own, id: randomUUID(), reason: 'Alasan berbeda' }
+      const other = { ...a.reversal, reversal_proposal_id: randomUUID(), approved_by: fixture.alternate, reason: 'Pembayaran ganda' }
+      await retain(a, 'same key, changed reason, valid backlink', linked(a.payment, conflict))
+      for (const reversals of [[conflict, other], [other, conflict]]) {
+        await retain(a, 'fully linked competitor cannot override same-key conflict', { ...linked(a.payment, other), reversals })
+      }
+      await retain(a, 'exact-looking row beside conflicting same-key row', { ...linked(a.payment, own), reversals: [own, conflict] })
+      await retain(a, 'same key requires the original approver', linked(a.payment, { ...own, approved_by: fixture.alternate }))
+    })
+
+    test('pembayaran R1-R2: kedua arah tautan harus membuktikan pembayaran yang tepat', async ({ page }) => {
+      const a = await begin(page, 'reversal')
+      for (const [origin, key] of [['own', a.key], ['independent', a.reversal.client_request_id]]) {
+        const reversal = { ...a.reversal, client_request_id: key }
+        const payment = { ...a.payment, reversed: true, reversal_id: reversal.id }
+        const unrelated = { ...payment, id: randomUUID(), proposal_id: randomUUID() }
+        const histories: Record<string, Rows> = {
+          orphan: { reversals: [reversal] }, wrongPayment: { payments: [unrelated], reversals: [reversal] },
+          flagOnly: { payments: [payment] }, notReversed: { payments: [{ ...payment, reversed: false }], reversals: [reversal] },
+          nullBacklink: { payments: [{ ...payment, reversal_id: null }], reversals: [reversal] },
+          wrongBacklink: { payments: [{ ...payment, reversal_id: randomUUID() }], reversals: [reversal] },
+          wrongForwardLink: { payments: [payment], reversals: [{ ...reversal, payment_id: unrelated.id }] },
+          unrelatedPair: linked(unrelated, { ...reversal, payment_id: unrelated.id, reversal_proposal_id: randomUUID() })
+        }
+        for (const [label, rows] of Object.entries(histories)) await retain(a, `${origin}: ${label}`, rows)
+      }
+    })
+
+    test('pembayaran R1-R3: usulan pembalikan sama berkunci lain harus utuh', async ({ page }) => {
+      const a = await begin(page, 'reversal')
+      const other = { ...a.reversal, approved_by: fixture.alternate }
+      const changes = { reason: { reason: 'Alasan berbeda' }, proposer: { proposed_by: fixture.actor },
+        time: { proposed_at: other.approved_at }, selfApproval: { approved_by: other.proposed_by } }
+      for (const [label, change] of Object.entries(changes)) await retain(a, label, linked(a.payment, { ...other, ...change }))
+      await refresh(a, linked(a.payment, other))
+      await settled(a, true)
+    })
+
+    for (const [id, stage, independent] of [
+      ['P3', 'payment', false], ['R6', 'reversal', false], ['P4', 'payment', true], ['R4', 'reversal', true]
+    ] as const) {
+      test(`pembayaran R1-${id}: aktor sama, ${independent ? 'permintaan lain' : 'bukti sendiri'} pada riwayat dibalik`, async ({ page }) => {
+        const a = await begin(page, stage)
+        const key = independent ? randomUUID() : a.key
+        const payment = stage === 'payment' ? { ...a.payment, client_request_id: key } : a.payment
+        const reversal = stage === 'reversal' ? { ...a.reversal, client_request_id: key } : a.reversal
+        await refresh(a, linked(payment, reversal))
+        await expect(page.getByText('Dibatalkan', { exact: true })).toBeVisible()
+        await settled(a, independent)
+        if (!independent) await expect(page.getByRole('heading', { level: 2, name: 'Pembayaran', exact: true })).toBeFocused()
+      })
+    }
+
+    test('pembayaran R1-R5: pembalikan pesaing tetap independen sesudah POST lama ditolak', async ({ page }) => {
+      const a = await begin(page, 'reversal')
+      const held: Route[] = []
+      a.wire.reply = route => { held.push(route) }
+      await a.retry.click()
+      await expect.poll(() => held.length).toBe(1)
+      const other = { ...a.reversal, reversal_proposal_id: randomUUID(), reason: 'Pembayaran ganda',
+        proposed_at: a.payment.approved_at, proposed_by: fixture.actor, approved_by: fixture.alternate }
+      try {
+        await refresh(a, { ...linked(a.payment, other), pending_reversal_proposals: [a.reversalProposal] })
+        await settled(a, true)
+        await expect(page.getByRole('button', { name: 'Setujui pembalikan', exact: true })).toBeDisabled()
+      } finally {
+        const [response] = await Promise.all([page.waitForResponse(r => r.request() === held[0].request()),
+          held[0].fulfill({ status: 409, json: { error: 'kunci idempotency sudah dipakai untuk permintaan yang berbeda' } })])
+        await response.finished()
+      }
+      // Let the browser render the late rejection before checking for a reopened panel.
+      await page.waitForFunction(() => new Promise<boolean>(done => requestAnimationFrame(() => requestAnimationFrame(() => done(true)))), undefined, { timeout: 5000 })
+      await settled(a, true)
+      await expect(page.getByRole('heading', { name: 'Kunci idempotency sudah dipakai' })).toHaveCount(0)
+      await expect(page.getByRole('button', { name: 'Setujui pembalikan', exact: true })).toBeDisabled()
+      expect(a.posts).toEqual([a.posts[0], a.posts[0]])
+    })
+
+    for (const [id, stage] of [['T1', 'payment'], ['T2', 'reversal'], ['T3', 'proposal']] as const) {
+      test(`pembayaran R1-${id}: 409 sesudah hasil ${stages[stage][1]} tidak pasti`, async ({ page }) => {
+        const a = await begin(page, stage)
+        const error = stage === 'payment' ? 'proposal sudah disetujui' : 'pembayaran sudah dibatalkan'
+        a.wire.reply = route => route.fulfill({ status: 409, json: { error } })
+        const reads: Read[] = ['failed', {}]
+        if (stage === 'proposal') {
+          // Even the same string in the *approval* keyspace cannot prove this proposal.
+          reads.push('malformed', linked(a.payment, { ...a.reversal, client_request_id: a.key, proposed_by: fixture.actor, approved_by: fixture.alternate }))
+        }
+        for (const read of reads) {
+          a.wire.read = read
+          const before = a.posts.length
+          await afterRead(a, () => replay(a))
+          await locked(a)
+          expect(a.posts).toHaveLength(before + 1)
+        }
+        const dto = { payment: a.payment, reversal: a.reversal, proposal: { ...a.reversalProposal, proposed_by: fixture.actor } }[stage]
+        a.wire.reply = route => route.fulfill({ status: 200, json: { ...dto, client_request_id: a.key } })
+        a.wire.read = {}
+        await afterRead(a, () => replay(a))
+        await settled(a, false)
+        expect(a.posts).toHaveLength(2 + reads.length)
+      })
+    }
+
+    test('pembayaran R1-Q1: usulan pesaing satu mikrodetik sebelum pembayaran bukan bukti', async ({ page }) => {
+      const records = makeRecords()
+      const payment = { ...records.payment, approved_at: '2047-01-01T12:00:00.000002Z' }
+      const a = await begin(page, 'reversal', { ...records, payment })
+      const other = { ...a.reversal, reversal_proposal_id: randomUUID(), proposed_at: '2047-01-01T12:00:00.000001Z',
+        proposed_by: fixture.actor, approved_by: fixture.alternate, reason: 'Pembayaran ganda' }
+      await retain(a, 'correct keyspace and links, impossible proposal time', linked(payment, other))
+      await expect(page.getByText('Dibatalkan', { exact: true })).toBeHidden()
+    })
+
+    test('pembayaran R1-Q1b: tautan balik keliru tidak boleh menampilkan status Dibatalkan', async ({ page }) => {
+      const a = await begin(page, 'reversal')
+      await retain(a, 'wrong backlink on the only displayed payment', {
+        payments: [{ ...a.payment, reversed: true, reversal_id: randomUUID() }], reversals: [a.reversal]
+      })
+      await expect(page.getByText('Dibatalkan', { exact: true })).toBeHidden()
+    })
+
+    async function duringHeldRead(a: Attempt, snapshot: Rows, action: () => Promise<void>): Promise<void> {
+      let release!: () => void
+      const gate = new Promise<void>(resolve => { release = resolve })
+      const held: Route[] = []
+      await a.page.route(url => url.pathname === a.readPath, async route => {
+        held.push(route)
+        await gate
+        await route.fulfill({ json: history(snapshot) })
+      }, { times: 1 })
+      try {
+        await a.reload.click()
+        await expect.poll(() => held.length).toBe(1)
+        await action()
+      } finally {
+        release()
+        const response = await held[0]?.request().response()
+        await response?.finished()
+      }
+      await expect(a.reload).toBeEnabled()
+    }
+
+    test('pembayaran R1-Q2: GET sebelum replay tidak menghidupkan persetujuan baru', async ({ page }) => {
+      const a = await begin(page, 'payment')
+      const posted = { ...a.payment, client_request_id: a.key }
+      a.wire.read = { payments: [posted] }
+      a.wire.reply = route => route.fulfill({ status: 200, json: posted })
+      await duringHeldRead(a, { pending_payment_proposals: [a.proposal] }, () => replay(a))
+      await settled(a, false)
+      await expect(page.getByRole('button', { name: 'Setujui', exact: true, disabled: false }),
+        'The old GET must not offer a fresh approval of the posted proposal').toHaveCount(0)
+      // A queued read and explicit invalidation are both safe; the next GET must show the posting.
+      await refresh(a, { payments: [posted] })
+      await expect(page.getByText(`Pembayaran posted aktif: ${posted.amount_minor} unit tarif · ${posted.currency}`, { exact: true })).toBeVisible()
+      expect(a.posts).toEqual([a.posts[0], a.posts[0]])
+    })
+
+    for (const [id, stage] of [['Q3', 'payment'], ['Q3b', 'proposal'], ['Q3c', 'reversal']] as const) {
+      test(`pembayaran R1-${id}: fakta gagal memblokir kiriman pertama ${stages[stage][1]}, bukan replay`, async ({ page }) => {
+        const opened = await openStage(page, stage)
+        await expect(opened.confirmation.getByRole('button', opened.button)).toBeEnabled()
+        const failure = 'Harga uji tidak tersedia.'
+        const factPath = opened.readPath.replace(/\/payments$/, '/agreed-price')
+        const failNextFact = () => page.route(url => url.pathname === factPath, route =>
+          route.fulfill({ status: 503, json: { error: failure } }), { times: 1 })
+        await failNextFact()
+        await afterRead(opened, () => opened.reload.click())
+        await expect(page.getByText(failure, { exact: true })).toBeVisible()
+        const enabled = opened.confirmation.getByRole('button', { ...opened.button, disabled: false })
+        if (await enabled.count()) await enabled.click()
+        await afterRead(opened, () => opened.reload.click())
+        expect(opened.traffic.posts, 'A good history GET cannot authorize the first write without the price fact').toHaveLength(0)
+
+        if (!await opened.confirmation.isVisible()) await page.getByRole('button', opened.button).click()
+        if (stage === 'proposal') await opened.confirmation.getByLabel('Alasan pembalikan').fill(opened.records.reversalProposal.reason)
+        const a = await sendUncertain(opened)
+        await failNextFact()
+        await refresh(a, a.wire.read)
+        await expect(page.getByText(failure, { exact: true })).toBeVisible()
+        await locked(a)
+        await replay(a)
+        await locked(a)
+      })
+    }
+
+    test('pembayaran R1-Q4: hasil usulan A tidak mengalihkan fokus atau mengklaim hasil usulan B', async ({ page }) => {
+      const a = await begin(page, 'payment')
+      const amountB = '25000'
+      const referenceB = 'Kwitansi B'
+      const actionB = { name: 'Usulkan pembayaran', exact: true }
+      await page.getByLabel('Nominal (unit tersimpan)').fill(amountB)
+      await page.getByLabel('Referensi (opsional)').fill(referenceB)
+      await page.getByRole('button', actionB).click()
+      const panelB = page.getByRole('alert').filter({ has: page.getByRole('heading', { name: 'Konfirmasi usulan pembayaran', exact: true }) })
+      const cancelB = panelB.getByRole('button', { name: 'Batalkan', exact: true })
+      const postedA = { ...a.payment, approved_by: fixture.alternate }
+      a.wire.read = { payments: [postedA] }
+      await duringHeldRead(a, a.wire.read, async () => {
+        await cancelB.focus()
+        await expect(cancelB).toBeFocused()
+      })
+      await expect(a.panel).toBeHidden()
+      await expect(page.getByText(/melalui permintaan lain/i)).toBeVisible()
+      await expect.soft(panelB.locator(':focus'), 'Resolving A must leave focus inside the active confirmation for B').toHaveCount(1)
+
+      const pathB = a.readPath.replace(/\/payments$/, '/payment-proposals')
+      await page.route(url => url.pathname === pathB, route => {
+        const proposalB = { ...a.proposal, id: randomUUID(), client_request_id: route.request().headers()['idempotency-key'],
+          proposed_by: fixture.actor, amount_minor: amountB, method: 'cash', reference: referenceB }
+        a.wire.read = { payments: [postedA], pending_payment_proposals: [proposalB] }
+        return route.fulfill({ status: 201, json: proposalB })
+      }, { times: 1 })
+      await panelB.getByRole('button', actionB).click()
+      const pendingB = page.getByRole('listitem').filter({ hasText: referenceB })
+      await expect(pendingB).toContainText(`Usulan pembayaran: ${amountB}`)
+      await expect(panelB).toBeHidden()
+      await expect(pendingB).not.toContainText(/permintaan lain/i)
+      // A notice may expire or remain visibly identified with A, but not as a bare "usulan ini".
+      const generic = page.getByText(notices.payment, { exact: true }).filter({ visible: true })
+      const contextA = page.locator('main *').filter({ hasText: new RegExp(`${postedA.amount_minor}|${postedA.proposal_id}|${postedA.id}|\\bR1\\b`, 'i'), hasNotText: referenceB })
+      await expect.poll(async () => (await generic.count()) - (await contextA.locator(generic).count()),
+        { message: 'Unqualified independent-payment feedback survived B’s own confirmed write' }).toBe(0)
+      expect(a.posts).toHaveLength(1)
+    })
+  })
+
+  test('pembayaran: tulis pertama diblokir selama bacaan ditahan; panel dibuka sebelum bacaan wajib gagal', async ({ page }) => {
+    const { email, ws, token, customer, item, draft } = await seedPaymentReady(page, 'gate')
+    await uiLogin(page, email)
+    await page.route((url) => url.pathname.startsWith('/api/'), async (route) => {
+      const u = new URL(route.request().url())
+      if (route.request().method() === 'GET' && u.pathname.endsWith('/payments')) {
+        await new Promise((r) => setTimeout(r, 3000))
+      }
+      await route.continue()
+    })
+    await gotoAuthed(page, `/workspaces/${ws}/rental-payments/${draft.id}`, email)
+    await expect(page.getByText('Memuat…')).toBeVisible()
+    expect(await page.getByRole('button', { name: 'Usulkan pembayaran' }).count()).toBe(0)
+    await page.unrouteAll({ behavior: 'wait' })
+    await expect(page.getByText('Pembayaran posted aktif: 0 unit tarif · IDR')).toBeVisible()
+    // Panel dibuka, lalu bacaan wajib gagal saat muat ulang: kirim diblokir, tanpa POST.
+    const posts: string[] = []
+    await page.route((url) => url.pathname.startsWith('/api/'), async (route) => {
+      const req = route.request()
+      const u = new URL(req.url())
+      if (req.method() === 'POST') posts.push(u.pathname)
+      if (req.method() === 'GET' && u.pathname.endsWith('/payments')) await route.abort()
+      else await route.continue()
+    })
+    await page.getByLabel('Nominal (unit tersimpan)').fill('100000')
+    await page.getByRole('button', { name: 'Usulkan pembayaran' }).click()
+    await expect(page.getByRole('heading', { name: 'Konfirmasi usulan pembayaran' })).toBeVisible()
+    await page.getByRole('button', { name: 'Muat ulang data' }).click()
+    await expect(page.getByText('Layanan tidak tersedia')).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Usulkan pembayaran' })).toBeDisabled()
+    expect(posts.length).toBe(0)
+    await page.unrouteAll({ behavior: 'wait' })
+  })
+
+  test('pembayaran: navigasi + fokus keyboard 44px di 360/768/1440', async ({ page }) => {
+    const { email, ws, token, customer, item, draft } = await seedPaymentReady(page, 'kbd')
+    await uiLogin(page, email)
+    await page.setViewportSize({ width: 360, height: 640 })
+    await gotoAuthed(page, `/workspaces/${ws}/rental-payments/${draft.id}`, email)
+    await expect(page.locator('h1')).toBeVisible()
+    await expect(page.getByRole('link', { name: 'Anggota', exact: true })).toBeVisible()
+    await page.getByRole('button', { name: 'Keluar' }).focus()
+    await page.keyboard.press('Tab')
+    const focused = await page.evaluate(() => document.activeElement?.textContent)
+    expect(focused).toBe('Anggota')
+    const outline = await page.evaluate(() => {
+      const el = document.activeElement as HTMLElement | null
+      return el ? getComputedStyle(el).outlineWidth : ''
+    })
+    expect(outline).toBe('2px')
+    for (const size of [{ width: 360, height: 640 }, { width: 768, height: 1024 }, { width: 1440, height: 900 }]) {
+      await page.setViewportSize(size)
+      await page.waitForTimeout(300)
+      const boxes = await page.locator('section[aria-labelledby="payments-heading"] button:visible').evaluateAll((els) =>
+        els.map((el) => { const r = (el as HTMLElement).getBoundingClientRect(); return { w: r.width, h: r.height } }))
+      expect(boxes.length).toBeGreaterThan(0)
+      for (const b of boxes) {
+        expect(b.w).toBeGreaterThanOrEqual(44)
+        expect(b.h).toBeGreaterThanOrEqual(44)
+      }
+    }
+  })
+
+  test('pembayaran: tautan lanjut login menuju halaman pembayaran; URL luar ditolak', async ({ page }) => {
+    const { email, ws, token, customer, item, draft } = await seedPaymentReady(page, 'lanjut')
+    const target = `/workspaces/${ws}/rental-payments/${draft.id}`
+    await page.goto(`/login?next=${encodeURIComponent(target)}`)
+    await page.getByLabel('Email').fill(email)
+    await page.getByLabel('Kata sandi').fill(PASSWORD)
+    await page.locator('form button[type="submit"]').click()
+    await expect(page).toHaveURL(new RegExp(target.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+    await expect(page.locator('h1')).toHaveText('Pembayaran')
+    await uiLogout(page)
+    await page.goto('/login?next=https://evil.example/x')
+    await page.getByLabel('Email').fill(email)
+    await page.getByLabel('Kata sandi').fill(PASSWORD)
+    await page.locator('form button[type="submit"]').click()
+    await expect(page).toHaveURL(/\/workspaces\/new/)
+    await uiLogout(page)
+    await page.goto(`/login?next=/workspaces/${ws}/rental-payments/bukan-uuid`)
+    await page.getByLabel('Email').fill(email)
+    await page.getByLabel('Kata sandi').fill(PASSWORD)
+    await page.locator('form button[type="submit"]').click()
+    await expect(page).toHaveURL(/\/workspaces\/new/)
+  })
+
+  test('screenshot f2-ui-07: tiga utama + tanpa-fakta + tanpa-izin + tak-diketahui + muat + galat + dibatalkan + manifest', async ({ page }) => {
+    const mkdirSync = (await import('node:fs')).mkdirSync
+    const writeFileSync = (await import('node:fs')).writeFileSync
+    const readFileSync = (await import('node:fs')).readFileSync
+    const createHash = (await import('node:crypto')).createHash
+    mkdirSync(SHOTS_UI07, { recursive: true })
+    const manifest: Array<{ file: string, viewport: string, state: string, provenance: string }> = []
+    const sha = (name: string) => createHash('sha256').update(readFileSync(path.join(SHOTS_UI07, name))).digest('hex')
+    const shot = async (name: string, state: string, provenance: string, width: number) => {
+      const file = `${name}-${width}.png`
+      await page.screenshot({ path: path.join(SHOTS_UI07, file), fullPage: true })
+      manifest.push({ file, viewport: `${width}`, state, provenance })
+    }
+    // 01: riwayat live (posted + pending), tiga lebar.
+    const a = await seedPaymentReady(page, 'shot')
+    const mgrA = `man2-py-shot-${RUN}@e2e.umnia.local`
+    await inviteManager(page, a.ws, mgrA, a.email)
+    const propA = await proposePayment(page, a.ws, a.draft.id, a.email, randomUUID(), { amount_minor: '100000', currency: 'IDR', method: 'transfer', reference: 'INV-9' })
+    expect(propA.status).toBe(201)
+    const apprA = await approvePayment(page, a.ws, a.draft.id, (propA.body as PaymentProposalDTO).id, mgrA, randomUUID())
+    expect(apprA.status).toBe(201)
+    const propA2 = await proposePayment(page, a.ws, a.draft.id, a.email, randomUUID(), { amount_minor: '50000', currency: 'IDR', method: 'cash', reference: null })
+    expect(propA2.status).toBe(201)
+    await uiLogin(page, a.email)
+    for (const width of [360, 768, 1440]) {
+      await page.setViewportSize({ width, height: width === 360 ? 640 : width === 768 ? 1024 : 900 })
+      await gotoAuthed(page, `/workspaces/${a.ws}/rental-payments/${a.draft.id}`, a.email)
+      await expect(page.getByText('Pembayaran posted aktif: 100000 unit tarif · IDR')).toBeVisible()
+      await expect(page.getByText('Usulan pembayaran: 50000 unit tarif · IDR')).toBeVisible()
+      await shot('01-payments', 'out-live', 'live', width)
+    }
+    // 04: tanpa fakta (tulis diblokir).
+    const b = await paymentSetup(page, 'shot-nofact')
+    const draftB = await seedDraftOne(page.request, b.ws, b.token, b.customer.id, b.item.id, '2047-01-01T00:00:00Z', '2047-01-03T00:00:00Z')
+    await page.setViewportSize({ width: 360, height: 640 })
+    await uiLogin(page, b.email)
+    await gotoAuthed(page, `/workspaces/${b.ws}/rental-payments/${draftB.id}`, b.email)
+    await expect(page.getByText('Belum ada harga yang dicatat untuk draf ini.')).toBeVisible()
+    await shot('04-payments-nofact', 'nofact-live', 'live', 360)
+    // 05: tanpa izin (bukan anggota).
+    const otherEmail = `lain-py-${RUN}@e2e.umnia.local`
+    await uiRegister(page, otherEmail)
+    await gotoAuthed(page, `/workspaces/${a.ws}/rental-payments/${a.draft.id}`, otherEmail)
+    await expect(page.getByText('bukan anggota workspace ini')).toBeVisible()
+    await shot('05-payments-noperm', 'no-permission-live', 'live', 360)
+    // 06: tak-diketahui (injeksi: POST usulan dibatalkan).
+    const c = await seedPaymentReady(page, 'shot-unknown')
+    await uiLogin(page, c.email)
+    await gotoAuthed(page, `/workspaces/${c.ws}/rental-payments/${c.draft.id}`, c.email)
+    await page.route((url) => url.pathname.startsWith('/api/'), async (route) => {
+      const u = new URL(route.request().url())
+      if (route.request().method() === 'POST' && u.pathname.endsWith('/payment-proposals')) await route.abort()
+      else await route.continue()
+    })
+    await page.getByLabel('Nominal (unit tersimpan)').fill('100000')
+    await page.getByRole('button', { name: 'Usulkan pembayaran' }).click()
+    await page.getByRole('button', { name: 'Usulkan pembayaran' }).click()
+    await expect(page.getByRole('heading', { name: 'Hasil usulan pembayaran tidak diketahui' })).toBeVisible()
+    await shot('06-payments-unknown', 'unknown-mocked', 'mocked-route', 360)
+    await page.unrouteAll({ behavior: 'wait' })
+    // 07: muat (injeksi: GET payments ditahan).
+    await page.route((url) => url.pathname.startsWith('/api/'), async (route) => {
+      const u = new URL(route.request().url())
+      if (route.request().method() === 'GET' && u.pathname.endsWith('/payments')) {
+        await new Promise((r) => setTimeout(r, 2500))
+      }
+      await route.continue()
+    })
+    await gotoAuthed(page, `/workspaces/${c.ws}/rental-payments/${c.draft.id}`, c.email)
+    await expect(page.getByText('Memuat…')).toBeVisible()
+    await shot('07-payments-loading', 'loading-mocked', 'mocked-route', 360)
+    await page.unrouteAll({ behavior: 'wait' })
+    // 08: galat (injeksi: GET dibatalkan).
+    await page.route((url) => url.pathname.startsWith('/api/'), async (route) => {
+      const u = new URL(route.request().url())
+      if (route.request().method() === 'GET') await route.abort()
+      else await route.continue()
+    })
+    await gotoAuthed(page, `/workspaces/${c.ws}/rental-payments/${c.draft.id}`, c.email)
+    await expect(page.getByText('Layanan tidak tersedia')).toBeVisible()
+    await shot('08-payments-error', 'error-mocked', 'mocked-route', 360)
+    await page.unrouteAll({ behavior: 'wait' })
+    // 09: dibatalkan (posted lalu dibalik lewat API).
+    const d = await seedPaymentReady(page, 'shot-rev')
+    const mgrD = `man2-py-shot-rev-${RUN}@e2e.umnia.local`
+    await inviteManager(page, d.ws, mgrD, d.email)
+    const propD = await proposePayment(page, d.ws, d.draft.id, d.email, randomUUID(), { amount_minor: '100000', currency: 'IDR', method: 'cash', reference: null })
+    expect(propD.status).toBe(201)
+    const apprD = await approvePayment(page, d.ws, d.draft.id, (propD.body as PaymentProposalDTO).id, mgrD, randomUUID())
+    expect(apprD.status).toBe(201)
+    const revD = await proposeReversal(page, d.ws, d.draft.id, (apprD.body as PaymentDTO).id, d.email, randomUUID(), 'Salah catat')
+    expect(revD.status).toBe(201)
+    const apprRevD = await approveReversal(page, d.ws, d.draft.id, (apprD.body as PaymentDTO).id, (revD.body as ReversalProposalDTO).id, mgrD, randomUUID())
+    expect(apprRevD.status).toBe(201)
+    await page.setViewportSize({ width: 360, height: 640 })
+    await uiLogin(page, d.email)
+    await gotoAuthed(page, `/workspaces/${d.ws}/rental-payments/${d.draft.id}`, d.email)
+    await expect(page.getByText('Dibatalkan')).toBeVisible()
+    await shot('09-payments-reversed', 'reversed-live', 'live', 360)
+    const files = manifest.map((m) => ({ ...m, sha256: sha(m.file) }))
+    writeFileSync(path.join(SHOTS_UI07, 'manifest.json'), JSON.stringify({ generated_by: 'owner-flow.spec.ts f2-ui-07', files }, null, 2) + '\n')
+    expect(files.length).toBe(9)
   })
 })

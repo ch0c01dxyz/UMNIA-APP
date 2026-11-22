@@ -44,7 +44,14 @@ const ALLOWLIST: Route[] = [
   { method: 'GET', segments: ['workspaces', 'uuid', 'rental', 'holds'], query: true },
   { method: 'POST', segments: ['workspaces', 'uuid', 'rental', 'contracts', 'uuid', 'holds'] },
   { method: 'POST', segments: ['workspaces', 'uuid', 'rental', 'contracts', 'uuid', 'handover'] },
-  { method: 'POST', segments: ['workspaces', 'uuid', 'rental', 'contracts', 'uuid', 'return'] }
+  { method: 'POST', segments: ['workspaces', 'uuid', 'rental', 'contracts', 'uuid', 'return'] },
+  // Pembayaran (F2-UI-07): baca riwayat + 4 tulis (usulan/setujui
+  // pembayaran, usulan/setujui pembalikan catatan); tanpa query.
+  { method: 'GET', segments: ['workspaces', 'uuid', 'rental', 'contracts', 'uuid', 'payments'] },
+  { method: 'POST', segments: ['workspaces', 'uuid', 'rental', 'contracts', 'uuid', 'payment-proposals'] },
+  { method: 'POST', segments: ['workspaces', 'uuid', 'rental', 'contracts', 'uuid', 'payment-proposals', 'uuid', 'approvals'] },
+  { method: 'POST', segments: ['workspaces', 'uuid', 'rental', 'contracts', 'uuid', 'payments', 'uuid', 'reversal-proposals'] },
+  { method: 'POST', segments: ['workspaces', 'uuid', 'rental', 'contracts', 'uuid', 'payments', 'uuid', 'reversal-proposals', 'uuid', 'approvals'] }
 ]
 
 // Validasi query daftar pelanggan/barang/unit/tarif/draf sewa (F2-UI-01/F2-UI-02/F2-UI-03/F2-UI-04,

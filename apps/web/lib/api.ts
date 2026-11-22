@@ -37,6 +37,9 @@ export function resolveLoginTarget(raw: string | null | undefined): string {
   // Serah terima (F2-UI-06): rute sibling dengan pola yang sama.
   const custody = path.match(/^\/workspaces\/([0-9a-f-]{36})\/rental-custody\/([0-9a-f-]{36})$/)
   if (custody && UUID_RE.test(custody[1]) && UUID_RE.test(custody[2])) return path
+  // Pembayaran (F2-UI-07): rute sibling dengan pola yang sama.
+  const payments = path.match(/^\/workspaces\/([0-9a-f-]{36})\/rental-payments\/([0-9a-f-]{36})$/)
+  if (payments && UUID_RE.test(payments[1]) && UUID_RE.test(payments[2])) return path
   if (path === '/invites/accept') {
     const params = new URLSearchParams(query)
     const ws = params.get('workspace_id')

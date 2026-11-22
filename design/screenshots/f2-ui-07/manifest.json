@@ -1,0 +1,68 @@
+{
+  "generated_by": "owner-flow.spec.ts f2-ui-07",
+  "files": [
+    {
+      "file": "01-payments-360.png",
+      "viewport": "360",
+      "state": "out-live",
+      "provenance": "live",
+      "sha256": "7e889fd2edf4b15e951aed90083c78ece0cd6545488ace5c3650c8b46fe8d040"
+    },
+    {
+      "file": "01-payments-768.png",
+      "viewport": "768",
+      "state": "out-live",
+      "provenance": "live",
+      "sha256": "b4d8736c7529a63f96d57213d5367c902b3a06c342e7da57aa0b0eea7672eb3c"
+    },
+    {
+      "file": "01-payments-1440.png",
+      "viewport": "1440",
+      "state": "out-live",
+      "provenance": "live",
+      "sha256": "ff5560d98cef675ed831e36bdc61d845e6a5ed8cd65b41d2c0fe2128acf7587a"
+    },
+    {
+      "file": "04-payments-nofact-360.png",
+      "viewport": "360",
+      "state": "nofact-live",
+      "provenance": "live",
+      "sha256": "32c153185c61104c41a166d17fdd4f420a1924d0f78321658872416112127fb2"
+    },
+    {
+      "file": "05-payments-noperm-360.png",
+      "viewport": "360",
+      "state": "no-permission-live",
+      "provenance": "live",
+      "sha256": "34cbdb0caea7cc3642a954b4ffa7329f09622fb8ebade6286fda60d1212dd097"
+    },
+    {
+      "file": "06-payments-unknown-360.png",
+      "viewport": "360",
+      "state": "unknown-mocked",
+      "provenance": "mocked-route",
+      "sha256": "7a6961c69690d2de8c652e90a4ed516e61a629105df5581c0dd6332e43995399"
+    },
+    {
+      "file": "07-payments-loading-360.png",
+      "viewport": "360",
+      "state": "loading-mocked",
+      "provenance": "mocked-route",
+      "sha256": "959cddb4b06465254004cc1dd4f3fc669fbabf7a6b62b418c5121a9133ebb167"
+    },
+    {
+      "file": "08-payments-error-360.png",
+      "viewport": "360",
+      "state": "error-mocked",
+      "provenance": "mocked-route",
+      "sha256": "198397f2d7b297bbc6db212a81e6f5609f8f12b6d4c93d64ac390f037f585c45"
+    },
+    {
+      "file": "09-payments-reversed-360.png",
+      "viewport": "360",
+      "state": "reversed-live",
+      "provenance": "live",
+      "sha256": "ee2084ea0cd26284696f0e7db29ecd94ae990349f130e96c329841c052c9f740"
+    }
+  ]
+}

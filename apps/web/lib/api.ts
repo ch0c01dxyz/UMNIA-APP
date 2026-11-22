@@ -20,6 +20,9 @@ export function resolveLoginTarget(raw: string | null | undefined): string {
   const fallback = '/workspaces/new'
   if (!raw || typeof raw !== 'string') return fallback
   if (raw.includes('\\') || raw.includes('%') || !raw.startsWith('/')) return fallback
+  // Match before query stripping: the summary continuation must be queryless.
+  const summary = raw.match(/^\/workspaces\/([0-9a-fA-F-]{36})\/payment-summary$/)
+  if (summary && UUID_RE.test(summary[1])) return raw
   let path = raw
   let query = ''
   const q = raw.indexOf('?')

@@ -1,0 +1,48 @@
+# Ringkasan pembayaran: workspace payment summary
+
+**PROPOSED for review.** Baseline: [UI07 R1 integrated at M](../development/current-status.md) (`dba278e0b21e8e8cccd08f1942f07a57e34058db`). F2-UI-08 is not assigned, frozen or implemented.
+
+## Which problem should come first?
+
+**Recommend reporting for teams already recording rentals.** UI07 shows one draft at a time. A workspace reader should be able to see the agreed-price ceiling, active posted payments and remaining ceiling across drafts without opening each one. The [UI07 proposal](https://github.com/ch0c01dxyz/UMNIA-APP/blob/dba278e0b21e8e8cccd08f1942f07a57e34058db/docs/reviews/f2-ui-07-payment-ui-proposal.md?plain=1#L85-L99) deferred that view. The business API already calculates it; a read-only page would advance the [F2 reporting goal](../../FAST_TRACK.md) without changing a payment.
+
+**Choose onboarding instead** if an already-entitled owner needs to turn on Finance from the browser before the team's first payment. The [module page](https://github.com/ch0c01dxyz/UMNIA-APP/blob/dba278e0b21e8e8cccd08f1942f07a57e34058db/apps/web/pages/workspaces/%5Bid%5D/modules.vue#L173-L181) offers activation only for Rental Basic. The [UI07 fixture](https://github.com/ch0c01dxyz/UMNIA-APP/blob/dba278e0b21e8e8cccd08f1942f07a57e34058db/apps/web/e2e/owner-flow.spec.ts#L593-L603) seeded the entitlement through the test CLI and activated `finance.basic` via API, not the browser UI. Reporting does not close that gap. Browser activation needs a separate proposal; neither choice grants entitlement or authorizes production activation.
+
+## Existing read contract at M
+
+- **Business API:** authenticated `GET /workspaces/{id}/finance/summary`, across drafts with agreed-price facts in one workspace. The [route](https://github.com/ch0c01dxyz/UMNIA-APP/blob/dba278e0b21e8e8cccd08f1942f07a57e34058db/services/business-api/main.go#L159-L164) and [handler](https://github.com/ch0c01dxyz/UMNIA-APP/blob/dba278e0b21e8e8cccd08f1942f07a57e34058db/services/business-api/payments.go#L1538-L1607) require current workspace membership with `view_workspace`. [Access tests](https://github.com/ch0c01dxyz/UMNIA-APP/blob/dba278e0b21e8e8cccd08f1942f07a57e34058db/services/business-api/module_payments_integration_test.go#L2314-L2365) cover owner, manager and cashier. No `manage_business_data`, members list (`view_members`), active Finance installation or exact-version Finance entitlement is required. Reads work before activation and [after deactivation or revocation](https://github.com/ch0c01dxyz/UMNIA-APP/blob/dba278e0b21e8e8cccd08f1942f07a57e34058db/services/business-api/module_payments_integration_test.go#L2388-L2424).
+- **Request and errors:** missing, invalid or expired session: 401. With a session, invalid workspace UUID: 400; nonmember, missing read permission or unknown valid workspace: 403. No filters: any nonempty Go `RawQuery` returns 400 (`parameter query tidak didukung`), including `?currency=` and malformed escapes. A bare trailing `?` has empty `RawQuery` and is accepted by Go ([query tests](https://github.com/ch0c01dxyz/UMNIA-APP/blob/dba278e0b21e8e8cccd08f1942f07a57e34058db/services/business-api/module_payments_integration_test.go#L2588-L2633)). Corrupt totals (`total tidak konsisten`) or a failed read transaction return 500, not partial data.
+- **Browser today:** there is no workspace summary page. The [proxy allowlist](https://github.com/ch0c01dxyz/UMNIA-APP/blob/dba278e0b21e8e8cccd08f1942f07a57e34058db/apps/web/server/api/%5B...path%5D.ts#L15-L55) omits the summary. Even an authenticated plain `GET /api/workspaces/{id}/finance/summary` [returns 404](https://github.com/ch0c01dxyz/UMNIA-APP/blob/dba278e0b21e8e8cccd08f1942f07a57e34058db/apps/web/e2e/proxy-session.spec.ts#L1483-L1484) locally, not a backend denial. Unlike Go, the [proxy](https://github.com/ch0c01dxyz/UMNIA-APP/blob/dba278e0b21e8e8cccd08f1942f07a57e34058db/apps/web/server/api/%5B...path%5D.ts#L146-L188) rejects a bare `?` with 400 before contacting the API.
+
+A 200 [response](https://github.com/ch0c01dxyz/UMNIA-APP/blob/dba278e0b21e8e8cccd08f1942f07a57e34058db/services/business-api/payments.go#L570-L591) contains `workspace_id`, `observed_at` and `currencies`. `observed_at` is a UTC RFC3339Nano database clock sample taken during the repeatable-read transaction, not an as-of watermark or a way to reconstruct history. `currencies: []` means no agreed-price facts, not a zero IDR balance. A fact with no posted payments still contributes its ceiling and a real `"0"` paid amount.
+
+| In each `currencies[]` entry, ordered by `currency` | Meaning |
+| --- | --- |
+| `currency` | Exact currency code of the agreed-price facts. Keep each currency separate. |
+| `total_minor` | Sum of internal agreed-price ceilings. Suggested label: `Jumlah harga disepakati`. |
+| `paid_minor` | Posted payments without a posted reversal: `Pembayaran tercatat aktif`. |
+| `outstanding_minor` | Remaining ceiling (total minus active paid), calculated by the server: `Sisa plafon acuan`. |
+| `payments_count`, `reversals_count` | Counts of all posted payments and posted reversals, respectively. A reversal removes the amount from paid, not the original payment from its count. |
+| `pending_payment_proposals_count`, `pending_reversal_proposals_count` | Proposals with no posting for that proposal ID. Pending proposals move no money. |
+
+The three amounts are canonical nonnegative decimal **strings** in stored minor units (`"0"` or digits without a leading zero); the four counts are nonnegative JSON integers. Show the server's digits beside their currency. Do not use JavaScript `Number` for money, apply a per-draft int64 cap, recompute balances, convert currencies or sum across them. In the [large-value Go fixture](https://github.com/ch0c01dxyz/UMNIA-APP/blob/dba278e0b21e8e8cccd08f1942f07a57e34058db/services/business-api/module_payments_integration_test.go#L2202-L2238), IDR total and paid are both `"18446744073709551614"`; outstanding is `"0"`, with five posted payments and three reversals. USD has its own row. These [internal records](https://github.com/ch0c01dxyz/UMNIA-APP/blob/dba278e0b21e8e8cccd08f1942f07a57e34058db/services/business-api/README.md?plain=1#L1055-L1099) are not a cash or bank balance, ledger, legal debt, revenue, profit, tax or bank settlement. Reversing a record is not a cash refund.
+
+## Proposed page and recovery
+
+Place one `Ringkasan pembayaran` link beside the workspace name on [Draf sewa](https://github.com/ch0c01dxyz/UMNIA-APP/blob/dba278e0b21e8e8cccd08f1942f07a57e34058db/apps/web/pages/workspaces/%5Bid%5D/rentals.vue#L984-L994), outside the draft rows and write controls. It would open `/workspaces/{id}/payment-summary`, not a per-draft page. Allow only the plain summary GET through the same-origin `/api` proxy. Loading, refresh and retry must never post, approve, reverse or activate anything; no members lookup or per-draft requests.
+
+| State | Proposed behavior |
+| --- | --- |
+| Loading / result | Announce `Memuat ringkasan...` without placeholder amounts. Show observation time (UTC), three amounts and four counts per currency. Disable duplicate refresh while loading. |
+| Empty | Only a valid empty array gets `Belum ada harga yang disepakati di workspace ini.` Keep a returned currency row even if all three amounts are `"0"`. |
+| Error | On network/5xx or a malformed success (wrong `workspace_id`, invalid time, amounts, counts or currency rows), show no figures. Offer `Muat ulang` as a new GET; do not substitute zero or salvage partial rows. |
+| 401 / 403 | On a current 401, clear that session and return after login via the [safe continuation](https://github.com/ch0c01dxyz/UMNIA-APP/blob/dba278e0b21e8e8cccd08f1942f07a57e34058db/apps/web/lib/api.ts#L17-L60), extended only to this page with a validated workspace UUID. On 403, clear figures and show `Tidak ada izin`; keep the session. |
+| Workspace, route or actor changes | Clear prior figures. Ignore late success **and** error responses from an old route, session or superseded refresh before rendering, redirecting or clearing a session. |
+
+## Evidence to require before accepting a future UI (PROPOSED, NOT RUN)
+
+- In a disposable workspace, exercise the real proxy and API as owner, manager and cashier; distinguish empty, fact-only zero paid and posted/reversed records. Test 401 continuation, 403 without logout and reads after Finance revocation. Assert one summary GET per load/refresh, no mutations, and no broader proxy methods or query forwarding.
+- Exercise the exact large IDR string alongside USD. Inject delayed, malformed, wrong-workspace and failing responses; switch workspace or actor mid-request, including a late 401. Demonstrate recovery without leaking numbers or logging out the new actor. Mark injected fixtures as UI evidence, not database/RLS proof.
+- Use `ui-ux-pro-max` with [DESIGN.md](../../DESIGN.md) and the [screen requirements](../12-design-system-ux.md). Capture the running page at 360, 768 and 1440 px; label each capture with width, state and live API vs injected provenance. Check long values for truncation or page overflow; check refresh at rest, hover, visible keyboard focus, press and disabled/loading. Announce results and errors in text.
+
+**Freeze decision:** choose reporting or first-time onboarding. If reporting wins, confirm the single entry and route for all workspace readers, the Indonesian labels and exact-unit display, and the state/evidence checks above. No backend, audit UI, tax, export, grant or activation work is part of this reporting proposal. No candidate UI, test result or screenshot is claimed here.

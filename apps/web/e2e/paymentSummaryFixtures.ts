@@ -46,9 +46,17 @@ export function invalidSummaries(ws: string): [string, unknown][] {
   ]
 }
 
-interface MountedNuxt { $session: SessionState, $router: { push(path: string): Promise<unknown> } }
+interface MountedNuxt {
+  $session: SessionState
+  $router: {
+    push(path: string): Promise<unknown>
+    readonly currentRoute: { readonly value: { readonly fullPath: string } }
+  }
+}
 interface SummaryReader {
   open(ws: string): Promise<void>
+  openRawPath(path: string): Promise<void>
+  currentFullPath(): Promise<string>
   replace(token: string, subject?: string): Promise<void>
   retained(): Promise<() => Promise<boolean>>
   signedOut(): Promise<boolean>
@@ -62,8 +70,12 @@ export async function mountedReader(page: Page): Promise<SummaryReader> {
     if (!nuxt?.$router || !nuxt.$session) throw new Error('Mounted Nuxt router/session unavailable')
     return nuxt
   })
+  const openRawPath = (path: string): Promise<void> =>
+    app.evaluate(async (nuxt, targetPath) => { await nuxt.$router.push(targetPath) }, path)
   return {
-    open: ws => app.evaluate(async (nuxt, path) => { await nuxt.$router.push(path) }, summaryPath(ws)),
+    open: ws => openRawPath(summaryPath(ws)),
+    openRawPath,
+    currentFullPath: () => app.evaluate(nuxt => nuxt.$router.currentRoute.value.fullPath),
     replace: (token, subject) => app.evaluate(({ $session }, actor) => {
       const id = actor.subject ?? $session.subjectId.value
       if (!id || !$session.token.value || actor.token === $session.token.value) throw new Error('Expected a distinct fixture session')

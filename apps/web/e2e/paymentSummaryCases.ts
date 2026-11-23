@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { expect, test, type APIRequestContext, type Locator, type Page } from '@playwright/test'
 import { captureState, checkLayout, currencyRow, expectNoFigures, expectRows, GOLDEN, holdReads, invalidSummaries, mountedReader,
   observeReads, PASSTHROUGH, refreshButton, returnLink, sendReply, summaryApi, summaryBody, summaryPath, ZERO, type Reply } from './paymentSummaryFixtures'
+import { registerPaymentSummaryNavigationCases } from './paymentSummaryNavigationCases'
 
 interface WorkspaceSeed { ws: string, email: string, token: string }
 interface SeedRow { id: string }
@@ -417,6 +418,7 @@ export function registerPaymentSummaryCases(helpers: PaymentSummaryHelpers): voi
     registerLive(helpers)
     registerLogin(helpers)
     registerControlled(helpers)
+    registerPaymentSummaryNavigationCases({ helpers, enterSession, expectLogin, submitLogin, factOnly })
     for (const change of ['workspace', 'actor'] as const) {
       for (const status of [200, 401, 403, 500]) {
         test(`late A ${status} cannot overwrite B after a ${change} change`, async ({ page }) => staleLast(helpers, page, change, status))

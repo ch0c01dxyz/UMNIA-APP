@@ -15,6 +15,10 @@ const candidateId = route.params.id
 const workspaceId = typeof candidateId === 'string' && pagePath === `/workspaces/${candidateId}/payment-summary` &&
   resolveLoginTarget(pagePath) === pagePath ? candidateId : null
 
+function resolveReaderPath(fullPath: string): string {
+  return workspaceId !== null && fullPath === `${pagePath}#konten` ? pagePath : fullPath
+}
+
 const amounts = [
   ['total_minor', 'Jumlah harga disepakati'], ['paid_minor', 'Pembayaran tercatat aktif'],
   ['outstanding_minor', 'Sisa plafon acuan']
@@ -50,9 +54,11 @@ const observation = computed(() => {
 const issue = ref<keyof typeof issues | null>(null)
 const busy = ref(false)
 const refreshable = computed(() => !busy.value && (!!report.value || issue.value === 'failed' || issue.value === 'denied'))
+const reportMain = ref<HTMLElement | null>(null)
 
 type Identity = Readonly<{ token: string, subjectId: string }>
 let owner: Identity | null = null
+let pendingReloadFocus: HTMLButtonElement | null = null
 let generation = 0
 let mounted = false
 let redirecting = false
@@ -62,6 +68,7 @@ let removeNavigationListener: (() => void) | undefined
 function invalidateReader(): void {
   generation++
   owner = null
+  pendingReloadFocus = null
   report.value = null
   issue.value = null
   busy.value = false
@@ -70,17 +77,25 @@ function invalidateReader(): void {
 function isCurrent(identity: Identity, requestGeneration: number): boolean {
   const current = router.currentRoute.value
   return mounted && !redirecting && !leavingFor && generation === requestGeneration && owner === identity &&
-    current.fullPath === pagePath && current.params.id === workspaceId &&
+    resolveReaderPath(current.fullPath) === pagePath && current.params.id === workspaceId &&
     session?.token.value === identity.token && session.subjectId.value === identity.subjectId
 }
 
-async function readSummary(): Promise<void> {
+async function readSummary(event?: MouseEvent): Promise<void> {
   const identity = owner
   if (!session || !workspaceId || !identity || busy.value || !isCurrent(identity, generation)) return
   const requestGeneration = ++generation
   busy.value = true
   report.value = null
   issue.value = null
+  // Park existing button focus on main before Vue applies the native disabled state.
+  const button = event?.currentTarget
+  pendingReloadFocus = button instanceof HTMLButtonElement && button === document.activeElement && document.hasFocus()
+    ? button : null
+  if (pendingReloadFocus) {
+    reportMain.value?.focus({ preventScroll: true })
+    if (!isCurrent(identity, requestGeneration)) return
+  }
   try {
     // apiFetch throws on 401 without redirecting; only this reader may act on its captured session.
     const { status, data } = await apiFetch<unknown>(session, `/api/workspaces/${workspaceId}/finance/summary`, { method: 'GET' })
@@ -98,6 +113,11 @@ async function readSummary(): Promise<void> {
   } finally {
     if (isCurrent(identity, requestGeneration)) busy.value = false
   }
+  if (!pendingReloadFocus) return
+  await nextTick()
+  if (isCurrent(identity, requestGeneration) && document.hasFocus() && document.activeElement === reportMain.value) {
+    pendingReloadFocus?.focus({ preventScroll: true })
+  }
 }
 
 async function synchronizeReader(): Promise<void> {
@@ -107,14 +127,15 @@ async function synchronizeReader(): Promise<void> {
   await nextTick()
   const { path, fullPath } = router.currentRoute.value
   if (!mounted || redirecting || leavingFor || path !== pagePath || scheduledGeneration !== generation) return
+  const readerPath = resolveReaderPath(fullPath)
   const token = session?.token.value
   const subjectId = session?.subjectId.value
   if (!token || !subjectId) {
     redirecting = true
-    await navigateTo(loginUrl(fullPath), { replace: true })
+    await navigateTo(loginUrl(readerPath), { replace: true })
     return
   }
-  if (!workspaceId || fullPath !== pagePath) { issue.value = 'invalid'; return }
+  if (!workspaceId || readerPath !== pagePath) { issue.value = 'invalid'; return }
   owner = { token, subjectId }
   await readSummary()
 }
@@ -124,7 +145,11 @@ function suspendReader(to: RouteLocationNormalized): void {
   invalidateReader()
 }
 onBeforeRouteLeave(suspendReader)
-onBeforeRouteUpdate(suspendReader)
+onBeforeRouteUpdate((to, from) => {
+  pendingReloadFocus = null
+  if (workspaceId && resolveReaderPath(from.fullPath) === pagePath && resolveReaderPath(to.fullPath) === pagePath) return
+  suspendReader(to)
+})
 onBeforeUnmount(() => { mounted = false; invalidateReader(); removeNavigationListener?.() })
 onMounted(() => {
   mounted = true
@@ -133,13 +158,13 @@ onMounted(() => {
     leavingFor = null
     if (failure) void synchronizeReader()
   })
-  watch([() => router.currentRoute.value.fullPath, () => session?.token.value, () => session?.subjectId.value],
+  watch([() => resolveReaderPath(router.currentRoute.value.fullPath), () => session?.token.value, () => session?.subjectId.value],
     synchronizeReader, { immediate: true, flush: 'sync' })
 })
 </script>
 
 <template>
-  <main id="konten" lang="id" class="page report" :style="pageStyle">
+  <main id="konten" ref="reportMain" tabindex="-1" lang="id" class="page report" :style="pageStyle" @blur="pendingReloadFocus = null">
     <header class="intro">
       <div>
         <p class="kicker">Laporan workspace</p>
@@ -147,7 +172,7 @@ onMounted(() => {
         <p class="description">Harga dan pembayaran dari draf sewa di workspace ini, dipisahkan per mata uang.</p>
       </div>
       <div class="actions">
-        <NuxtLink v-if="workspaceId" class="action back" :to="`/workspaces/${workspaceId}/rentals`" no-prefetch>Kembali ke Draf sewa</NuxtLink>
+        <NuxtLink v-if="workspaceId" class="action back" :to="`/workspaces/${workspaceId.toLowerCase()}/rentals`" no-prefetch>Kembali ke Draf sewa</NuxtLink>
         <button type="button" class="action refresh" :disabled="!refreshable" @click="readSummary">Muat ulang</button>
       </div>
     </header>

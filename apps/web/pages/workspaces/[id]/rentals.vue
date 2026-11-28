@@ -991,6 +991,7 @@ async function resendCreate() {
           <NuxtLink :to="`/workspaces/${wsId}/assets`">Unit</NuxtLink>
           <NuxtLink :to="`/workspaces/${wsId}/prices`">Tarif</NuxtLink>
           <NuxtLink :to="`/workspaces/${wsId}/rentals`">Draf sewa</NuxtLink>
+          <NuxtLink :to="`/workspaces/${wsId}/payment-summary`">Ringkasan pembayaran</NuxtLink>
         </nav>
         <p class="small">
           Draf ini tidak mereservasi barang, tidak menjamin ketersediaan, tidak memilih unit fisik, dan tidak mengunci harga.

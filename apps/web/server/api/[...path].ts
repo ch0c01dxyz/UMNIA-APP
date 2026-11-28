@@ -12,12 +12,14 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const MODULE_RE = /^[a-z][a-z0-9]*(\.[a-z][a-z0-9]*)+$/
 
 type Route = { method: 'GET' | 'POST', segments: Array<string | 'uuid' | 'module'>, query?: boolean }
+const PAYMENT_SUMMARY_ROUTE: Route = { method: 'GET', segments: ['workspaces', 'uuid', 'finance', 'summary'] }
 const ALLOWLIST: Route[] = [
   { method: 'GET', segments: ['healthz'] },
   { method: 'POST', segments: ['auth', 'register'] },
   { method: 'POST', segments: ['auth', 'login'] },
   { method: 'POST', segments: ['workspaces'] },
   { method: 'GET', segments: ['workspaces', 'uuid'] },
+  PAYMENT_SUMMARY_ROUTE,
   { method: 'GET', segments: ['workspaces', 'uuid', 'members'] },
   { method: 'POST', segments: ['workspaces', 'uuid', 'invites'] },
   { method: 'POST', segments: ['invites', 'accept'] },
@@ -186,6 +188,8 @@ export default defineEventHandler(async (event) => {
     return fail(event, 400, 'permintaan tidak valid')
   }
   if (!matched) return fail(event, 404, 'tidak ditemukan')
+  const isPaymentSummary = matched === PAYMENT_SUMMARY_ROUTE
+  if (isPaymentSummary) setResponseHeader(event, 'Cache-Control', 'private, no-store')
 
   let body: Buffer | undefined
   if (method === 'POST') {
@@ -211,7 +215,7 @@ export default defineEventHandler(async (event) => {
   const auth = event.node.req.headers.authorization
   if (typeof auth === 'string' && auth !== '') headers.Authorization = auth
   const idem = event.node.req.headers['idempotency-key']
-  if (typeof idem === 'string' && idem !== '') headers['Idempotency-Key'] = idem
+  if (!isPaymentSummary && typeof idem === 'string' && idem !== '') headers['Idempotency-Key'] = idem
 
   let upstream: Response
   try {

@@ -10,6 +10,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { expect, test, type APIRequestContext, type Page, type Route } from '@playwright/test'
+import { registerPaymentSummaryCases } from './paymentSummaryCases'
 
 const RUN = `${Date.now().toString(36)}${Math.floor(Math.random() * 1296).toString(36)}`
 const PASSWORD = 'E2eUiTest123'
@@ -6555,7 +6556,8 @@ test.describe.serial('alur pemilik', () => {
     await inviteManager(page, ws, mgr2, email)
     await uiLogin(page, email)
     await gotoAuthed(page, `/workspaces/${ws}/rentals`, email)
-    await page.getByRole('link', { name: 'Pembayaran' }).first().click()
+    await page.getByRole('link', { name: 'Pembayaran', exact: true })
+      .and(page.locator(`a[href="/workspaces/${ws}/rental-payments/${draft.id}"]`)).click()
     await expect(page).toHaveURL(new RegExp(`/workspaces/${ws}/rental-payments/${draft.id}`))
     await expect(page.locator('h1')).toHaveText('Pembayaran')
     await expect(page.getByText('Jumlah harga disepakati (plafon acuan internal): 300000 unit tarif · IDR')).toBeVisible()
@@ -7593,4 +7595,21 @@ test.describe.serial('alur pemilik', () => {
     writeFileSync(path.join(SHOTS_UI07, 'manifest.json'), JSON.stringify({ generated_by: 'owner-flow.spec.ts f2-ui-07', files }, null, 2) + '\n')
     expect(files.length).toBe(9)
   })
+})
+
+registerPaymentSummaryCases({
+  gotoAuthed, r1Setup, paymentSetup, seedPaymentReady, uiRegister, uiLogin, apiToken,
+  uiCreateWorkspace, uiInvite, inviteManager, seedPriceOne, seedDraftOne, acceptPrice,
+  proposePayment, approvePayment, proposeReversal, approveReversal,
+  fillLoginPassword: page => page.getByLabel('Kata sandi').fill(PASSWORD),
+  revokeFinance(workspaceId) {
+    const output = execFileSync(GRANT_CLI, [
+      '--workspace', workspaceId, '--module', 'finance.basic', '--version', '0.1.0',
+      '--operation', 'revoke', '--reason', 'UI08 disposable summary fixture',
+    ], {
+      encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env, UMNIA_OPERATOR_DATABASE_URL: OPERATOR_URL },
+    })
+    expect(output.startsWith('revoked '), 'Expected a newly revoked Finance fixture grant').toBe(true)
+  },
 })

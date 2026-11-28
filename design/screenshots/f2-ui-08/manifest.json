@@ -1,0 +1,117 @@
+{
+  "generated_by": "apps/web/e2e/paymentSummaryCases.ts (UI08, owner-flow / Chromium)",
+  "files": [
+    {
+      "file": "summary-360.png",
+      "viewport": {
+        "width": 360,
+        "height": 640
+      },
+      "dimensions": {
+        "width": 360,
+        "height": 2282
+      },
+      "state": "active payments and pending reversal",
+      "provenance": "live",
+      "sha256": "ddec466ff13636e0a57c9db0f163cf936ee57b0b6edd66381bb8baa1a86c4b01"
+    },
+    {
+      "file": "summary-768.png",
+      "viewport": {
+        "width": 768,
+        "height": 1024
+      },
+      "dimensions": {
+        "width": 768,
+        "height": 1347
+      },
+      "state": "active payments and pending reversal",
+      "provenance": "live",
+      "sha256": "c008fc3eeccad393953bf795a61f2554a5cfe0084f615c34428c86f1642dce8a"
+    },
+    {
+      "file": "summary-1440.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      },
+      "dimensions": {
+        "width": 1440,
+        "height": 1243
+      },
+      "state": "active payments and pending reversal",
+      "provenance": "live",
+      "sha256": "21674c3c5d0e21127f06102280289efb425a962a3c7a55533c13691859652b1d"
+    },
+    {
+      "file": "empty-360.png",
+      "viewport": {
+        "width": 360,
+        "height": 640
+      },
+      "dimensions": {
+        "width": 360,
+        "height": 640
+      },
+      "state": "no agreed-price facts",
+      "provenance": "live",
+      "sha256": "9d6c46555c41d98d53d77cdf87a74ff8f2096513ea4ec52677a58950817a8557"
+    },
+    {
+      "file": "forbidden-360.png",
+      "viewport": {
+        "width": 360,
+        "height": 640
+      },
+      "dimensions": {
+        "width": 360,
+        "height": 640
+      },
+      "state": "nonmember denied",
+      "provenance": "live",
+      "sha256": "7829a9086fe6df7297299eb2647e5ef6fbabe54976a58392ee00714236e753e4"
+    },
+    {
+      "file": "large-currencies-360.png",
+      "viewport": {
+        "width": 360,
+        "height": 640
+      },
+      "dimensions": {
+        "width": 360,
+        "height": 2282
+      },
+      "state": "exact IDR and USD",
+      "provenance": "injected",
+      "sha256": "778e3617d38b5f86f8113993954cc887fc09d5417eb7ec1d3af3705a55a4b39e"
+    },
+    {
+      "file": "loading-360.png",
+      "viewport": {
+        "width": 360,
+        "height": 640
+      },
+      "dimensions": {
+        "width": 360,
+        "height": 640
+      },
+      "state": "held manual refresh",
+      "provenance": "injected",
+      "sha256": "e9ec9cf2a2e989759387c702a31e50936fafa371516576cf8d21e75b8cf32351"
+    },
+    {
+      "file": "error-360.png",
+      "viewport": {
+        "width": 360,
+        "height": 640
+      },
+      "dimensions": {
+        "width": 360,
+        "height": 640
+      },
+      "state": "failed manual refresh (500)",
+      "provenance": "injected",
+      "sha256": "33e15be5572994738a91234732cfa80434eb049db1ff90fd809714cc819af801"
+    }
+  ]
+}

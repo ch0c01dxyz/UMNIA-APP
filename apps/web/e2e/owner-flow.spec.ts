@@ -7597,6 +7597,82 @@ test.describe.serial('alur pemilik', () => {
   })
 })
 
+test('UI09: Finance Basic requires confirmation and entitlement, then displays the verified state', async ({ page }) => {
+  const email = `ui09-${RUN}@e2e.umnia.local`
+  await uiRegister(page, email)
+  await uiLogin(page, email)
+  const ws = await uiCreateWorkspace(page, 'Toko Uji Keuangan', email)
+  await page.getByRole('link', { name: 'Fitur', exact: true }).click()
+
+  const finance = page.getByRole('region', { name: 'Keuangan Sederhana' })
+  const rental = page.getByRole('region', { name: 'Persewaan Sederhana' })
+  const activate = finance.getByRole('button', { name: 'Aktifkan Keuangan Sederhana' })
+  const confirm = finance.getByRole('button', { name: 'Ya, aktifkan' })
+  const activationPath = `/api/workspaces/${ws}/modules/finance.basic/activate`
+  let writes = 0
+  page.on('request', req => {
+    if (req.method() === 'POST' && new URL(req.url()).pathname === activationPath) writes++
+  })
+
+  await expect(rental.getByRole('button', { name: 'Aktifkan Persewaan Sederhana' })).toBeVisible()
+  await expect(finance.getByText('Keuangan Sederhana belum diaktifkan.')).toBeVisible()
+  await activate.focus()
+  await page.keyboard.press('Enter')
+  await expect(finance.getByRole('heading', { name: 'Periksa sebelum mengaktifkan' })).toBeFocused()
+  await finance.getByRole('button', { name: 'Batal' }).click()
+  await expect(activate).toBeFocused()
+  expect(writes).toBe(0)
+
+  await activate.click()
+  const denied = page.waitForResponse(res => new URL(res.url()).pathname === activationPath)
+  await confirm.click()
+  expect((await denied).status()).toBe(403)
+  await expect(finance.getByRole('alert')).toContainText('hubungi pengelola layanan')
+  await expect(finance.getByText('Keuangan Sederhana belum diaktifkan.')).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Keluar' })).toBeVisible()
+
+  grantFinance(ws)
+  await finance.getByRole('button', { name: 'Batal' }).click()
+  await activate.click()
+  const shots = process.env.E2E_UI09_SCREENSHOTS
+  if (shots) {
+    mkdirSync(shots, { recursive: true })
+    for (const [width, height] of [[360, 640], [768, 1024], [1440, 900]]) {
+      await page.setViewportSize({ width, height })
+      const bounds = await confirm.boundingBox()
+      expect(bounds?.height).toBeGreaterThanOrEqual(44)
+      await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width)
+      await page.screenshot({ path: path.join(shots, `finance-confirm-${width}.png`), fullPage: true })
+    }
+  }
+
+  // The real POST succeeds. Lose two status responses to verify that an
+  // unsuccessful retry keeps the next retry reachable by keyboard.
+  const statePath = `/api/workspaces/${ws}/modules/finance.basic`
+  let readsToLose = 2
+  await page.route(url => url.pathname === statePath, async route => {
+    if (route.request().method() === 'GET' && readsToLose > 0) {
+      readsToLose--
+      await route.fulfill({ status: 502, json: { error: 'Layanan tidak tersedia. Coba lagi sebentar lagi.' } })
+    } else await route.continue()
+  })
+  const accepted = page.waitForResponse(res => new URL(res.url()).pathname === activationPath)
+  await confirm.click()
+  expect((await accepted).status()).toBe(200)
+  await expect(finance.getByRole('alert')).toContainText('Hasil aktivasi belum dapat dipastikan')
+  await expect(activate).toHaveCount(0)
+  const retry = finance.getByRole('button', { name: 'Muat ulang status Keuangan Sederhana' })
+  const failedRetry = page.waitForResponse(res => new URL(res.url()).pathname === statePath && res.status() === 502)
+  await retry.press('Enter')
+  await failedRetry
+  await expect(retry).toBeFocused()
+  await page.keyboard.press('Enter')
+  await expect(finance.getByText('Keuangan Sederhana aktif · versi 0.1.0')).toBeFocused()
+  await expect(finance.getByRole('alert')).toHaveCount(0)
+  expect(writes).toBe(2)
+  await expect(rental.getByText('Belum aktif.')).toBeVisible()
+})
+
 registerPaymentSummaryCases({
   gotoAuthed, r1Setup, paymentSetup, seedPaymentReady, uiRegister, uiLogin, apiToken,
   uiCreateWorkspace, uiInvite, inviteManager, seedPriceOne, seedDraftOne, acceptPrice,

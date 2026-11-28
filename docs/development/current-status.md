@@ -1,14 +1,22 @@
 # Verified implementation checkpoint
 
-Snapshot: 2026-11-28. The integration branch includes the per-draft payment and reversal UI (F2-UI-07 R1) and the read-only workspace payment summary (F2-UI-08). GitHub Actions did not start the jobs on the UI08 integration commit.
+Snapshot: 2026-11-28. The integration branch includes per-draft payments and reversals (F2-UI-07 R1), the workspace payment summary (F2-UI-08), and Finance Basic activation from the browser (F2-UI-09).
 
 ## Current integration
 
 - Repository: `ch0c01dxyz/UMNIA-APP`.
-- Integration branch: `f1-03-identity` at [`4d88460f9cabf7dd0e1eac70d3f1559ad54e801e`](https://github.com/ch0c01dxyz/UMNIA-APP/commit/4d88460f9cabf7dd0e1eac70d3f1559ad54e801e), merge of [PR #8](https://github.com/ch0c01dxyz/UMNIA-APP/pull/8) after the documentation checkpoint in [PR #7](https://github.com/ch0c01dxyz/UMNIA-APP/pull/7) merged at `9d5897ef29365f0b2f12c75e22edaa36da926242`.
-- UI08 adds **Ringkasan pembayaran** from **Draf sewa**. It shows workspace payment totals and counts per currency for authorized readers using the existing summary GET. Finance activation and entitlement provisioning remain separate flows.
+- Integration branch `f1-03-identity` is at [`e4b71cd64200cd5bbd33de7105dca2ae5e350aa3`](https://github.com/ch0c01dxyz/UMNIA-APP/commit/e4b71cd64200cd5bbd33de7105dca2ae5e350aa3), the merge of [PR #10](https://github.com/ch0c01dxyz/UMNIA-APP/pull/10).
+- In **Fitur**, an owner can confirm activation of **Keuangan Sederhana**. The API checks module-management permission and entitlement. The page reads back the installation state and uses a status read to recover after a missing response. Keyboard focus follows the result or returns to the retry button if reading fails again. Operator entitlement provisioning stays separate.
+- Before merge, the [UI09 push](https://github.com/ch0c01dxyz/UMNIA-APP/actions/runs/46123462360/attempts/2) and [PR run](https://github.com/ch0c01dxyz/UMNIA-APP/actions/runs/46123465171/attempts/2) each passed 252 Go tests including subtests, the Nuxt build, and 226/226 Playwright tests (197 owner-flow, 29 proxy/session). The merge tree matches the tested head.
+- [Integration push 46131279358](https://github.com/ch0c01dxyz/UMNIA-APP/actions/runs/46131279358) records the Go, Nuxt, and Playwright gates for the merge commit. The Go integration gate passed 252 tests including subtests, with zero failures or skips, and Nuxt built successfully.
+- A Windows Compose walkthrough using the merge tree passed in Chromium on a fresh workspace. It covered registration and invitation, activation of Rental and Finance Basic with synthetic operator grants, customer and rental setup, agreed price, handover, return, and payment approved by a separate manager. The IDR row showed one posted payment and the expected stored amounts: 100000 paid, 200000 outstanding, and 300000 agreed.
+
+## UI08 acceptance
+
+- [PR #8](https://github.com/ch0c01dxyz/UMNIA-APP/pull/8) merged at [`4d88460f9cabf7dd0e1eac70d3f1559ad54e801e`](https://github.com/ch0c01dxyz/UMNIA-APP/commit/4d88460f9cabf7dd0e1eac70d3f1559ad54e801e) after the documentation checkpoint in [PR #7](https://github.com/ch0c01dxyz/UMNIA-APP/pull/7).
+- UI08 adds **Ringkasan pembayaran** from **Draf sewa**. It shows workspace payment totals and counts per currency for authorized readers using the existing summary GET.
 - Before merge, the [UI08 push](https://github.com/ch0c01dxyz/UMNIA-APP/actions/runs/45105242622) and [PR run](https://github.com/ch0c01dxyz/UMNIA-APP/actions/runs/45105248023) each passed 252 Go tests including subtests, the Nuxt build, and 225/225 Playwright tests (196 owner-flow, 29 proxy/session). The merged tree differs from that tested feature tree only by the two documentation files from PR #7. All 20 UI08 files match the tested head byte for byte.
-- **Exact integration CI blocked.** GitHub Actions marked [push #96](https://github.com/ch0c01dxyz/UMNIA-APP/actions/runs/46113170654) and [push #97](https://github.com/ch0c01dxyz/UMNIA-APP/actions/runs/46113288506) failed before starting any job. The annotations cite a billing or spending limit restriction. Once Actions can schedule jobs again, rerun #97 on `4d88460f9cabf7dd0e1eac70d3f1559ad54e801e` and record its result.
+- GitHub Actions blocked [UI08 integration push #97](https://github.com/ch0c01dxyz/UMNIA-APP/actions/runs/46113288506) at startup because of billing. The UI09 integration suite includes the UI08 regression cases.
 
 ## UI07 acceptance
 
@@ -30,6 +38,8 @@ Snapshot: 2026-11-28. The integration branch includes the per-draft payment and 
 
 The [UI07 screenshot manifest](../../design/screenshots/f2-ui-07/manifest.json) distinguishes live states from injected responses. Controlled browser responses and races test UI behavior, not database isolation; backend evidence comes from the Go integration suite. This checkpoint records no deployment, release, pilot or final F2 certification and does not establish production readiness.
 
-## Next decision
+## Next gate
 
-The [reporting proposal](../reviews/f2-post-payments-next-slice.md) is the historical UI08 contract. The next candidate is Finance Basic onboarding for an already-entitled workspace owner. The **Fitur** page currently activates only Rental Basic, although the backend and proxy already expose module state and activation. A focused proposal should cover explicit owner confirmation, the backend permission and entitlement checks, and a disposable browser test that starts from an inactive Finance module. Operator entitlement provisioning is a separate task.
+Repeat the release walkthrough on a native Linux installation with disposable data. The Windows walkthrough used a temporary Business API and PostgreSQL stack with a production Nuxt build. Full deployment topology, including Admin and RustFS, is outside that walkthrough.
+
+Keep the [F2 gate](../../FAST_TRACK.md#empat-fase-langsung-implementasi) open until the walkthrough and remaining MVP scope are verified. Confirm Inventory Basic scope beyond individually tracked rental units and define the applicable tax cases before claiming the gate is complete.

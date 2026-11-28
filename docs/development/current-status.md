@@ -10,6 +10,7 @@ Snapshot: 2026-11-28. The integration branch includes per-draft payments and rev
 - Before merge, the [UI09 push](https://github.com/ch0c01dxyz/UMNIA-APP/actions/runs/46123462360/attempts/2) and [PR run](https://github.com/ch0c01dxyz/UMNIA-APP/actions/runs/46123465171/attempts/2) each passed 252 Go tests including subtests, the Nuxt build, and 226/226 Playwright tests (197 owner-flow, 29 proxy/session). The merge tree matches the tested head.
 - [Integration push 46131279358](https://github.com/ch0c01dxyz/UMNIA-APP/actions/runs/46131279358) records the Go, Nuxt, and Playwright gates for the merge commit. The Go integration gate passed 252 tests including subtests, with zero failures or skips, and Nuxt built successfully.
 - A Windows Compose walkthrough using the merge tree passed in Chromium on a fresh workspace. It covered registration and invitation, activation of Rental and Finance Basic with synthetic operator grants, customer and rental setup, agreed price, handover, return, and payment approved by a separate manager. The IDR row showed one posted payment and the expected stored amounts: 100000 paid, 200000 outstanding, and 300000 agreed.
+- The same fresh-workspace walkthrough passed on Ubuntu 24.04.5 in WSL2 using the exact integration source. PostgreSQL 16 was installed via APT, the repository's Linux database script provisioned the database roles and migrations, and systemd ran PostgreSQL and the Business API. Nuxt and Chromium ran directly on Linux without Docker.
 
 ## UI08 acceptance
 
@@ -38,8 +39,11 @@ Snapshot: 2026-11-28. The integration branch includes per-draft payments and rev
 
 The [UI07 screenshot manifest](../../design/screenshots/f2-ui-07/manifest.json) distinguishes live states from injected responses. Controlled browser responses and races test UI behavior, not database isolation; backend evidence comes from the Go integration suite. This checkpoint records no deployment, release, pilot or final F2 certification and does not establish production readiness.
 
-## Next gate
+## Remaining F2 scope
 
-Repeat the release walkthrough on a native Linux installation with disposable data. The Windows walkthrough used a temporary Business API and PostgreSQL stack with a production Nuxt build. Full deployment topology, including Admin and RustFS, is outside that walkthrough.
+The Windows and Linux walkthroughs used temporary business services and synthetic data. Full release topology validation still needs an Admin and RustFS smoke test on a supported Linux installation.
 
-Keep the [F2 gate](../../FAST_TRACK.md#empat-fase-langsung-implementasi) open until the walkthrough and remaining MVP scope are verified. Confirm Inventory Basic scope beyond individually tracked rental units and define the applicable tax cases before claiming the gate is complete.
+- **Inventory Basic.** The catalog and availability routes cover individually tracked rental units. Counted stock movements and balances are pending. The runtime registry references `inventory.stock.read` as an optional dependency for Spa and has no provider for it. Define the counted goods, stock movements, and reconciliation cases for the MVP using the [core data contract](../02-core-data.md#stock-semantics).
+- **Tax.** The current rental price, payment, and summary paths use agreed amounts and payment records. Tax calculation and the transaction rule snapshot remain specification work. Establish the pilot business activity, jurisdiction, tax status, and effective date before selecting a tax treatment. The [tax specification](../07-pricing-tax-operations.md#adaptive-tax-engine) requires an official source and review before implementation.
+
+Keep the [F2 gate](../../FAST_TRACK.md#empat-fase-langsung-implementasi) open while these requirements are outstanding.

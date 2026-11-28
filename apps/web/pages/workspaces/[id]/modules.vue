@@ -113,6 +113,16 @@ async function readState(id: ActivationModule) {
   }
 }
 
+async function retryState(id: ActivationModule) {
+  const ctx = context()
+  if (!ctx) return
+  await readState(id)
+  await nextTick()
+  if (!ctx.current() || document.activeElement !== document.body) return
+  const target = cards[id].readError ? `retry-${id}` : `status-${id}`
+  document.getElementById(target)?.focus()
+}
+
 async function changeConfirmation(id: ActivationModule, open: boolean) {
   const ctx = context()
   if (!ctx || activating.value !== null || (open && cards[id].installation?.status !== 'inactive')) return
@@ -201,14 +211,18 @@ async function activate(id: ActivationModule) {
           <p v-if="card.loading" role="status">Memuat status fitur…</p>
           <div v-else-if="card.readError" class="alert" :role="card.activationError ? undefined : 'alert'">
             <p>{{ card.readError }}</p>
-            <button type="button" class="btn btn-secondary" :disabled="activating !== null" @click="readState(id)">Muat ulang status {{ manifest.display.name_id }}</button>
+            <button :id="`retry-${id}`" type="button" class="btn btn-secondary" :disabled="activating !== null" @click="retryState(id)">
+              Muat ulang status {{ manifest.display.name_id }}
+            </button>
           </div>
           <template v-else-if="card.installation">
             <p v-if="card.installation.status === 'active'" :id="card.activationError ? undefined : `status-${id}`" tabindex="-1" class="ok" role="status">
               {{ id === 'rental.basic' ? `Aktif (versi ${card.installation.version}).` : `Keuangan Sederhana aktif · versi ${card.installation.version}` }}
             </p>
             <template v-else>
-              <p role="status">{{ id === 'rental.basic' ? 'Belum aktif.' : 'Keuangan Sederhana belum diaktifkan.' }}</p>
+              <p :id="card.activationError ? undefined : `status-${id}`" tabindex="-1" role="status">
+                {{ id === 'rental.basic' ? 'Belum aktif.' : 'Keuangan Sederhana belum diaktifkan.' }}
+              </p>
               <template v-if="confirming !== id">
                 <button :id="`activate-${id}`" type="button" class="btn" :disabled="activating !== null" @click="changeConfirmation(id, true)">
                   Aktifkan {{ manifest.display.name_id }}

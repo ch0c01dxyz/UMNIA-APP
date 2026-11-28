@@ -7646,13 +7646,13 @@ test('UI09: Finance Basic requires confirmation and entitlement, then displays t
     }
   }
 
-  // The real POST succeeds. Lose only the first status response so that
-  // the UI has to recover using GET without sending a second activation.
+  // The real POST succeeds. Lose two status responses to verify that an
+  // unsuccessful retry keeps the next retry reachable by keyboard.
   const statePath = `/api/workspaces/${ws}/modules/finance.basic`
-  let loseNextRead = true
+  let readsToLose = 2
   await page.route(url => url.pathname === statePath, async route => {
-    if (route.request().method() === 'GET' && loseNextRead) {
-      loseNextRead = false
+    if (route.request().method() === 'GET' && readsToLose > 0) {
+      readsToLose--
       await route.fulfill({ status: 502, json: { error: 'Layanan tidak tersedia. Coba lagi sebentar lagi.' } })
     } else await route.continue()
   })
@@ -7661,8 +7661,13 @@ test('UI09: Finance Basic requires confirmation and entitlement, then displays t
   expect((await accepted).status()).toBe(200)
   await expect(finance.getByRole('alert')).toContainText('Hasil aktivasi belum dapat dipastikan')
   await expect(activate).toHaveCount(0)
-  await finance.getByRole('button', { name: 'Muat ulang status Keuangan Sederhana' }).click()
-  await expect(finance.getByText('Keuangan Sederhana aktif · versi 0.1.0')).toBeVisible()
+  const retry = finance.getByRole('button', { name: 'Muat ulang status Keuangan Sederhana' })
+  const failedRetry = page.waitForResponse(res => new URL(res.url()).pathname === statePath && res.status() === 502)
+  await retry.press('Enter')
+  await failedRetry
+  await expect(retry).toBeFocused()
+  await page.keyboard.press('Enter')
+  await expect(finance.getByText('Keuangan Sederhana aktif · versi 0.1.0')).toBeFocused()
   await expect(finance.getByRole('alert')).toHaveCount(0)
   expect(writes).toBe(2)
   await expect(rental.getByText('Belum aktif.')).toBeVisible()

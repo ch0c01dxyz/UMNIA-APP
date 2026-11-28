@@ -103,6 +103,9 @@ func TestInventoryBasicLedger(t *testing.T) {
 	receiptKey := newKey()
 	post(env.cashToken, receiptKey, receipt, 403)
 	post(env.otherToken, receiptKey, receipt, 403)
+	receipt["source_reference"] = "IN-\x00-1"
+	post(env.mgrToken, receiptKey, receipt, 400)
+	receipt["source_reference"] = "IN-1"
 	first := post(env.mgrToken, receiptKey, receipt, 201)
 	receipt["source_reference"] = "  IN-1  "
 	if replay := post(env.mgrToken, strings.ToUpper(receiptKey), receipt, 200); replay["id"] != first["id"] {
@@ -166,6 +169,10 @@ func TestInventoryBasicLedger(t *testing.T) {
 	reversal := map[string]string{"catalog_item_id": item, "kind": "reversal", "reverses_id": yes.result["id"].(string), "source_reference": "REV-1", "reason": "Wrong document"}
 	reversalKey := newKey()
 	post(env.mgrToken, reversalKey, reversal, 403)
+	reason := reversal["reason"]
+	reversal["reason"] = "Wrong\x00document"
+	post(env.ownerToken, reversalKey, reversal, 400)
+	reversal["reason"] = reason
 	reversed := post(env.ownerToken, reversalKey, reversal, 201)
 	if reversed["delta"] != "7" || reversed["reverses_id"] != yes.result["id"] {
 		t.Fatalf("reversal delta or link: %v", reversed)

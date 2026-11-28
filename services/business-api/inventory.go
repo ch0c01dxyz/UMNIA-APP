@@ -205,7 +205,8 @@ func (body *inventoryRequest) normalize() (int64, bool) {
 	body.ReversesID = strings.ToLower(body.ReversesID)
 	body.Reference = strings.TrimSpace(body.Reference)
 	body.Reason = strings.TrimSpace(body.Reason)
-	if !isValidUUID(body.ItemID) || body.Reference == "" || utf8.RuneCountInString(body.Reference) > 200 {
+	if !isValidUUID(body.ItemID) || body.Reference == "" ||
+		strings.ContainsRune(body.Reference, 0) || utf8.RuneCountInString(body.Reference) > 200 {
 		return 0, false
 	}
 	switch body.Kind {
@@ -222,7 +223,8 @@ func (body *inventoryRequest) normalize() (int64, bool) {
 		}
 		return delta, true
 	case "reversal":
-		return 0, body.Quantity == nil && isValidUUID(body.ReversesID) && body.Reason != "" && utf8.RuneCountInString(body.Reason) <= 500
+		return 0, body.Quantity == nil && isValidUUID(body.ReversesID) && body.Reason != "" &&
+			!strings.ContainsRune(body.Reason, 0) && utf8.RuneCountInString(body.Reason) <= 500
 	default:
 		return 0, false
 	}

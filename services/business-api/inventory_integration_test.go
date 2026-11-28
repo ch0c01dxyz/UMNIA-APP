@@ -12,6 +12,18 @@ import (
 
 func TestInventoryBasicLedger(t *testing.T) {
 	env := setupActivation(t, nil)
+	t.Cleanup(func() {
+		for _, query := range []string{
+			`DELETE FROM physical_assets WHERE workspace_id = $1`,
+			`DELETE FROM inventory_movements WHERE workspace_id = $1`,
+			`DELETE FROM inventory_items WHERE workspace_id = $1`,
+			`DELETE FROM catalog_items WHERE workspace_id = $1`,
+		} {
+			if _, err := env.boot.Exec(query, env.wsA); err != nil {
+				t.Errorf("clean inventory fixture: %v", err)
+			}
+		}
+	})
 	base := "/workspaces/" + env.wsA
 	postPath := base + "/inventory/movements"
 	opURL := os.Getenv("OPERATOR_TEST_DATABASE_URL")

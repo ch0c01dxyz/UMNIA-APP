@@ -47,7 +47,7 @@ Wants=network-online.target
 
 [Service]
 EnvironmentFile=/etc/default/rustfs
-ExecStart=/usr/local/bin/rustfs server /var/lib/rustfs --address 127.0.0.1:9000
+ExecStart=/usr/local/bin/rustfs server /var/lib/rustfs --address 127.0.0.1:9000 --console-address 127.0.0.1:9001
 Restart=on-failure
 NoNewPrivileges=true
 PrivateTmp=true
@@ -57,5 +57,7 @@ WantedBy=multi-user.target
 EOF
 
 systemctl daemon-reload
-systemctl enable --now rustfs
-echo "RustFS siap di http://127.0.0.1:9000 (hanya localhost)."
+systemctl enable rustfs
+# Reapply the generated listener configuration when updating a running service.
+systemctl restart rustfs
+echo "RustFS siap di http://127.0.0.1:9000 (S3) dan http://127.0.0.1:9001/rustfs/console/ (konsol)."

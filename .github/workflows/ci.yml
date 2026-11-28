@@ -66,7 +66,7 @@ jobs:
           sys.path.insert(0, 'scripts')
           from validate_blueprint import validate
           n = validate('schemas/module-manifest.schema.json', 'examples/*.module.json', 'id')
-          assert n == 4, f'want 4 module manifests, got {n}'
+          assert n == 5, f'want 5 module manifests, got {n}'
           print(f'VALIDATED: {n} module manifests')
           "
           /tmp/umnia-validate-venv/bin/python - <<'PY'
@@ -159,10 +159,11 @@ jobs:
             -f services/business-api/migrations/011_operator_entitlement.sql \
             -f services/business-api/migrations/012_rental_damaged_lost_return.sql \
             -f services/business-api/migrations/013_rental_payments.sql \
-            -f services/business-api/migrations/014_finance_operator_entitlement.sql
+            -f services/business-api/migrations/014_finance_operator_entitlement.sql \
+            -f services/business-api/migrations/015_inventory_basic.sql
           # Fixture DB bisnis (F1-OPERATOR-ENTITLEMENT-CI-FIX): skema
-          # penuh 001-014, seperti deployment (configure-postgres.sh
-          # selalu menerapkan 001-014 ke umnia_business). Preflight
+          # penuh 001-015, seperti deployment (configure-postgres.sh
+          # selalu menerapkan 001-015 ke umnia_business). Preflight
           # configure-postgres.sh memeriksa kepemilikan/hak terhadap DB
           # bisnis bila ada, dan subtes table-privilege/custom-parent
           # memberi hak pada tabel workspaces di sana — DB kosong
@@ -182,7 +183,8 @@ jobs:
             -f services/business-api/migrations/011_operator_entitlement.sql \
             -f services/business-api/migrations/012_rental_damaged_lost_return.sql \
             -f services/business-api/migrations/013_rental_payments.sql \
-            -f services/business-api/migrations/014_finance_operator_entitlement.sql
+            -f services/business-api/migrations/014_finance_operator_entitlement.sql \
+            -f services/business-api/migrations/015_inventory_basic.sql
           # Fixture negatif readiness: database yang berhenti di 002
           # (tanpa registry 003) harus dilaporkan belum siap.
           PGPASSWORD=ci-bootstrap-only psql -h localhost -U postgres -d umnia_partial \
@@ -259,10 +261,8 @@ jobs:
             -f services/business-api/migrations/007_asset_availability.sql \
             -f services/business-api/migrations/008_price_versions.sql \
             -f services/business-api/migrations/009_rental_agreed_prices.sql
-          # Fixture positif readiness (F2-02-A): keduabelas marker
-          # (001-010 + 012 + 013) + satu marker tambahan yang tidak dikenal
-          # harus tetap siap. 011 ikut karena 014 tidak bisa diterapkan
-          # tanpa tabel audit 011 (011/014 bukan marker readiness).
+          # Positive readiness fixture: all required runtime markers
+          # plus an unknown future marker. Operator migrations are applied in order.
           PGPASSWORD=ci-bootstrap-only psql -h localhost -U postgres -d umnia_extra \
             -v ON_ERROR_STOP=1 -1 \
             -f services/business-api/migrations/001_init.sql \
@@ -279,6 +279,7 @@ jobs:
             -f services/business-api/migrations/012_rental_damaged_lost_return.sql \
             -f services/business-api/migrations/013_rental_payments.sql \
             -f services/business-api/migrations/014_finance_operator_entitlement.sql \
+            -f services/business-api/migrations/015_inventory_basic.sql \
             -c "INSERT INTO schema_migrations (version) VALUES ('999_future') ON CONFLICT (version) DO NOTHING;"
       # Bukti klaster tunggal: jalur TCP (yang dipakai tes/snapshot) dan
       # jalur peer lokal (yang dipakai configure-postgres.sh via
@@ -383,7 +384,7 @@ jobs:
       # Password di bawah HANYA fixture CI yang dibuang tiap run, bukan
       # rahasia produksi. DB terisolasi umnia_e2e (bukan umnia_test) supaya
       # fixture E2E tidak bercampur dengan gate integrasi Go.
-      - name: Prepare E2E database (001-014)
+      - name: Prepare E2E database (001-015)
         run: |
           for i in $(seq 1 30); do
             pg_isready -h localhost -p 5432 -U postgres && break || sleep 2
@@ -411,7 +412,8 @@ jobs:
             -f services/business-api/migrations/011_operator_entitlement.sql \
             -f services/business-api/migrations/012_rental_damaged_lost_return.sql \
             -f services/business-api/migrations/013_rental_payments.sql \
-            -f services/business-api/migrations/014_finance_operator_entitlement.sql
+            -f services/business-api/migrations/014_finance_operator_entitlement.sql \
+            -f services/business-api/migrations/015_inventory_basic.sql
       - name: Build + start business-api
         run: |
           go build -o /tmp/umnia-business-api .

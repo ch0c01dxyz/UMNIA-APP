@@ -122,6 +122,8 @@ services:
       - /migrations/013_rental_payments.sql
       - -f
       - /migrations/014_finance_operator_entitlement.sql
+      - -f
+      - /migrations/015_inventory_basic.sql
     depends_on:
       postgres-business:
         condition: service_healthy

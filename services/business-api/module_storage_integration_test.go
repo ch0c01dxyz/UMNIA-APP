@@ -8,7 +8,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -77,8 +76,8 @@ func TestModuleStorageFreshSchema(t *testing.T) {
 	).Scan(&markers); err != nil {
 		t.Fatalf("baca markers: %v", err)
 	}
-	if markers != "001_init,002_identity,003_modules,004_module_installations,005_core_master_data,006_rental_contracts,007_asset_availability,008_price_versions,009_rental_agreed_prices,010_rental_custody,011_operator_entitlement,012_rental_damaged_lost_return,013_rental_payments,014_finance_operator_entitlement" {
-		t.Fatalf("markers: want 001_init,002_identity,003_modules,004_module_installations,005_core_master_data,006_rental_contracts,007_asset_availability,008_price_versions,009_rental_agreed_prices,010_rental_custody,011_operator_entitlement,012_rental_damaged_lost_return,013_rental_payments,014_finance_operator_entitlement, got %s", markers)
+	if markers != "001_init,002_identity,003_modules,004_module_installations,005_core_master_data,006_rental_contracts,007_asset_availability,008_price_versions,009_rental_agreed_prices,010_rental_custody,011_operator_entitlement,012_rental_damaged_lost_return,013_rental_payments,014_finance_operator_entitlement,015_inventory_basic" {
+		t.Fatalf("markers: want 001_init,002_identity,003_modules,004_module_installations,005_core_master_data,006_rental_contracts,007_asset_availability,008_price_versions,009_rental_agreed_prices,010_rental_custody,011_operator_entitlement,012_rental_damaged_lost_return,013_rental_payments,014_finance_operator_entitlement,015_inventory_basic, got %s", markers)
 	}
 	for _, table := range []string{"module_installations", "module_entitlements"} {
 		var n int
@@ -455,117 +454,33 @@ func TestModuleStorageRLSAndPermissions(t *testing.T) {
 	expectFail(wsA, ownerID, `DELETE FROM module_entitlements WHERE workspace_id = $1`, "42501", "permission denied for table", wsA)
 }
 
-// TestReadinessRequires012: checkDatabase menolak skema tanpa 012
-// ("error" -> /readyz 503) — termasuk skema 001-010 + 013 tanpa 012
-// — dan menerima skema lengkap 001-010 + 012 + 013 ("ok" -> 200);
-// marker ekstra yang tidak dikenal tetap "ok". Database scratch
-// dipakai supaya tes tidak bergantung pada fixture
-// umnia_test/umnia_extra yang berubah-ubah.
-func TestReadinessRequires012(t *testing.T) {
+func TestReadinessRequiredAndOperatorMarkers(t *testing.T) {
 	if _, err := exec.LookPath("psql"); err != nil {
-		t.Skip("psql tidak ada di PATH, tes runner psql dilewati")
+		t.Skip("psql required")
 	}
-	scratchURL, scratch := scratchDB(t, "umnia_g_readiness")
-	for _, f := range migrations001to010 {
-		if code, out := applyMigrationFile(t, scratchURL, filepath.Join("migrations", f)); code != 0 {
-			t.Fatalf("terapkan %s: want exit 0, got %d (%s)", f, code, out)
-		}
-	}
+	scratchURL, scratch := scratchDB(t, "umnia_stock_readiness")
+	files := append(append([]string{}, migrations001to010...), "011_operator_entitlement.sql",
+		"012_rental_damaged_lost_return.sql", "013_rental_payments.sql")
+	applyMigrationFiles(t, scratchURL, files)
 	if got := checkDatabase(scratch); got != "error" {
-		t.Fatalf("checkDatabase tanpa 012+013: want error, got %q", got)
+		t.Fatalf("readiness without 015: %q", got)
 	}
-	// 013 tidak bergantung pada 012 (FK ke kontrak/fakta harga saja),
-	// jadi bisa diterapkan tanpa 012: readiness tetap "error".
-	if code, out := applyMigrationFile(t, scratchURL, filepath.Join("migrations", "013_rental_payments.sql")); code != 0 {
-		t.Fatalf("terapkan 013: want exit 0, got %d (%s)", code, out)
-	}
-	if got := checkDatabase(scratch); got != "error" {
-		t.Fatalf("checkDatabase tanpa 012: want error, got %q", got)
-	}
-	if code, out := applyMigrationFile(t, scratchURL, filepath.Join("migrations", "012_rental_damaged_lost_return.sql")); code != 0 {
-		t.Fatalf("terapkan 012: want exit 0, got %d (%s)", code, out)
-	}
-	if got := checkDatabase(scratch); got != "ok" {
-		t.Fatalf("checkDatabase dengan 012+013: want ok, got %q", got)
-	}
+	applyMigrationFiles(t, scratchURL, []string{"015_inventory_basic.sql"})
 	if _, err := scratch.Exec(`INSERT INTO schema_migrations (version) VALUES ('999_future')`); err != nil {
-		t.Fatalf("sisip marker ekstra: %v", err)
+		t.Fatal(err)
 	}
 	if got := checkDatabase(scratch); got != "ok" {
-		t.Fatalf("checkDatabase 012+013 + ekstra: want ok, got %q", got)
+		t.Fatalf("all runtime markers, future marker, and no 014: %q", got)
 	}
-}
-
-// TestReadinessRequires013: checkDatabase menolak skema tanpa 013
-// ("error" -> /readyz 503) — termasuk skema lengkap 001-010 + 012 —
-// dan menerima skema lengkap 001-010 + 012 + 013 ("ok" -> 200);
-// marker ekstra yang tidak dikenal tetap "ok". Database scratch
-// dipakai supaya tes tidak bergantung pada fixture
-// umnia_test/umnia_extra yang berubah-ubah.
-func TestReadinessRequires013(t *testing.T) {
-	if _, err := exec.LookPath("psql"); err != nil {
-		t.Skip("psql tidak ada di PATH, tes runner psql dilewati")
-	}
-	scratchURL, scratch := scratchDB(t, "umnia_pay_readiness")
-	for _, f := range migrations001to010 {
-		if code, out := applyMigrationFile(t, scratchURL, filepath.Join("migrations", f)); code != 0 {
-			t.Fatalf("terapkan %s: want exit 0, got %d (%s)", f, code, out)
+	for _, marker := range []string{"012_rental_damaged_lost_return", "013_rental_payments", "015_inventory_basic"} {
+		if _, err := scratch.Exec(`DELETE FROM schema_migrations WHERE version = $1`, marker); err != nil {
+			t.Fatal(err)
 		}
-	}
-	if got := checkDatabase(scratch); got != "error" {
-		t.Fatalf("checkDatabase tanpa 012+013: want error, got %q", got)
-	}
-	if code, out := applyMigrationFile(t, scratchURL, filepath.Join("migrations", "012_rental_damaged_lost_return.sql")); code != 0 {
-		t.Fatalf("terapkan 012: want exit 0, got %d (%s)", code, out)
-	}
-	if got := checkDatabase(scratch); got != "error" {
-		t.Fatalf("checkDatabase tanpa 013: want error, got %q", got)
-	}
-	if code, out := applyMigrationFile(t, scratchURL, filepath.Join("migrations", "013_rental_payments.sql")); code != 0 {
-		t.Fatalf("terapkan 013: want exit 0, got %d (%s)", code, out)
-	}
-	if got := checkDatabase(scratch); got != "ok" {
-		t.Fatalf("checkDatabase dengan 013: want ok, got %q", got)
-	}
-	if _, err := scratch.Exec(`INSERT INTO schema_migrations (version) VALUES ('999_future')`); err != nil {
-		t.Fatalf("sisip marker ekstra: %v", err)
-	}
-	if got := checkDatabase(scratch); got != "ok" {
-		t.Fatalf("checkDatabase 013 + ekstra: want ok, got %q", got)
-	}
-}
-
-// TestReadinessRequires014: 014 BUKAN marker readiness —
-// checkDatabase tetap "ok" pada skema lengkap 001-013 sesudah 014
-// diterapkan, dan tetap "error" pada skema 001-010 + 011 + 014
-// tanpa 012/013. Database scratch dipakai supaya tes tidak
-// bergantung pada fixture umnia_test/umnia_extra yang berubah-ubah.
-func TestReadinessRequires014(t *testing.T) {
-	if _, err := exec.LookPath("psql"); err != nil {
-		t.Skip("psql tidak ada di PATH, tes runner psql dilewati")
-	}
-	scratchURL, scratch := scratchDB(t, "umnia_fin_readiness")
-	for _, f := range migrations001to010 {
-		if code, out := applyMigrationFile(t, scratchURL, filepath.Join("migrations", f)); code != 0 {
-			t.Fatalf("terapkan %s: want exit 0, got %d (%s)", f, code, out)
+		if got := checkDatabase(scratch); got != "error" {
+			t.Fatalf("readiness without %s: %q", marker, got)
 		}
-	}
-	if code, out := applyMigrationFile(t, scratchURL, filepath.Join("migrations", "011_operator_entitlement.sql")); code != 0 {
-		t.Fatalf("terapkan 011: want exit 0, got %d (%s)", code, out)
-	}
-	if code, out := applyMigrationFile(t, scratchURL, filepath.Join("migrations", "014_finance_operator_entitlement.sql")); code != 0 {
-		t.Fatalf("terapkan 014: want exit 0, got %d (%s)", code, out)
-	}
-	if got := checkDatabase(scratch); got != "error" {
-		t.Fatalf("checkDatabase 001-011+014 tanpa 012/013: want error, got %q", got)
-	}
-	if code, out := applyMigrationFile(t, scratchURL, filepath.Join("migrations", "012_rental_damaged_lost_return.sql")); code != 0 {
-		t.Fatalf("terapkan 012: want exit 0, got %d (%s)", code, out)
-	}
-	if code, out := applyMigrationFile(t, scratchURL, filepath.Join("migrations", "013_rental_payments.sql")); code != 0 {
-		t.Fatalf("terapkan 013: want exit 0, got %d (%s)", code, out)
-	}
-	if got := checkDatabase(scratch); got != "ok" {
-		t.Fatalf("checkDatabase dengan 012+013+014: want ok, got %q", got)
+		if _, err := scratch.Exec(`INSERT INTO schema_migrations (version) VALUES ($1)`, marker); err != nil {
+			t.Fatal(err)
+		}
 	}
 }

@@ -64,12 +64,12 @@ func TestListModulesCatalog(t *testing.T) {
 		t.Fatalf("GET modules: want 200, got %d (%v)", code, body)
 	}
 	modules, _ := body["modules"].([]any)
-	if len(modules) != 4 {
-		t.Fatalf("modules: want 4, got %d (%v)", len(modules), body)
+	if len(modules) != 5 {
+		t.Fatalf("modules: want 5, got %d (%v)", len(modules), body)
 	}
 	// Urutan deterministik menurut identity/version; tiap manifest sama
 	// persis (semantik) dengan contoh kanonis; tidak ada field status.
-	wantIDs := []string{"finance.advanced", "finance.basic", "rental.basic", "spa.standard"}
+	wantIDs := []string{"finance.advanced", "finance.basic", "inventory.basic", "rental.basic", "spa.standard"}
 	forbidden := []string{"status", "active", "installed", "healthy", "entitled", "available"}
 	for i, raw := range modules {
 		m, _ := raw.(map[string]any)
@@ -141,8 +141,8 @@ func TestListModulesPermissions(t *testing.T) {
 		if code != http.StatusOK {
 			t.Fatalf("%s GET modules: want 200, got %d (%v)", name, code, body)
 		}
-		if mods, _ := body["modules"].([]any); len(mods) != 4 {
-			t.Fatalf("%s GET modules: want 4, got %d", name, len(mods))
+		if mods, _ := body["modules"].([]any); len(mods) != 5 {
+			t.Fatalf("%s GET modules: want 5, got %d", name, len(mods))
 		}
 	}
 	// Tanpa token: 401. Bukan anggota: 403. Anggota workspace lain
@@ -314,8 +314,8 @@ func TestModuleRegistryCheckRejectsNullIdentity(t *testing.T) {
 		return out
 	}
 	before := snapshot()
-	if len(before) != 4 {
-		t.Fatalf("snapshot: want 4 baris, got %d", len(before))
+	if len(before) != 5 {
+		t.Fatalf("snapshot: want 5 baris, got %d", len(before))
 	}
 
 	// 1. Pasang kembali CHECK lama (simulasi DB yang sudah menerapkan
@@ -440,8 +440,8 @@ func TestModuleRegistryCheckReplacementIsAtomic(t *testing.T) {
 	})
 
 	before := canonical()
-	if rowCount() != 4 {
-		t.Fatalf("awal: want 4 baris, got %d", rowCount())
+	if rowCount() != 5 {
+		t.Fatalf("awal: want 5 baris, got %d", rowCount())
 	}
 
 	// 1. Pasang CHECK lama + satu baris legacy invalid yang COMMITTED.
@@ -455,8 +455,8 @@ func TestModuleRegistryCheckReplacementIsAtomic(t *testing.T) {
 		t.Fatalf("insert baris legacy invalid: %v", err)
 	}
 	nOld, defOld := checkState()
-	if nOld != 1 || rowCount() != 5 {
-		t.Fatalf("fixture: want 1 CHECK + 5 baris, got %d CHECK + %d baris", nOld, rowCount())
+	if nOld != 1 || rowCount() != 6 {
+		t.Fatalf("fixture: want 1 CHECK + 6 baris, got %d CHECK + %d baris", nOld, rowCount())
 	}
 
 	// 2. Baseline: file DUA pernyataan (f72eac0) lewat psql TANPA -1 —
@@ -481,8 +481,8 @@ func TestModuleRegistryCheckReplacementIsAtomic(t *testing.T) {
 	if n != 0 {
 		t.Fatalf("baseline: CHECK seharusnya hilang (0), got %d", n)
 	}
-	if rowCount() != 5 {
-		t.Fatalf("baseline: baris seharusnya tetap 5, got %d", rowCount())
+	if rowCount() != 6 {
+		t.Fatalf("baseline: baris seharusnya tetap 6, got %d", rowCount())
 	}
 
 	// 3. Pulihkan CHECK lama (ADD lama lolos karena baris invalid
@@ -509,15 +509,15 @@ func TestModuleRegistryCheckReplacementIsAtomic(t *testing.T) {
 	if def != defOld {
 		t.Fatalf("003 baru: definisi CHECK seharusnya tetap yang lama, got %s", def)
 	}
-	if rowCount() != 5 {
-		t.Fatalf("003 baru: baris seharusnya tetap 5, got %d", rowCount())
+	if rowCount() != 6 {
+		t.Fatalf("003 baru: baris seharusnya tetap 6, got %d", rowCount())
 	}
 	if canonical() != before {
 		t.Fatalf("003 baru: baris kanonis berubah")
 	}
 
 	// 5. Rerun valid lewat psql TANPA -1 sesudah baris fixture dihapus:
-	// exit 0, CHECK baru terpasang, 4 baris kanonis + timestamp utuh.
+	// exit 0, CHECK baru terpasang, 5 baris kanonis + timestamp utuh.
 	if _, err := boot.Exec(`DELETE FROM module_registry WHERE module_id = 'qa.null-legacy'`); err != nil {
 		t.Fatalf("hapus baris fixture: %v", err)
 	}
@@ -532,8 +532,8 @@ func TestModuleRegistryCheckReplacementIsAtomic(t *testing.T) {
 	if !strings.Contains(def, "IS NOT NULL") {
 		t.Fatalf("rerun valid: CHECK seharusnya yang baru (null-safe), got %s", def)
 	}
-	if rowCount() != 4 || canonical() != before {
-		t.Fatalf("rerun valid: 4 baris kanonis + timestamp harus utuh")
+	if rowCount() != 5 || canonical() != before {
+		t.Fatalf("rerun valid: 5 baris kanonis + timestamp harus utuh")
 	}
 }
 
@@ -554,8 +554,8 @@ func TestModuleRegistryGrants(t *testing.T) {
 	if err := db.QueryRow(`SELECT count(*) FROM module_registry`).Scan(&count); err != nil {
 		t.Fatalf("SELECT registry sebagai runtime: %v", err)
 	}
-	if count != 4 {
-		t.Fatalf("registry: want 4 baris, got %d", count)
+	if count != 5 {
+		t.Fatalf("registry: want 5 baris, got %d", count)
 	}
 	// Seed di database sama dengan contoh kanonis (semantik JSONB).
 	rows, err := db.Query(`SELECT module_id, manifest FROM module_registry ORDER BY module_id`)
@@ -582,8 +582,8 @@ func TestModuleRegistryGrants(t *testing.T) {
 	if err := rows.Err(); err != nil {
 		t.Fatalf("rows registry: %v", err)
 	}
-	if seen != 4 {
-		t.Fatalf("registry: want 4 manifest, got %d", seen)
+	if seen != 5 {
+		t.Fatalf("registry: want 5 manifest, got %d", seen)
 	}
 	for name, q := range map[string]string{
 		"INSERT": `INSERT INTO module_registry (module_id, version, manifest) VALUES ('x.y', '0.1.0', '{}'::jsonb)`,

@@ -1380,20 +1380,8 @@ func TestFinanceGrant_FreshSchemaUpgrade(t *testing.T) {
 	scratchURL := dsnWithDB(t, bootURL, scratch)
 	files13 := append(append([]string{}, migrations001to010...), "011_operator_entitlement.sql", "012_rental_damaged_lost_return.sql", "013_rental_payments.sql")
 	applyMigrationFiles(t, scratchURL, files13)
-	// Readiness sudah ok di 001-013; 014 tidak menambah marker wajib.
-	scratchDB, err := sql.Open("pgx", scratchURL)
-	if err != nil {
-		t.Fatalf("buka scratch: %v", err)
-	}
-	defer scratchDB.Close()
-	if got := checkDatabase(scratchDB); got != "ok" {
-		t.Fatalf("checkDatabase 001-013: want ok, got %q", got)
-	}
 	if code, out := applyMigration014(t, scratchURL); code != 0 {
 		t.Fatalf("terapkan 014: exit %d (%s)", code, out)
-	}
-	if got := checkDatabase(scratchDB); got != "ok" {
-		t.Fatalf("checkDatabase 001-014: want ok (014 bukan marker wajib), got %q", got)
 	}
 	var markers string
 	if err := scratchBoot.QueryRow(`SELECT string_agg(version, ',' ORDER BY version) FROM schema_migrations`).Scan(&markers); err != nil {

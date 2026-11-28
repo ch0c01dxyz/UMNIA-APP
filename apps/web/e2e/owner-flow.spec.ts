@@ -7689,3 +7689,95 @@ registerPaymentSummaryCases({
     expect(output.startsWith('revoked '), 'Expected a newly revoked Finance fixture grant').toBe(true)
   },
 })
+
+test('Inventory Basic pilot records, retries, and reverses whole stock', async ({ page }) => {
+  const email = `inventory-${RUN}@e2e.umnia.local`
+  await uiRegister(page, email)
+  await uiLogin(page, email)
+  const ws = await uiCreateWorkspace(page, 'Toko Uji Stok', email)
+  const token = await apiToken(page.request, email)
+  await seedItems(page.request, ws, token, 2, 'PILOT')
+  await page.getByRole('link', { name: 'Fitur', exact: true }).click()
+
+  const module = page.getByRole('region', { name: 'Stok Sederhana' })
+  await module.getByRole('button', { name: 'Aktifkan Stok Sederhana' }).click()
+  await module.getByRole('button', { name: 'Ya, aktifkan' }).click()
+  await expect(module.getByRole('alert')).toContainText('hubungi pengelola layanan')
+  await module.getByRole('button', { name: 'Batal' }).click()
+  const grant = execFileSync(GRANT_CLI, [
+    '--workspace', ws, '--module', 'inventory.basic', '--version', '0.1.0', '--reason', 'inventory pilot E2E'
+  ], { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, UMNIA_OPERATOR_DATABASE_URL: OPERATOR_URL } })
+  expect(grant).toMatch(/^granted .*audit_present=true/m)
+  await module.getByRole('button', { name: 'Aktifkan Stok Sederhana' }).click()
+  await module.getByRole('button', { name: 'Ya, aktifkan' }).click()
+  await expect(module.getByText('Stok Sederhana aktif · versi 0.1.0')).toBeVisible()
+  await page.getByRole('link', { name: 'Stok', exact: true }).click()
+
+  const stock = page.getByRole('region', { name: 'Saldo stok' })
+  const history = page.getByRole('region', { name: 'Riwayat mutasi' })
+  const counts = stock.getByRole('listitem').filter({ hasText: 'PILOT-1' })
+  const routePath = `**/api/workspaces/${ws}/inventory/movements`
+  const keys: string[] = []
+  await page.route(routePath, async route => {
+    if (route.request().method() !== 'POST') return route.continue()
+    keys.push(route.request().headers()['idempotency-key'])
+    if (keys.length !== 1) return route.continue()
+    const committed = await route.fetch()
+    expect(committed.status()).toBe(201)
+    await route.fulfill({ status: 502, json: { error: 'Simulated response loss' } })
+  })
+
+  async function review(kind: 'receipt' | 'issue', item: number, quantity: string, reference: string) {
+    await page.getByLabel('Barang', { exact: true }).selectOption({ label: `Barang PILOT ${item} (PILOT-${item}) · pcs` })
+    await page.getByLabel('Jenis mutasi').selectOption(kind)
+    await page.getByLabel('Jumlah bulat').fill(quantity)
+    await page.getByLabel('Referensi sumber').fill(reference)
+    await page.getByRole('button', { name: 'Periksa mutasi' }).click()
+    await expect(page.getByRole('heading', { name: 'Periksa mutasi' })).toBeFocused()
+  }
+
+  await review('receipt', 1, '10', 'IN-10')
+  await page.getByRole('button', { name: 'Simpan mutasi' }).click()
+  await expect(page.getByRole('alert')).toContainText('Hasil belum dapat dipastikan')
+  await page.getByRole('button', { name: 'Kirim ulang mutasi yang sama' }).click()
+  await expect(counts).toContainText('10 pcs')
+  expect(keys).toHaveLength(2)
+  expect(keys[0]).toBeTruthy()
+  expect(keys[0]).toBe(keys[1])
+  await expect(history.getByText('Barang masuk · 10 pcs', { exact: true })).toHaveCount(1)
+
+  await review('issue', 1, '11', 'REJECT-11')
+  await page.getByRole('button', { name: 'Simpan mutasi' }).click()
+  await expect(page.getByRole('alert')).toContainText('melebihi batas saldo')
+  await expect(counts).toContainText('10 pcs')
+  await review('issue', 1, '3', 'OUT-3')
+  await page.getByRole('button', { name: 'Simpan mutasi' }).click()
+  await expect(counts).toContainText('7 pcs')
+
+  const issued = history.getByRole('listitem').filter({ hasText: 'OUT-3' })
+  await issued.getByRole('button', { name: 'Balik mutasi' }).click()
+  await expect(page.getByLabel('Referensi sumber')).toBeFocused()
+  await page.getByLabel('Referensi sumber').fill('REV-3')
+  await page.getByLabel('Alasan pembalikan').fill('Salah nomor dokumen')
+  await page.getByRole('button', { name: 'Periksa mutasi' }).click()
+  await expect(page.getByRole('heading', { name: 'Periksa mutasi' })).toBeFocused()
+  await page.getByRole('button', { name: 'Simpan mutasi' }).click()
+  await expect(counts).toContainText('10 pcs')
+  await expect(issued.getByText('Sudah dibalik')).toBeVisible()
+  await expect(history.getByText('Pembalikan · 3 pcs')).toBeVisible()
+
+  await review('receipt', 2, '9223372036854775807', 'IN-MAX')
+  await page.getByRole('button', { name: 'Simpan mutasi' }).click()
+  await expect(stock.getByRole('listitem').filter({ hasText: 'PILOT-2' })).toContainText('9223372036854775807 pcs')
+  await expect(history.getByRole('listitem')).toHaveCount(4)
+
+  const screenshots = process.env.E2E_INVENTORY_SCREENSHOTS
+  if (screenshots) {
+    mkdirSync(screenshots, { recursive: true })
+    for (const width of [360, 768, 1440]) {
+      await page.setViewportSize({ width, height: 900 })
+      expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width)
+      await page.screenshot({ path: path.join(screenshots, `inventory-${width}.png`), fullPage: true })
+    }
+  }
+})

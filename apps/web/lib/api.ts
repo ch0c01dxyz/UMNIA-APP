@@ -31,7 +31,7 @@ export function resolveLoginTarget(raw: string | null | undefined): string {
     query = raw.slice(q + 1)
   }
   if (path === '/workspaces/new') return path
-  const m = path.match(/^\/workspaces\/([0-9a-f-]{36})\/(members|modules|customers|catalog|assets|prices|rentals)$/)
+  const m = path.match(/^\/workspaces\/([0-9a-f-]{36})\/(members|modules|customers|catalog|assets|prices|rentals|inventory)$/)
   if (m && UUID_RE.test(m[1])) return path
   // Harga draf (F2-UI-05): rute sibling dengan workspace DAN draft yang
   // keduanya divalidasi UUID; bukan pelonggaran pola umum.

@@ -93,6 +93,10 @@ func (s *server) handleCreateAsset(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "tidak punya izin membaca data core")
 		return
 	}
+	if err := lockWorkspace(tx, wsID); err != nil {
+		writeError(w, http.StatusInternalServerError, "transaksi gagal")
+		return
+	}
 	// Barang dibaca TANPA filter status di WHERE supaya arsip bisa
 	// dibedakan dari hilang: hilang/lintas-tenant → 404, milik
 	// sendiri tapi archived → 409 (aturan yang sama dengan draft).
@@ -119,9 +123,10 @@ func (s *server) handleCreateAsset(w http.ResponseWriter, r *http.Request) {
 		 VALUES ($1, $2, $3, $4) RETURNING created_at, updated_at`,
 		id, wsID, catalogItemID, serial).Scan(&created, &updated)
 	if err != nil {
-		// 409 HANYA untuk duplikat serial asli (SQLSTATE 23505 pada
-		// constraint serial); galat lain → 500 tanpa bocor detail SQL
-		// dan tanpa menebak jenis galat dari teks pesan.
+		if inventoryTrackingConflict(err) {
+			writeError(w, http.StatusConflict, "barang sudah terdaftar sebagai stok")
+			return
+		}
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" &&
 			pgErr.ConstraintName == "physical_assets_workspace_id_serial_key" {

@@ -3,7 +3,8 @@
 // SECURITY DEFINER lewat DSN operator, bukan lewat DML mentah.
 // --operation grant (default) memanggil app.grant_module_entitlement
 // untuk rental.basic/0.1.0 atau app.grant_finance_entitlement untuk
-// finance.basic/0.1.0; --operation revoke hanya untuk finance.basic
+// finance.basic/0.1.0, atau app.grant_inventory_entitlement untuk inventory.basic/0.1.0.
+// --operation revoke hanya untuk finance.basic
 // dan memanggil app.revoke_finance_entitlement (tiga argumen).
 // CLI tidak membaca .env aplikasi, tidak menerima --operator/--source,
 // tidak pernah mencetak DSN, alasan (reason), atau galat mentah
@@ -49,12 +50,14 @@ const (
 )
 
 const (
-	grantRoutineSignature        = `app.grant_module_entitlement(uuid, text, text, text)`
-	grantFinanceRoutineSignature = `app.grant_finance_entitlement(uuid, text, text, text)`
-	revokeRoutineSignature       = `app.revoke_finance_entitlement(uuid, text, text)`
-	grantQuery                   = `SELECT * FROM app.grant_module_entitlement($1, $2, $3, $4)`
-	grantFinanceQuery            = `SELECT * FROM app.grant_finance_entitlement($1, $2, $3, $4)`
-	revokeQuery                  = `SELECT * FROM app.revoke_finance_entitlement($1, $2, $3)`
+	grantRoutineSignature          = `app.grant_module_entitlement(uuid, text, text, text)`
+	grantFinanceRoutineSignature   = `app.grant_finance_entitlement(uuid, text, text, text)`
+	grantInventoryRoutineSignature = `app.grant_inventory_entitlement(uuid, text, text, text)`
+	revokeRoutineSignature         = `app.revoke_finance_entitlement(uuid, text, text)`
+	grantQuery                     = `SELECT * FROM app.grant_module_entitlement($1, $2, $3, $4)`
+	grantFinanceQuery              = `SELECT * FROM app.grant_finance_entitlement($1, $2, $3, $4)`
+	grantInventoryQuery            = `SELECT * FROM app.grant_inventory_entitlement($1, $2, $3, $4)`
+	revokeQuery                    = `SELECT * FROM app.revoke_finance_entitlement($1, $2, $3)`
 )
 
 const (
@@ -116,8 +119,8 @@ func run(args []string, getenv func(string) string, openDB func(context.Context,
 	fs.SetOutput(stderr)
 	operation := fs.String("operation", "grant", "grant atau revoke (default grant; revoke hanya finance.basic)")
 	workspace := fs.String("workspace", "", "workspace UUID target")
-	module := fs.String("module", "", "module id (rental.basic atau finance.basic)")
-	version := fs.String("version", "", "versi katalog (0.1.0; wajib 0.1.0 untuk finance)")
+	module := fs.String("module", "", "module id (rental.basic, finance.basic, atau inventory.basic)")
+	version := fs.String("version", "", "versi katalog (0.1.0; wajib 0.1.0 untuk finance dan inventory)")
 	reason := fs.String("reason", "", "alasan wajib (1-500 karakter)")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -147,22 +150,15 @@ func run(args []string, getenv func(string) string, openDB func(context.Context,
 		return exitInput
 	}
 	// Kombinasi yang tidak didukung ditolak SEBELUM akses DB.
-	// Revoke hanya untuk finance.basic; versi Finance harus 0.1.0
-	// untuk grant maupun revoke. Grant rental dengan versi lain
-	// tetap diserahkan ke rutin 011 (otoritas versi rental).
 	if op == "revoke" && mod != "finance.basic" {
 		fmt.Fprintln(stderr, "grant-entitlement: invalid input")
 		return exitInput
 	}
-	if mod == "finance.basic" && ver != "0.1.0" {
+	if (mod == "finance.basic" || mod == "inventory.basic") && ver != "0.1.0" {
 		fmt.Fprintln(stderr, "grant-entitlement: invalid input")
 		return exitInput
 	}
-	// Grant hanya mengenal rental.basic/finance.basic (R1: modul
-	// tak dikenal — mis. finance.advanced — lolos ke openDB dan
-	// keluar 1 unavailable sebelum perbaikan). Ditolak di sini,
-	// sebelum DSN dibaca/diakses.
-	if op == "grant" && mod != "rental.basic" && mod != "finance.basic" {
+	if op == "grant" && mod != "rental.basic" && mod != "finance.basic" && mod != "inventory.basic" {
 		fmt.Fprintln(stderr, "grant-entitlement: invalid input")
 		return exitInput
 	}
@@ -188,10 +184,6 @@ func run(args []string, getenv func(string) string, openDB func(context.Context,
 		return exitUnavailable
 	}
 
-	// Dispatch tetap: grant+rental -> 011; grant+finance -> rutin
-	// grant Finance; revoke+finance -> rutin revoke Finance (tiga
-	// argumen). Modul lain tidak pernah sampai sini (ditolak di
-	// validasi di atas, sebelum akses DB).
 	routineSig, callQuery := grantRoutineSignature, grantQuery
 	isRevoke := op == "revoke"
 	switch {
@@ -199,6 +191,8 @@ func run(args []string, getenv func(string) string, openDB func(context.Context,
 		routineSig, callQuery = revokeRoutineSignature, revokeQuery
 	case mod == "finance.basic":
 		routineSig, callQuery = grantFinanceRoutineSignature, grantFinanceQuery
+	case mod == "inventory.basic":
+		routineSig, callQuery = grantInventoryRoutineSignature, grantInventoryQuery
 	}
 	metadataQuery := `SELECT has_function_privilege('` + routineSig + `'::regprocedure, 'EXECUTE')`
 

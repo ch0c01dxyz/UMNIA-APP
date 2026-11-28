@@ -1,0 +1,43 @@
+{
+  "schema_version": "0.4",
+  "id": "inventory.basic",
+  "version": "0.1.0",
+  "family": "inventory",
+  "edition": "basic",
+  "exclusive_group": "inventory-edition",
+  "display": {
+    "name_id": "Stok Sederhana",
+    "description_id": "Catat barang masuk, barang keluar, dan saldo stok"
+  },
+  "provides": [
+    "inventory.stock.read"
+  ],
+  "requires": [
+    {
+      "capability": "catalog.item.read"
+    }
+  ],
+  "conflicts": [],
+  "data_ownership": {
+    "schemas": [
+      "inventory"
+    ],
+    "downgrade_strategy": "retain_read_only"
+  },
+  "simulation_dataset": {
+    "required": true,
+    "schema_id": "inventory-basic-simulation-v1",
+    "validation_profile": "inventory-basic-rules",
+    "refresh_policy": "on_module_change_and_scheduled"
+  },
+  "security": {
+    "risk_class": "medium",
+    "needs_approval_for_mutations": false
+  },
+  "ui": {
+    "primary_nav": "Stok"
+  },
+  "events": [
+    "inventory.movement.posted"
+  ]
+}

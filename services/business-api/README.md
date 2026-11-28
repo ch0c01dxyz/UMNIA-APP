@@ -1206,3 +1206,26 @@ menyediakan handler state instalasi metadata-only, F2-01-A menyediakan
 master data core customers + catalog items). Linter khusus web
 (ESLint) belum dipasang; lint = gofmt + go vet (API) + build Nuxt
 (web).
+
+## Inventory Basic pilot
+
+Migration `015_inventory_basic` adds counted stock and append-only movements. Provision
+the operator with the existing deployment script before granting access.
+
+```sh
+grant-entitlement --workspace "$WORKSPACE_ID" --module inventory.basic --version 0.1.0 --reason "approved inventory pilot"
+```
+
+The owner activates **Stok Sederhana** in **Fitur** and opens **Stok**. The first
+receipt enrolls a catalog item and snapshots its unit. A SKU with a serialized
+asset cannot enroll. Receipts and issues require `manage_business_data`, and
+reversals require the workspace owner. All writes require effective module access.
+Movement quantities in JSON are canonical whole-number strings. Send the same
+UUID `Idempotency-Key` and the same payload to recover an uncertain POST.
+
+`GET /workspaces/{id}/inventory/stock` reads live quantities.
+`GET /workspaces/{id}/inventory/movements` keeps authorized history readable after
+deactivation or loss of entitlement. Both lists support `limit` and `offset`.
+`POST /workspaces/{id}/inventory/movements` accepts `catalog_item_id`, `kind`
+and `source_reference`. Send `quantity` for `receipt` or `issue`, or send
+`reverses_id` and `reason` for a full `reversal`.

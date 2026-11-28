@@ -533,6 +533,14 @@ func (s *server) handleActivateModule(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "modul "+moduleID+" bentrok dengan "+other+" yang sedang aktif")
 		return
 	}
+	if moduleID == inventoryModuleID && version == inventoryModuleVersion {
+		var stock inventoryStock
+		err := tx.QueryRow(inventoryBalanceSQL, wsID, 1, 0).Scan(&stock.ItemID, &stock.SKU, &stock.Name, &stock.Unit, &stock.Quantity)
+		if err != nil && err != sql.ErrNoRows {
+			writeError(w, http.StatusInternalServerError, "pembacaan stok belum siap")
+			return
+		}
+	}
 	now := time.Now().UTC()
 	var oldStatus *string
 	if inst == nil {

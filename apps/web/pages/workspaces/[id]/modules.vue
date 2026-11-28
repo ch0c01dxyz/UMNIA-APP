@@ -7,7 +7,7 @@ interface Manifest { id: string, version: string, display: { name_id: string, de
 interface ModuleState { module_id: string, version: string | null, status: 'active' | 'inactive' }
 interface CardState { installation: ModuleState | null, loading: boolean, readError: string | null, activationError: string | null }
 
-const activationModules = ['rental.basic', 'finance.basic'] as const
+const activationModules = ['rental.basic', 'finance.basic', 'inventory.basic'] as const
 type ActivationModule = typeof activationModules[number]
 const emptyCard = (): CardState => ({ installation: null, loading: false, readError: null, activationError: null })
 
@@ -20,7 +20,7 @@ const loading = ref(false)
 const pageError = ref<string | null>(null)
 const noPermission = ref(false)
 const catalog = ref<Manifest[]>([])
-const cards = reactive<Record<ActivationModule, CardState>>({ 'rental.basic': emptyCard(), 'finance.basic': emptyCard() })
+const cards = reactive<Record<ActivationModule, CardState>>({ 'rental.basic': emptyCard(), 'finance.basic': emptyCard(), 'inventory.basic': emptyCard() })
 const availableCards = computed(() => activationModules.flatMap(id => {
   const manifest = catalog.value.find(item => item.id === id)
   return manifest ? [{ id, manifest, card: cards[id] }] : []
@@ -199,6 +199,7 @@ async function activate(id: ActivationModule) {
           <NuxtLink :to="`/workspaces/${wsId}/modules`">Fitur</NuxtLink>
           <NuxtLink :to="`/workspaces/${wsId}/customers`">Pelanggan</NuxtLink>
           <NuxtLink :to="`/workspaces/${wsId}/catalog`">Barang</NuxtLink>
+          <NuxtLink :to="`/workspaces/${wsId}/inventory`">Stok</NuxtLink>
           <NuxtLink :to="`/workspaces/${wsId}/assets`">Unit</NuxtLink>
           <NuxtLink :to="`/workspaces/${wsId}/prices`">Tarif</NuxtLink>
           <NuxtLink :to="`/workspaces/${wsId}/rentals`">Draf sewa</NuxtLink>
@@ -217,11 +218,11 @@ async function activate(id: ActivationModule) {
           </div>
           <template v-else-if="card.installation">
             <p v-if="card.installation.status === 'active'" :id="card.activationError ? undefined : `status-${id}`" tabindex="-1" class="ok" role="status">
-              {{ id === 'rental.basic' ? `Aktif (versi ${card.installation.version}).` : `Keuangan Sederhana aktif · versi ${card.installation.version}` }}
+              {{ id === 'rental.basic' ? `Aktif (versi ${card.installation.version}).` : `${manifest.display.name_id} aktif · versi ${card.installation.version}` }}
             </p>
             <template v-else>
               <p :id="card.activationError ? undefined : `status-${id}`" tabindex="-1" role="status">
-                {{ id === 'rental.basic' ? 'Belum aktif.' : 'Keuangan Sederhana belum diaktifkan.' }}
+                {{ id === 'rental.basic' ? 'Belum aktif.' : `${manifest.display.name_id} belum diaktifkan.` }}
               </p>
               <template v-if="confirming !== id">
                 <button :id="`activate-${id}`" type="button" class="btn" :disabled="activating !== null" @click="changeConfirmation(id, true)">

@@ -407,6 +407,16 @@ ensure_operator_roles() {
 
 ensure_operator_roles
 
+# Database boundaries must hold at connection time. Preserve explicit grants
+# for existing deployment roles and let authorized operators reach business only.
+sudo -u postgres psql -v ON_ERROR_STOP=1 <<'SQL'
+BEGIN;
+REVOKE CONNECT ON DATABASE umnia_business, umnia_admin FROM PUBLIC;
+GRANT CONNECT ON DATABASE umnia_business TO umnia_business, umnia_operator;
+GRANT CONNECT ON DATABASE umnia_admin TO umnia_admin;
+COMMIT;
+SQL
+
 # Migrasi business DB, berurutan berdasarkan nama file (001, 002, ...).
 # Jalankan dari root repo. Setiap file diterapkan dalam SATU transaksi
 # (psql -1): kegagalan di akhir file membatalkan seluruh file (loop

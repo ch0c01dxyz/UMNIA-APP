@@ -4,6 +4,10 @@ Start with the [verified checkpoint](../development/current-status.md) and [GitH
 
 Keep concise contracts, decisions and acceptance summaries here. Keep new raw logs and temporary probes under ignored `.local/` or in linked GitHub Actions artifacts.
 
+## Current proposals
+
+- [F2 Inventory Basic](f2-inventory-basic-contract.md) proposes counted stock movements, balances, and corrections for the MVP.
+
 ## Historical evidence packages
 
 The following packages were removed from the current tree during the 2026-11-19 cleanup. Their original files remain available in Git history at the pinned implementation checkpoint and in the local hash-verified archive.
